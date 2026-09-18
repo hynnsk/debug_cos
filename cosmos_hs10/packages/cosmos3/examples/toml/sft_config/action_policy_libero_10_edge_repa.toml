@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# LIBERO-10 few-shot (3 demos/task) action-policy post-training of the mid-trained Cosmos3-Edge
+# + V-JEPA 2.1 representation alignment (REPA) on the MoT generation pathway (cosmos_hs10).
+#
+# Baseline recipe = cosmos_hs08 examples/toml/sft_config/action_policy_libero_10_edge.toml (2 GPUs, shard 2,
+# 128 windows/rank, 1000 iters, held-out validation every 100 iters). The only additions are the [model.repa]
+# block (experiment `action_policy_libero_edge_repa`) and the resulting extra loss / wandb curves
+# (repa_loss = 1 - cos, val/repa_loss, val/repa_cos_sim).
+#
+# DEFAULT SETTING: teacher ViT-B/16 (ema_encoder), MoT block 8 (of 28), target adapter variant 1 (avgpool),
+# loss weight 0.5, 256x256 teacher input per camera view, 16 future frames -> 8x16x16 tokens -> 4x5x5 per view.
+# Variants: *_l14.toml (block 14), *_vitl.toml (ViT-L/16), *_v2.toml (avgpool_conv), *_v3.toml (strided_conv).
+# Env: LIBERO_ROOT, BASE_CHECKPOINT_PATH, WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT, COSMOS_STORAGE (teacher ckpts under
+# $COSMOS_STORAGE/checkpoints/vjepa2_1/). See docs/action_policy_libero_repa_vjepa.md.
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_libero_edge_repa"
+project      = "cosmos3_action_libero"
+group        = "edge_libero10_fewshot_repa"
+name         = "hs10_repa_vitb_l8_avgpool_w5.0"
+wandb_mode   = "online"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+
+[model.repa]
+enabled         = true
+loss_weight     = 5.0
+layer_index     = 8                        # output of MoT block 8; next candidate 14
+teacher         = "vjepa2_1_vit_base_384"  # ViT-B/16 (D=768); "vjepa2_1_vit_large_384" = ViT-L/16 (D=1024)
+teacher_input_size = 256                   # native LIBERO resolution == V-JEPA 2.1 RoPE base grid
+target_adapter  = "avgpool"                # variant 1 | "avgpool_conv" (2) | "strided_conv" (3)
+target_grid_thw = [4, 5, 5]                # per-view MoT token grid (validated at runtime)
+
+[model.ema]
+enabled         = true
+rate            = 0.1
+iteration_shift = 0
+
+[model.parallelism]
+data_parallel_shard_degree     = 2
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 5.0e-05
+
+[scheduler]
+cycle_lengths = [2000]
+warm_up_steps = [200]
+
+[trainer]
+max_iter        = 2000
+logging_iter    = 20
+grad_accum_iter = 1
+run_validation          = true
+run_validation_on_start = true
+validation_iter         = 100
+max_val_iter            = 32
+
+[dataloader_train]
+max_samples_per_batch = 128
+episode_subset_path = "libero_10_3ep_per_task_seed42.json"
+
+[dataloader_val]
+max_samples_per_batch = 128
+episode_subset_path   = "libero_10_val_5ep_per_task_seed42_excl3ep.json"
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 500

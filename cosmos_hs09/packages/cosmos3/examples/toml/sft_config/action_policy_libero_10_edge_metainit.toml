@@ -1,0 +1,99 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# cosmos_hs09 -- META INIT -> FULL fine-tune. LIBERO-10 few-shot post-training (3 demos/task = 30 episodes) with the
+# ORIGINAL Cosmos3 recipe (full moe_gen + time_embedder + vae2llm/llm2vae + k_norm_und_for_gen + action heads
+# trainable; experiment action_policy_libero_edge), initialized from the LoRA-regime theta_meta
+# (action_fewshot_meta_lora_edge: LoRA adapters + heads + time_embedder).
+#
+# How the meta LoRA is used here: the model is built WITH the LoRA modules (same rank/alpha/targets as the meta
+# run), theta_meta is copied into them, and the adapters are then FROZEN via lr multiplier 0 -- they act as a
+# constant delta on moe_gen, i.e. exactly as if the meta-learned LoRA had been merged into the base weights.
+# moe_gen itself is fully fine-tuned as in the recipe. So the trainable set == the full-FT baseline
+# (cosmos_hs08 action_policy_libero_10_edge.toml: 2 GPUs, gbs 256, warmup 200, cycle 2000, lr 5e-5); the two
+# runs differ in (a) the init and (b) the action-head LR multiplier (5x fresh-head boost -> 1x, the heads are
+# meta-initialized). If you want a single-variable comparison, also run the baseline with 1x.
+# Held-out validation (50 disjoint demos) every 100 iters and at iteration 0 -> wandb val/*.
+# Env: LIBERO_ROOT, BASE_CHECKPOINT_PATH, WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT, META_ACTION_INIT_PATH.
+# See docs/action_fewshot_meta_lora.md.
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_libero_edge"
+project      = "cosmos3_action_libero"
+group        = "edge_libero10_fewshot"
+name         = "edge_libero10_3ep_fullft_metainit_2gpu_bs256_seed42"
+wandb_mode   = "online"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+# LoRA modules exist only to CARRY theta_meta's adapters (must match the meta run: rank 32, alpha 64, same targets).
+lora_enabled        = true
+lora_rank           = 32
+lora_alpha          = 64
+lora_target_modules = "q_proj_moe_gen,k_proj_moe_gen,v_proj_moe_gen,o_proj_moe_gen,mlp_moe_gen.up_proj,mlp_moe_gen.down_proj"
+lora_freeze_base    = false    # full fine-tune: the injector must not freeze moe_gen etc.; keys_to_select selects
+
+[model.ema]
+enabled         = true
+rate            = 0.1
+iteration_shift = 0
+
+[model.parallelism]
+data_parallel_shard_degree     = 4      # 4-GPU run: NPROC_PER_NODE=4 sr 4 48 ... (bs 64/rank -> global 256)
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 5.0e-05          # full-FT LR of the recipe (moe_gen 1.4B); the meta init does not change what moe_gen tolerates
+
+# Per-module LR multipliers (substring match, first match wins; entries below override the experiment's 5x).
+[optimizer.lr_multipliers]
+action2llm            = 1.0   # 5x in the fresh-head baseline; heads are meta-initialized here -> 1x
+llm2action            = 1.0
+action_modality_embed = 1.0
+lora_                 = 0.0   # freeze the meta-learned LoRA delta (== merged into moe_gen); moe_gen trains around it
+
+[scheduler]
+cycle_lengths = [2000]        # linear decay to 0 at max_iter (matches the cosmos_hs08 baseline)
+warm_up_steps = [200]
+
+[trainer]
+max_iter        = 2000
+logging_iter    = 20
+grad_accum_iter = 1              # global 256 = 64 windows/rank x 4 ranks. (2-GPU alternative: shard 2, bs 64, accum 2.)
+                                 # bs 128/rank OOMs on the 44 GiB cards (L40S gauguin, A40 haring/watteu); hs08_v2's
+                                 # bs 128 x 2 ranks only fits on 48 GiB A6000s (seurat/kahlo/vermeer/hockney).
+# held-out validation
+run_validation          = true
+run_validation_on_start = true   # iteration 0 = the meta-initialized model before any update
+validation_iter         = 200
+max_val_iter            = 16     # x 64 windows x 4 ranks = 4096 windows ~= half of the 50-episode val set per pass (same windows every time)
+
+[dataloader_train]
+max_samples_per_batch = 64       # per rank; x 4 ranks = global batch 256
+episode_subset_path   = "libero_10_3ep_per_task_seed42.json"          # 3 demos/task x 10 tasks = 30 episodes
+
+[dataloader_val]
+max_samples_per_batch = 64
+episode_subset_path   = "libero_10_val_5ep_per_task_seed42_excl3ep.json"  # 5 held-out demos/task, disjoint from train
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 500
+# Base DCP has no LoRA tensors and the action heads must start fresh -> skip them at load; meta init overwrites
+# heads + LoRA + time_embedder right afterwards.
+keys_to_skip_loading = ["net_ema.", "lora_", "action2llm", "llm2action", "action_modality_embed"]
+# ---- ours: meta-learned initialization ----
+meta_action_init_path                   = "${oc.env:META_ACTION_INIT_PATH}"
+meta_action_init_domain_id              = 5      # EMBODIMENT_TO_DOMAIN_ID["libero"]
+meta_action_init_include_modality_embed = true
+meta_action_init_include_lora           = true
+meta_action_init_include_time_embedder  = true

@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# Cross-embodiment few-shot META-TRAINING of the Cosmos3-Edge action heads (cosmos_hs07).
+# Experiment: action_fewshot_meta_edge; entry point: cosmos_framework.scripts.train_action_meta
+# (NOT scripts.train). Learns one shared init theta_meta of action2llm / llm2action /
+# action_modality_embed with first-order MAML over RT-1, Bridge V2, RoboMIND-UR, RoboMIND-Franka
+# and MolmoAct2-YAM (embodiment-uniform, K demonstrations per support set). The backbone is frozen.
+# Output: <IMAGINAIRE_OUTPUT_ROOT>/cosmos3_action_meta/fewshot_meta/<name>/meta_action_init.pt,
+# consumed by action_policy_libero_10_edge_metainit.toml via checkpoint.meta_action_init_path.
+# Env: ROBOT_FEWSHOT_ROOT, BASE_CHECKPOINT_PATH, WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT.
+# See docs/action_fewshot_meta.md.
+
+[job]
+task         = "vfm"
+experiment   = "action_fewshot_meta_edge"
+project      = "cosmos3_action_meta"
+group        = "fewshot_meta"
+name         = "edge_meta_fomaml_k5q5_w8_seed42"
+wandb_mode   = "online"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[trainer]
+max_iter     = 2000
+logging_iter = 10
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 100
+
+# ---- meta-learning knobs (docs/action_fewshot_meta.md) -------------------------------------
+[custom.meta]
+# episodic sampler: K support demos x w windows, Q query demos x w windows, per meta-episode
+k_shot                = 5
+q_query               = 5
+windows_per_demo      = 8
+disjoint_tasks        = "auto"     # support/query task sets disjoint when the embodiment has >= 4 tasks
+max_samples_per_batch = 40         # windows per packed micro-batch (40 = one support / one query batch)
+num_workers           = 4
+loader_timeout_s      = 1800       # a stalled DataLoader worker raises instead of hanging all ranks
+seed                  = 42
+# inner loop (support): SGD on fp32 fast weights of the scratch DomainAwareLinear row
+inner_steps           = 5
+inner_lr              = 0.05
+inner_optimizer       = "sgd"
+inner_grad_clip       = 1.0
+# outer loop (query): AdamW on theta_meta with the all-reduced first-order meta-gradient
+meta_lr               = 1.0e-4
+meta_grad_clip        = 1.0
+meta_lr_warmup_iters  = 50
+meta_lr_min_ratio     = 0.1
+loss_mode             = "action"   # flow-matching action loss only (ANIL-style); "total" adds the vision loss
+scratch_domain_id     = 31         # unused DomainAwareLinear row that carries the fast weights
+include_modality_embed = true
+init_source           = "fresh"    # fresh | checkpoint_row | checkpoint_mean | zeros
+eval_zero_shot_every  = 10

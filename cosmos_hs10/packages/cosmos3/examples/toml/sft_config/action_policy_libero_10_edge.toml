@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# LIBERO-10 action-policy SFT run config for the `action_policy_libero_edge`
+# experiment. Train on libero_10 alone (HSDP 2x8, global batch 2048).
+#
+# FEW-SHOT variant (cosmos_hs04): trains on a FIXED 30-demonstration subset of
+# libero_10 (3 randomly sampled demos per task x 10 tasks, seed 42; the exact
+# episode indices are frozen in
+# cosmos_framework/data/generator/action/episode_subsets/libero_10_3ep_per_task_seed42.json)
+# instead of all 379 demos. Everything else matches the full-data recipe.
+# (cosmos_hs03 = the 10-demos/task variant, libero_10_10ep_per_task_seed42.json.)
+# Remove [dataloader_train].episode_subset_path to train on the full suite.
+# Env: LIBERO_ROOT, BASE_CHECKPOINT_PATH, WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT.
+# See docs/action_policy_libero_sft.md.
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_libero_edge"
+project      = "cosmos3_action_libero"
+group        = "edge_libero10_fewshot"
+name         = "hs08_v3"
+wandb_mode   = "online"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+
+[model.ema]
+enabled         = true
+rate            = 0.1
+iteration_shift = 0
+
+[model.parallelism]
+data_parallel_shard_degree     = 2
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 5.0e-05
+
+[scheduler]
+cycle_lengths = [1000]
+warm_up_steps = [200]
+
+[trainer]
+max_iter        = 1000
+logging_iter    = 20
+grad_accum_iter = 1
+# Held-out validation (50 LIBERO-10 demos disjoint from the 30 training demos; docs/action_policy_libero_posttrain.md)
+# -> wandb val/loss_total, val/flow_matching_loss_action, val/flow_matching_loss_vision (+ val/loss from wandb_val).
+run_validation          = true
+run_validation_on_start = true   # iteration 0 = the fresh-init model before any update
+validation_iter         = 100
+max_val_iter            = 32     # x 128 windows x 2 ranks ~= the whole 50-episode val set per pass
+
+[dataloader_train]
+max_samples_per_batch = 128
+# Fixed few-shot subset: 3 demos/task x 10 tasks = 30 episodes (see header).
+episode_subset_path = "libero_10_3ep_per_task_seed42.json"
+
+[dataloader_val]
+max_samples_per_batch = 128
+episode_subset_path   = "libero_10_val_5ep_per_task_seed42_excl3ep.json"  # 5 held-out demos/task, disjoint from train
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 500

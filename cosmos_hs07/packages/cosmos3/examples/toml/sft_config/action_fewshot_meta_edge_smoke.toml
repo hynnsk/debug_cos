@@ -1,0 +1,50 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# SMOKE variant of action_fewshot_meta_edge.toml: tiny meta-episodes, 3 iterations, no W&B,
+# only 2 YAM repos. Verifies model load + VAE encode + inner/outer loop end to end on 1-2 GPUs.
+#   TOML_FILE=examples/toml/sft_config/action_fewshot_meta_edge_smoke.toml NPROC_PER_NODE=1 \
+#     sr 1 48 examples/launch_meta_action_fewshot_edge.sh
+
+[job]
+task         = "vfm"
+experiment   = "action_fewshot_meta_edge"
+project      = "cosmos3_action_meta"
+group        = "smoke"
+name         = "edge_meta_smoke"
+wandb_mode   = "disabled"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[trainer]
+max_iter     = 3
+logging_iter = 1
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 1
+
+[custom.meta]
+k_shot                = 2
+q_query               = 2
+windows_per_demo      = 2
+max_samples_per_batch = 4
+num_workers           = 2
+inner_steps           = 2
+inner_lr              = 0.05
+meta_lr               = 1.0e-4
+meta_lr_warmup_iters  = 1
+eval_zero_shot_every  = 1
+seed                  = 42
+
+[custom.meta.dataset_kwargs.molmoact2_yam]
+max_repos = 2

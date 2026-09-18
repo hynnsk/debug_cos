@@ -1,0 +1,83 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# LIBERO-10 action-policy SFT run config for the `action_policy_libero_edge`
+# experiment. Train on libero_10 alone (HSDP 2x8, global batch 2048).
+#
+# ONE-SHOT variant (cosmos_hs05): trains on a FIXED 10-demonstration subset of
+# libero_10 (1 randomly sampled demo per task x 10 tasks, seed 42; the exact
+# episode indices are frozen in
+# cosmos_framework/data/generator/action/episode_subsets/libero_10_1ep_per_task_seed42.json)
+# instead of all 379 demos. (cosmos_hs03 = 10/task, cosmos_hs04 = 3/task.)
+#
+# One-shot optimization recipe (differs from the full-data recipe on purpose):
+#   * 10 episodes = only ~2.5k heavily overlapping 16-frame windows (adjacent windows
+#     share 15/16 frames). The full recipe's 512 samples/iter (128 x 4 GPUs) would
+#     cover ~20% of the whole set per step: a near full-batch gradient with no
+#     mini-batch noise and, at 2000 iters, ~400 epochs of pure memorization.
+#   * -> global batch 128 (64 x 2 GPUs), 1000 iters (~50 epochs, 128k samples;
+#     the full recipe peaks at ~768k samples / ~8 epochs), lr 2e-5 (down from 5e-5:
+#     4x smaller batch + we want the mid-trained weights to drift less), warmup 100,
+#     linear decay to 0 at iter 1000 (cycle_lengths == max_iter: anneal instead
+#     of holding peak LR on 10 demos), checkpoints every 100 iters.
+#   * The training loss is a flow-matching loss with a noise floor and CANNOT show
+#     overfitting; pick the checkpoint by closed-loop success rate (sweep the
+#     iter_000000100..1000 checkpoints), not by loss.
+#   * 2 GPUs: [model.parallelism].data_parallel_shard_degree = 2 must equal the
+#     torchrun world size (launch with a 2-GPU allocation / NPROC_PER_NODE=2).
+#   * DataLoader workers: the shuffle dataset shards EPISODES over ranks x workers,
+#     so ranks x num_workers must be <= 10 episodes (it raises otherwise). The
+#     experiment config uses num_workers=4 -> 2 x 4 = 8 shards. On 4 GPUs drop
+#     num_workers to 2 (4 x 4 = 16 > 10 would starve a rank and hang NCCL).
+# Remove [dataloader_train].episode_subset_path to train on the full suite.
+# Env: LIBERO_ROOT, BASE_CHECKPOINT_PATH, WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT.
+# See docs/action_policy_libero_sft.md.
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_libero_edge"
+project      = "cosmos3_action_libero"
+group        = "edge_libero10_fewshot"
+name         = "edge_libero10_1ep_per_task_sft_seed42"
+wandb_mode   = "online"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+
+[model.ema]
+enabled         = true
+rate            = 0.1
+iteration_shift = 0
+
+[model.parallelism]
+data_parallel_shard_degree     = 2   # == number of GPUs (2-GPU run)
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 2.0e-05   # full-data recipe: 5e-5 at global batch 512 (see header)
+
+[scheduler]
+cycle_lengths = [1000]   # == max_iter -> linear decay to 0 by the end (anneal)
+warm_up_steps = [100]
+
+[trainer]
+max_iter        = 1000
+logging_iter    = 10
+grad_accum_iter = 1
+
+[dataloader_train]
+max_samples_per_batch = 64   # global batch = 64 x 2 GPUs = 128 (full recipe: 128 x 4 = 512)
+# Fixed one-shot subset: 1 demo/task x 10 tasks = 10 episodes (see header).
+episode_subset_path = "libero_10_1ep_per_task_seed42.json"
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 100   # dense checkpoints: choose the best one by closed-loop eval

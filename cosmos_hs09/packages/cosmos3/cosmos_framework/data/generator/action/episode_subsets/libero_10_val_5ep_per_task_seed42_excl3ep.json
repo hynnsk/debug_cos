@@ -1,0 +1,125 @@
+{
+  "description": "Fixed LIBERO subset: 5 randomly sampled demonstration episodes per task (random.Random(seed=42), tasks in ascending task_index order, candidates sorted by episode_index); 30 excluded episodes (disjoint from the given subset files); consumed by LIBEROLeRobotDataset(episode_subset_path=...).",
+  "seed": 42,
+  "episodes_per_task": 5,
+  "n_excluded": 30,
+  "n_tasks": 10,
+  "n_episodes_total_in_dataset": 379,
+  "n_episodes": 50,
+  "tasks": {
+    "0": {
+      "task": "turn on the stove and put the moka pot on it",
+      "n_available": 38,
+      "episodes": [
+        40,
+        87,
+        182,
+        184,
+        202
+      ]
+    },
+    "1": {
+      "task": "put both the alphabet soup and the tomato sauce in the basket",
+      "n_available": 30,
+      "episodes": [
+        39,
+        69,
+        308,
+        334,
+        359
+      ]
+    },
+    "2": {
+      "task": "put the white mug on the left plate and put the yellow and white mug on the right plate",
+      "n_available": 35,
+      "episodes": [
+        18,
+        22,
+        85,
+        301,
+        367
+      ]
+    },
+    "3": {
+      "task": "put the black bowl in the bottom drawer of the cabinet and close it",
+      "n_available": 32,
+      "episodes": [
+        15,
+        89,
+        155,
+        169,
+        177
+      ]
+    },
+    "4": {
+      "task": "pick up the book and place it in the back compartment of the caddy",
+      "n_available": 38,
+      "episodes": [
+        158,
+        290,
+        299,
+        366,
+        374
+      ]
+    },
+    "5": {
+      "task": "put the yellow and white mug in the microwave and close it",
+      "n_available": 31,
+      "episodes": [
+        2,
+        123,
+        282,
+        285,
+        324
+      ]
+    },
+    "6": {
+      "task": "put the white mug on the plate and put the chocolate pudding to the right of the plate",
+      "n_available": 33,
+      "episodes": [
+        68,
+        108,
+        176,
+        212,
+        252
+      ]
+    },
+    "7": {
+      "task": "put both the cream cheese box and the butter in the basket",
+      "n_available": 46,
+      "episodes": [
+        53,
+        56,
+        116,
+        175,
+        215
+      ]
+    },
+    "8": {
+      "task": "put both moka pots on the stove",
+      "n_available": 26,
+      "episodes": [
+        46,
+        73,
+        106,
+        270,
+        376
+      ]
+    },
+    "9": {
+      "task": "put both the alphabet soup and the cream cheese box in the basket",
+      "n_available": 40,
+      "episodes": [
+        29,
+        82,
+        222,
+        265,
+        289
+      ]
+    }
+  },
+  "excluded_from": [
+    "libero_10_3ep_per_task_seed42.json"
+  ],
+  "source_root_basename": "libero_10"
+}

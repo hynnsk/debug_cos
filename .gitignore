@@ -1,0 +1,123 @@
+# =====================================================================
+# Root .gitignore for the cosmos_hs* research workspace
+# Goal: push source/config only; keep checkpoints, data, caches, run
+# outputs and logs out of the repo.
+# =====================================================================
+
+# ---- Top-level directories that must never be pushed ----------------
+# Checkpoints, datasets, HF/torch/triton/uv caches, run outputs (hundreds of GB)
+cosmos_storage/
+# Ad-hoc smoke-test scripts and their SLURM .out/.log files
+_scratch/
+# Third-party clone (has its own .git; install from upstream instead)
+LIBERO/
+# Upstream NVIDIA/cosmos benchmark assets, unmodified and identical in every
+# cosmos*/ copy (~140 MB each). Delete this line if you edit anything in there.
+cosmos*/evaluation/
+
+# ---- Secrets ---------------------------------------------------------
+wandb_api
+**/env.sh
+.env
+.env.*
+*.key
+*.pem
+
+# ---- Training / eval outputs inside each cosmos_hs*/ -----------------
+# e.g. cosmos_hs10/packages/cosmos3/outputs/  (144 GB)
+**/outputs/
+**/output/
+**/checkpoints/
+**/ckpt/
+**/ckpts/
+**/runs/
+**/results/
+**/wandb/
+**/tensorboard/
+**/tb_logs/
+**/lightning_logs/
+
+# ---- Logs -----------------------------------------------------------
+**/logs/
+**/log/
+*.log
+*.out
+*.err
+*.srun.log
+slurm-*.out
+nohup.out
+
+# ---- Model weights / tensors / large data files ----------------------
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.distcp
+*.bin
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.pkl
+*.pickle
+*.parquet
+*.arrow
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+*.7z
+
+# ---- Media (example videos in cookbooks/**/assets are ~130 MB per copy) ----
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+*.gif
+
+# ---- Python / tooling caches -----------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyre/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+.ipynb_checkpoints/
+.venv/
+venv/
+env/
+.python-version.local
+
+# ---- Compiled / kernel caches ---------------------------------------
+.triton/
+.torch/
+.cache/
+*.cubin
+*.ptx
+
+# ---- Editors / OS ---------------------------------------------------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ---- Temp -----------------------------------------------------------
+tmp/
+temp/
+*.tmp
+*.temp
+core.*
