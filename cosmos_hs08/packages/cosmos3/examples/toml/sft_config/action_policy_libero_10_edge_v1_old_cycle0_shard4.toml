@@ -13,16 +13,14 @@
 # Remove [dataloader_train].episode_subset_path to train on the full suite.
 # Env: LIBERO_ROOT, BASE_CHECKPOINT_PATH, WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT.
 # See docs/action_policy_libero_sft.md.
-#
-# SWEEP v1: LR x2 (1e-4; heads x2.5 = 2.5e-4 unchanged), 2000 iters, linear anneal to 0 at 2000. 2 GPUs (shard 2) x 128 = global batch 256, warmup 200, wandb offline.
 
 [job]
 task         = "vfm"
 experiment   = "action_policy_libero_edge"
 project      = "cosmos3_action_libero"
 group        = "edge_libero10_fewshot"
-name         = "hs08_cfgv1_lr1e-4_cyc2000_it2000"
-wandb_mode   = "offline"
+name         = "edge_libero10_3ep_per_task_sft_seed42_cycle0"
+wandb_mode   = "online"
 
 [model]
 precision = "bfloat16"
@@ -34,7 +32,7 @@ rate            = 0.1
 iteration_shift = 0
 
 [model.parallelism]
-data_parallel_shard_degree     = 2
+data_parallel_shard_degree     = 4
 data_parallel_replicate_degree = 1
 
 [model.activation_checkpointing]
@@ -45,37 +43,22 @@ save_ops_regex = ["fmha"]
 vae_path = "${oc.env:WAN_VAE_PATH}"
 
 [optimizer]
-lr = 1.0e-04
-
-[optimizer.lr_multipliers]
-action2llm            = 2.5
-llm2action            = 2.5
-action_modality_embed = 2.5
+lr = 5.0e-05
 
 [scheduler]
 cycle_lengths = [2000]
-warm_up_steps = [200]
+warm_up_steps = [500]
 
 [trainer]
 max_iter        = 2000
 logging_iter    = 20
 grad_accum_iter = 1
-# Held-out validation (50 LIBERO-10 demos disjoint from the 30 training demos; docs/action_policy_libero_posttrain.md)
-# -> wandb val/loss_total, val/flow_matching_loss_action, val/flow_matching_loss_vision (+ val/loss from wandb_val).
-run_validation          = true
-run_validation_on_start = true   # iteration 0 = the fresh-init model before any update
-validation_iter         = 200
-max_val_iter            = 16     # x 128 windows x 2 ranks ~= the whole 50-episode val set per pass
 
 [dataloader_train]
 max_samples_per_batch = 128
 # Fixed few-shot subset: 3 demos/task x 10 tasks = 30 episodes (see header).
 episode_subset_path = "libero_10_3ep_per_task_seed42.json"
 
-[dataloader_val]
-max_samples_per_batch = 128
-episode_subset_path   = "libero_10_val_5ep_per_task_seed42_excl3ep.json"  # 5 held-out demos/task, disjoint from train
-
 [checkpoint]
 load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
-save_iter = 500
+save_iter = 250

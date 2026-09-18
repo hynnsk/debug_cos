@@ -57,8 +57,8 @@ grad_accum_iter = 1
 # -> wandb val/loss_total, val/flow_matching_loss_action, val/flow_matching_loss_vision (+ val/loss from wandb_val).
 run_validation          = true
 run_validation_on_start = true   # iteration 0 = the fresh-init model before any update
-validation_iter         = 100
-max_val_iter            = 32     # x 128 windows x 2 ranks ~= the whole 50-episode val set per pass
+validation_iter         = 200
+max_val_iter            = 16     # x 128 windows x 2 ranks ~= the whole 50-episode val set per pass
 
 [dataloader_train]
 max_samples_per_batch = 128
