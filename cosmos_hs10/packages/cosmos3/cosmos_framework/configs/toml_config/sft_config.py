@@ -308,6 +308,13 @@ class RepaTomlConfig(BaseModel):
     loss_weight: Optional[float] = Field(
         default=None, description="Weight of the unweighted cosine loss (1 - cos) in the total loss. Recipe default 0.5."
     )
+    relation_loss_weight: Optional[float] = Field(
+        default=None,
+        description="Weight of the VideoREPA-style token-relation loss (student vs teacher pairwise cosine-similarity maps). 0 = log only.",
+    )
+    relation_distance: Optional[str] = Field(
+        default=None, description="Entry-wise distance of the relation loss: 'l2' (squared, default) or 'l1' (absolute)."
+    )
     layer_index: Optional[int] = Field(
         default=None,
         description="MoT decoder blocks applied before the aligned hidden state is read (8 = output of block 8 of 28).",
@@ -329,7 +336,12 @@ class RepaTomlConfig(BaseModel):
     target_grid_thw: Optional[list[int]] = Field(
         default=None, description="Variant 3 per-view target grid [T, H, W]; LIBERO-10 concat_view = [4, 5, 5]."
     )
-    projector_hidden_dim: Optional[int] = Field(default=None, description="REPA MLP hidden width (2048).")
+    projector_type: Optional[str] = Field(
+        default=None, description="Student-side projector: 'mlp' (REPA 3-layer SiLU MLP, default) or 'linear' (one Linear)."
+    )
+    projector_hidden_dim: Optional[int] = Field(
+        default=None, description="REPA MLP hidden width (2048); ignored for projector_type='linear'."
+    )
     num_views: Optional[int] = Field(default=None, description="Camera views concatenated along the canvas width (2).")
 
 

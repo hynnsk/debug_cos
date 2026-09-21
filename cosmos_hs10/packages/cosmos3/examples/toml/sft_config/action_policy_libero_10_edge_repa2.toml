@@ -20,7 +20,7 @@ task         = "vfm"
 experiment   = "action_policy_libero_edge_repa"
 project      = "cosmos3_action_libero"
 group        = "edge_libero10_fewshot_repa"
-name         = "hs10_repa_vitb_l8_avgpool_w0.5"
+name         = "hs10_repa_vitb_l28_avgpool_w5.0"
 wandb_mode   = "online"
 
 [model]
@@ -30,7 +30,7 @@ max_num_tokens_after_packing = 45056
 [model.repa]
 enabled         = true
 loss_weight     = 0.5
-layer_index     = 8                        # output of MoT block 8; next candidate 14
+layer_index     = 28                        # output of MoT block 8; next candidate 14
 teacher         = "vjepa2_1_vit_base_384"  # ViT-B/16 (D=768); "vjepa2_1_vit_large_384" = ViT-L/16 (D=1024)
 teacher_input_size = 256                   # native LIBERO resolution == V-JEPA 2.1 RoPE base grid
 target_adapter  = "avgpool"                # variant 1 | "avgpool_conv" (2) | "strided_conv" (3)

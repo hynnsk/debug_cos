@@ -311,6 +311,46 @@ def ensure_world_communicator(timeout_sec: float | None = None) -> None:
     log.info(f"World communicator ready in {time.monotonic() - start:.2f} s")
 
 
+def warm_up_checkpoint_collectives() -> None:
+    """Run the object collectives of ``torch.distributed.checkpoint`` once, while GPU memory is plentiful.
+
+    ``dcp.save`` / ``dcp.load`` exchange their plans over the world group with ``gather_object``,
+    ``scatter_object_list`` and ``broadcast_object_list``. On NCCL the gather/scatter are send/recv based,
+    and NCCL allocates the transport buffers of a peer pair with ``cudaMalloc`` (outside PyTorch's caching
+    allocator) the first time that pair talks. A training loop that otherwise only runs FSDP all-gather /
+    reduce-scatter and all_reduce reaches that first time at the first checkpoint save, i.e. at peak memory:
+    with the caching allocator holding everything the card has, NCCL's allocation fails and the job dies
+    with ``NCCL Error 1: unhandled cuda error`` (seen on the 2-GPU LIBERO recipes at ``save_iter``).
+    Running the same collectives here makes NCCL build those buffers at start-up; they live for the whole job.
+    """
+    if not (dist.is_available() and dist.is_initialized()):
+        return
+    world_size = get_world_size()
+    if world_size < 2:
+        return
+
+    rank = get_rank()
+    on_cuda = dist.get_backend() == "nccl"
+    payload = {"rank": rank}
+    start = time.monotonic()
+
+    gathered: list[Any] | None = [None] * world_size if rank == 0 else None
+    dist.gather_object(payload, object_gather_list=gathered, dst=0)
+    scattered: list[Any] = [None]
+    dist.scatter_object_list(scattered, gathered if rank == 0 else None, src=0)
+    broadcast_list: list[Any] = [payload if rank == 0 else None]
+    dist.broadcast_object_list(broadcast_list, src=0)
+    if on_cuda:
+        torch.cuda.synchronize()
+
+    if scattered[0] != payload or broadcast_list[0] != {"rank": 0}:
+        raise RuntimeError(
+            f"[RANK {rank}] Checkpoint collective warm-up returned scatter={scattered[0]!r} "
+            f"broadcast={broadcast_list[0]!r}; the world process group is not consistent."
+        )
+    log.info(f"Checkpoint collectives (gather/scatter/broadcast object) warmed up in {time.monotonic() - start:.2f} s")
+
+
 def rank0_first(func: Callable) -> Callable:
     """run the function on rank 0 first, then on other ranks."""
 

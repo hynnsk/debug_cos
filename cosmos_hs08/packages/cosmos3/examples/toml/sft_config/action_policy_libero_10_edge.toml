@@ -19,8 +19,8 @@ task         = "vfm"
 experiment   = "action_policy_libero_edge"
 project      = "cosmos3_action_libero"
 group        = "edge_libero10_fewshot"
-name         = "hs08_v3"
-wandb_mode   = "online"
+name         = "hs08_v2"
+wandb_mode   = "offline"
 
 [model]
 precision = "bfloat16"
@@ -46,11 +46,11 @@ vae_path = "${oc.env:WAN_VAE_PATH}"
 lr = 5.0e-05
 
 [scheduler]
-cycle_lengths = [1000]
+cycle_lengths = [2000]
 warm_up_steps = [200]
 
 [trainer]
-max_iter        = 1000
+max_iter        = 2000
 logging_iter    = 20
 grad_accum_iter = 1
 # Held-out validation (50 LIBERO-10 demos disjoint from the 30 training demos; docs/action_policy_libero_posttrain.md)

@@ -4,7 +4,13 @@
 import pytest
 import torch
 
-from cosmos_framework.model.generator.repa.adapters import repa_cosine_loss
+from cosmos_framework.model.generator.repa.adapters import (
+    RepaLinearProjector,
+    RepaProjector,
+    repa_cosine_loss,
+    repa_relation_loss,
+    token_relation_matrix,
+)
 from cosmos_framework.model.generator.repa.alignment import RepaAlignmentHead
 
 D_MOT, D_T = 16, 6
@@ -12,11 +18,12 @@ TEACHER_GRID = (8, 16, 16)
 TOKEN_SHAPE = (5, 5, 10)  # LIBERO-10 concat_view: 5 latent frames x 5 x 10 tokens (two 5x5 views)
 
 
-def _head(variant: str = "avgpool") -> RepaAlignmentHead:
+def _head(variant: str = "avgpool", projector_type: str = "mlp") -> RepaAlignmentHead:
     head = RepaAlignmentHead(
         hidden_size=D_MOT,
         teacher_embed_dim=D_T,
         projector_hidden_dim=32,
+        projector_type=projector_type,
         target_adapter=variant,
         teacher_grid_thw=TEACHER_GRID,
         target_grid_thw=(4, 5, 5),
@@ -51,6 +58,48 @@ def test_forward_shapes_and_counts(variant):
     assert all(p.grad is not None for p in head.projector.parameters())
     if variant != "avgpool":
         assert all(p.grad is not None for p in head.target_adapter.parameters())
+
+
+def test_projector_type_selects_mlp_or_linear_head():
+    assert isinstance(_head().projector, RepaProjector)  # default = REPA MLP
+    head = _head("avgpool", projector_type="linear")
+    assert isinstance(head.projector, RepaLinearProjector) and head.projector_type == "linear"
+    hidden, shapes, nfi, teacher = _inputs()
+    out = head(hidden, shapes, nfi, teacher)
+    n = 3 * 4 * 5 * 10
+    assert out["pred"].shape == (n, D_T) and out["target"].shape == (n, D_T)
+    # pred is exactly the affine image of the selected tokens (no hidden layer / nonlinearity in between)
+    rows = torch.cat([g.index_select(0, i).reshape(-1, D_MOT) for g, i in zip(hidden.view(3, 5, 5, 10, D_MOT), nfi)])
+    torch.testing.assert_close(out["pred"], head.projector.fc(rows))
+    loss, _ = repa_cosine_loss(out["pred"], out["target"])
+    loss.backward()
+    assert all(p.grad is not None for p in head.projector.parameters())
+    # the probe path (no alignable tokens) still touches the linear projector's parameters
+    probe = head.probe(hidden.device, hidden.dtype)
+    assert probe.requires_grad and float(probe) == 0.0
+    with pytest.raises(ValueError, match="projector_type"):
+        _head("avgpool", projector_type="conv")
+
+
+def test_relation_loss_consumes_head_outputs_per_sample():
+    head = _head("avgpool")
+    hidden, shapes, nfi, teacher = _inputs()
+    out = head(hidden, shapes, nfi, teacher)
+    counts = out["num_tokens_per_sample"]
+    loss = repa_relation_loss(out["pred"], out["target"], counts)
+    # relation maps are formed within each sample: 3 windows x (4*5*10)^2 entries
+    per_sample = [
+        (token_relation_matrix(p) - token_relation_matrix(t)).square().mean()
+        for p, t in zip(torch.split(out["pred"], counts), torch.split(out["target"], counts))
+    ]
+    torch.testing.assert_close(loss, torch.stack(per_sample).mean(), atol=1e-6, rtol=0)
+    # a teacher-matching student (pred == target) gives 0 for the relation term
+    torch.testing.assert_close(
+        repa_relation_loss(out["target"], out["target"], counts), torch.tensor(0.0), atol=1e-6, rtol=0
+    )
+    loss.backward()
+    assert hidden.grad is not None and torch.isfinite(hidden.grad).all()
+    assert all(p.grad is not None for p in head.projector.parameters())
 
 
 def test_target_geometry_views_frames_and_noisy_selection():

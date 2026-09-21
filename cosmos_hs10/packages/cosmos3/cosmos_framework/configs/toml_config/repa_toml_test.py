@@ -24,6 +24,30 @@ def test_repa_tomls_validate_and_route_to_model_config_repa(toml_path: Path):
     assert any(o.startswith("model.config.repa.layer_index=") for o in overrides)
     assert any(o.startswith("model.config.repa.target_adapter=") for o in overrides)
     assert "model.config.repa.target_grid_thw=[4,5,5]" in overrides
+    # Optional knobs route 1:1 (present in the TOML <-> present as an override; absent -> experiment default).
+    repa_raw = raw["model"]["repa"]
+    for key in ("projector_type", "relation_loss_weight", "relation_distance"):
+        got = [o for o in overrides if o.startswith(f"model.config.repa.{key}=")]
+        assert got == ([f"model.config.repa.{key}={repa_raw[key]}"] if key in repa_raw else []), key
+    # pinned recipes: v4 = linear projector, v5 = VideoREPA-style token-relation loss only (direct cos weight 0)
+    if toml_path.stem.endswith("_v4"):
+        assert repa_raw["projector_type"] == "linear"
+    if toml_path.stem.endswith("_v5"):
+        assert (repa_raw["loss_weight"], repa_raw["relation_loss_weight"], repa_raw["relation_distance"]) == (0.0, 5.0, "l2")
+        assert repa_raw.get("projector_type", "mlp") == "mlp"
+
+
+def test_repa_projector_type_is_validated_by_the_model_config():
+    from cosmos_framework.configs.base.defaults.model_config import RepaConfig
+
+    assert RepaConfig().projector_type == "mlp"
+    assert RepaConfig(projector_type="linear").projector_type == "linear"
+    with pytest.raises(ValueError):
+        RepaConfig(projector_type="conv")
+    assert RepaConfig().relation_loss_weight == 0.0 and RepaConfig().relation_distance == "l2"
+    assert RepaConfig(relation_distance="l1").relation_distance == "l1"
+    with pytest.raises(ValueError):
+        RepaConfig(relation_distance="cosine")
 
 
 def test_vlm_task_skips_repa_block():

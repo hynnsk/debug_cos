@@ -27,7 +27,7 @@ import torch
 import torch.nn as nn
 
 from cosmos_framework.model.generator.repa.adapters import (
-    RepaProjector,
+    build_projector,
     build_target_adapter,
     concat_views_along_width,
     split_flat_tokens,
@@ -64,6 +64,7 @@ class RepaAlignmentHead(nn.Module):
         hidden_size: int,
         teacher_embed_dim: int,
         projector_hidden_dim: int = 2048,
+        projector_type: str = "mlp",
         target_adapter: str = "avgpool",
         adapter_kernel_size: int = 3,
         adapter_depthwise: bool = True,
@@ -78,7 +79,9 @@ class RepaAlignmentHead(nn.Module):
         self.teacher_grid_thw = tuple(int(v) for v in teacher_grid_thw)
         self.target_grid_thw = tuple(int(v) for v in target_grid_thw)
         self.target_adapter_name = target_adapter
-        self.projector = RepaProjector(self.hidden_size, int(projector_hidden_dim), self.teacher_embed_dim)
+        self.projector_type = projector_type
+        # "mlp": REPA's Linear-SiLU-Linear-SiLU-Linear (hidden ``projector_hidden_dim``); "linear": one Linear.
+        self.projector = build_projector(projector_type, self.hidden_size, int(projector_hidden_dim), self.teacher_embed_dim)
         self.target_adapter = build_target_adapter(
             target_adapter,
             self.teacher_embed_dim,

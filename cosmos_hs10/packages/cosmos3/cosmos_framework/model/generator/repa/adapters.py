@@ -9,7 +9,9 @@ onto the patch features of a frozen self-supervised encoder and maximizes their 
 Here the student is the Cosmos3 MoT generation pathway (video tokens at one decoder layer) and the
 teacher is the V-JEPA 2.1 ``ema_encoder``. This module holds
 
-* :class:`RepaProjector` -- the REPA 3-layer SiLU MLP (student side).
+* :class:`RepaProjector` -- the REPA 3-layer SiLU MLP (student side, ``projector_type="mlp"``) and
+  :class:`RepaLinearProjector` -- a single ``Linear`` in its place (``projector_type="linear"``, the v4 recipe);
+  :func:`build_projector` picks one by name.
 * three *target adapters* that bring the teacher token grid (per camera view ``T_t x H_p x W_p``, e.g.
   ``8x16x16`` for 16 frames at 256px) onto the MoT video-token grid of that view (e.g. ``4x5x5``):
 
@@ -121,6 +123,37 @@ class RepaProjector(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:  # [N,in_dim] -> [N,out_dim]
         return self.fc3(self.act(self.fc2(self.act(self.fc1(x)))))
+
+
+class RepaLinearProjector(nn.Module):
+    """Linear REPA projection head: a single ``Linear(in_dim, out_dim)`` (no hidden layer, no nonlinearity).
+
+    The aligned MoT hidden state is then constrained to be an *affine* image of the teacher features instead of an
+    arbitrary MLP-reachable one, i.e. the student layer itself has to become V-JEPA-like.
+    """
+
+    def __init__(self, in_dim: int, out_dim: int) -> None:
+        super().__init__()
+        self.fc = nn.Linear(in_dim, out_dim)
+
+    def reset_parameters(self) -> None:
+        self.fc.reset_parameters()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:  # [N,in_dim] -> [N,out_dim]
+        return self.fc(x)
+
+
+PROJECTOR_TYPES = ("mlp", "linear")
+
+
+def build_projector(projector_type: str, in_dim: int, hidden_dim: int, out_dim: int) -> nn.Module:
+    """``"mlp"`` -> :class:`RepaProjector` (``hidden_dim`` wide), ``"linear"`` -> :class:`RepaLinearProjector`
+    (``hidden_dim`` is ignored)."""
+    if projector_type == "mlp":
+        return RepaProjector(in_dim, hidden_dim, out_dim)
+    if projector_type == "linear":
+        return RepaLinearProjector(in_dim, out_dim)
+    raise ValueError(f"Unknown REPA projector_type {projector_type!r}; expected one of {PROJECTOR_TYPES}")
 
 
 # --------------------------------------------------------------------------------------------------
@@ -269,6 +302,60 @@ def repa_cosine_loss(pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-6
     cos = F.cosine_similarity(pred.float(), target.float(), dim=-1, eps=eps)  # [N]
     cos_mean = cos.mean()
     return 1.0 - cos_mean, cos_mean.detach()
+
+
+RELATION_DISTANCES = ("l2", "l1")
+
+
+def token_relation_matrix(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """Pairwise cosine similarities of the rows of ``x`` (``[..., n, D]`` -> ``[..., n, n]``, float32)."""
+    xn = F.normalize(x.float(), dim=-1, eps=eps)
+    return xn @ xn.transpose(-1, -2)
+
+
+def repa_relation_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    num_tokens_per_sample: Sequence[int],
+    distance: str = "l2",
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Token-relation distillation (VideoREPA-style): match the *pairwise cosine-similarity map* of the projected
+    student tokens to that of the teacher tokens, sample by sample.
+
+    ``pred`` / ``target``: ``[N,D]`` rows in packing order (sample-major); ``num_tokens_per_sample`` says how many
+    consecutive rows belong to each sample (``RepaAlignmentHead`` returns them as ``num_tokens_per_sample``). For
+    every sample the ``n_i x n_i`` relation matrices ``R = normalize(x) normalize(x)^T`` of both sides are compared
+    entry-wise with the squared (``"l2"``) or absolute (``"l1"``) difference and the result is the mean over all
+    relation entries of all samples. Unlike ``repa_cosine_loss`` this only constrains the *geometry* among the
+    tokens of a video (spatial pairs within a frame and temporal pairs across frames alike), never the absolute
+    direction of a token, so it is invariant to any rotation of either feature space.
+    """
+    if pred.shape != target.shape:
+        raise ValueError(f"pred {tuple(pred.shape)} and target {tuple(target.shape)} must have the same shape")
+    if distance not in RELATION_DISTANCES:
+        raise ValueError(f"Unknown relation distance {distance!r}; expected one of {RELATION_DISTANCES}")
+    counts = [int(c) for c in num_tokens_per_sample]
+    if sum(counts) != pred.shape[0]:
+        raise ValueError(f"num_tokens_per_sample sums to {sum(counts)} but pred has {pred.shape[0]} rows")
+    counts = [c for c in counts if c > 0]
+    if not counts:
+        raise ValueError("repa_relation_loss needs at least one sample with tokens")
+
+    def _penalty(diff: torch.Tensor) -> torch.Tensor:
+        return diff.square() if distance == "l2" else diff.abs()
+
+    if len(set(counts)) == 1:
+        # Uniform grids (the LIBERO case): one batched matmul per side.
+        b, n = len(counts), counts[0]
+        diff = token_relation_matrix(pred.view(b, n, -1), eps) - token_relation_matrix(target.view(b, n, -1), eps)
+        return _penalty(diff).sum() / (b * n * n)
+    total = pred.new_zeros((), dtype=torch.float32)
+    entries = 0
+    for p_i, t_i in zip(torch.split(pred, counts), torch.split(target, counts)):
+        total = total + _penalty(token_relation_matrix(p_i, eps) - token_relation_matrix(t_i, eps)).sum()
+        entries += p_i.shape[0] ** 2
+    return total / entries
 
 
 def concat_views_along_width(y: torch.Tensor, num_views: int) -> torch.Tensor:

@@ -9,9 +9,14 @@
 # block (experiment `action_policy_libero_edge_repa`) and the resulting extra loss / wandb curves
 # (repa_loss = 1 - cos, val/repa_loss, val/repa_cos_sim).
 #
-# VARIANT (target adapter variant 2 = avgpool + learnable depthwise/pointwise conv). Base default: teacher ViT-B/16 (ema_encoder), MoT block 8 (of 28), target adapter variant 1 (avgpool),
-# loss weight 0.5, 256x256 teacher input per camera view, 16 future frames -> 8x16x16 tokens -> 4x5x5 per view.
-# Variants: *_l14.toml (block 14), *_vitl.toml (ViT-L/16), *_v2.toml (avgpool_conv), *_v3.toml (strided_conv).
+# VARIANT v5 (VideoREPA-style TOKEN-RELATION distillation instead of direct feature alignment). Everything else is
+# the base recipe: teacher ViT-B/16 (ema_encoder), MoT block 8 (of 28), target adapter variant 1 (avgpool, no
+# learnable part), REPA MLP projector, 256x256 teacher input per view, 16 future frames -> 8x16x16 -> 4x5x5 per view.
+#   student relation  R_s = normalize(MLP(h_k)) normalize(MLP(h_k))^T       per sample, over its 4x5x10 predicted tokens
+#   teacher relation  R_t = normalize(avgpool(V-JEPA)) normalize(avgpool(V-JEPA))^T
+#   repa_rel_loss     = mean_{i,j} (R_s[i,j] - R_t[i,j])^2     (200x200 map per LIBERO window; spatial + temporal pairs)
+# The direct 1 - cos term is still logged (repa_loss / repa_cos_sim) but has weight 0 here. Compare against the base run.
+# Other variants: *_l14.toml (block 14), *_vitl.toml (ViT-L/16), *_v2/_v3.toml (learnable adapters), *_v4.toml (linear projector).
 # Env: LIBERO_ROOT, BASE_CHECKPOINT_PATH, WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT, COSMOS_STORAGE (teacher ckpts under
 # $COSMOS_STORAGE/checkpoints/vjepa2_1/). See docs/action_policy_libero_repa_vjepa.md.
 
@@ -20,7 +25,7 @@ task         = "vfm"
 experiment   = "action_policy_libero_edge_repa"
 project      = "cosmos3_action_libero"
 group        = "edge_libero10_fewshot_repa"
-name         = "hs10_repa_vitb_l8_avgpoolconv_w5.0"
+name         = "hs10_repa_vitb_l8_avgpool_rel_l2_w5.0"
 wandb_mode   = "online"
 
 [model]
@@ -29,12 +34,15 @@ max_num_tokens_after_packing = 45056
 
 [model.repa]
 enabled         = true
-loss_weight     = 5.0
+loss_weight     = 0.0                      # direct 1 - cos alignment OFF (still logged as repa_loss / repa_cos_sim)
+relation_loss_weight = 5.0                 # v5: VideoREPA-style token-relation distillation ON
+relation_distance    = "l2"                # squared difference of the relation maps ("l1" = absolute)
 layer_index     = 8                        # output of MoT block 8; next candidate 14
 teacher         = "vjepa2_1_vit_base_384"  # ViT-B/16 (D=768); "vjepa2_1_vit_large_384" = ViT-L/16 (D=1024)
 teacher_input_size = 256                   # native LIBERO resolution == V-JEPA 2.1 RoPE base grid
-target_adapter  = "avgpool_conv"           # variant 2: avgpool -> depthwise Conv3d(3^3) -> 1x1x1 Conv3d (identity init)
+target_adapter  = "avgpool"                # variant 1 (parameter-free) | "avgpool_conv" (2) | "strided_conv" (3)
 target_grid_thw = [4, 5, 5]                # per-view MoT token grid (validated at runtime)
+projector_type  = "mlp"                    # REPA 3-layer SiLU MLP (default); "linear" = single Linear (v4)
 
 [model.ema]
 enabled         = true
@@ -78,4 +86,4 @@ episode_subset_path   = "libero_10_val_5ep_per_task_seed42_excl3ep.json"
 
 [checkpoint]
 load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
-save_iter = 250
+save_iter = 500

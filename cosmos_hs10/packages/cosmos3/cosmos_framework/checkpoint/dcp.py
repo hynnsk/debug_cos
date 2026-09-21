@@ -1167,6 +1167,12 @@ class DistributedCheckpointer(AbstractCheckpointer):
             output_dirname = os.path.join(self.save_dirname, f"iter_{iteration:09}/{k}")
             to_save_dict[k] = (to_save_dict[k], output_dirname)
 
+        # Hand the caching allocator's reserved-but-free blocks back to CUDA before dcp.save: its plan exchange
+        # runs NCCL gather/scatter, and NCCL allocates with cudaMalloc outside the caching allocator. At the
+        # memory edge (e.g. ~4 GiB cached, <100 MB free on the card) that allocation fails and surfaces as
+        # "NCCL Error 1: unhandled cuda error". The cache refills during the next training step.
+        torch.cuda.empty_cache()
+
         if self.async_mode == AsyncMode.ASYNC_WITH_PINNED_MEM:
             dataloader_entry = to_save_dict.pop("dataloader", None)
             if dataloader_entry is not None:

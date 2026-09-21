@@ -20,7 +20,7 @@ task         = "vfm"
 experiment   = "action_policy_libero_edge_repa"
 project      = "cosmos3_action_libero"
 group        = "edge_libero10_fewshot_repa"
-name         = "hs10_repa_vitb_l8_stridedconv_w0.5"
+name         = "hs10_repa_vitb_l8_stridedconv_w5.0"
 wandb_mode   = "online"
 
 [model]
@@ -29,7 +29,7 @@ max_num_tokens_after_packing = 45056
 
 [model.repa]
 enabled         = true
-loss_weight     = 0.5
+loss_weight     = 5.0
 layer_index     = 8                        # output of MoT block 8; next candidate 14
 teacher         = "vjepa2_1_vit_base_384"  # ViT-B/16 (D=768); "vjepa2_1_vit_large_384" = ViT-L/16 (D=1024)
 teacher_input_size = 256                   # native LIBERO resolution == V-JEPA 2.1 RoPE base grid
@@ -56,24 +56,24 @@ vae_path = "${oc.env:WAN_VAE_PATH}"
 lr = 5.0e-05
 
 [scheduler]
-cycle_lengths = [1000]
+cycle_lengths = [2000]
 warm_up_steps = [200]
 
 [trainer]
-max_iter        = 1000
+max_iter        = 2000
 logging_iter    = 20
 grad_accum_iter = 1
 run_validation          = true
 run_validation_on_start = true
-validation_iter         = 100
-max_val_iter            = 32
+validation_iter         = 200
+max_val_iter            = 16
 
 [dataloader_train]
 max_samples_per_batch = 128
 episode_subset_path = "libero_10_3ep_per_task_seed42.json"
 
 [dataloader_val]
-max_samples_per_batch = 128
+max_samples_per_batch = 32
 episode_subset_path   = "libero_10_val_5ep_per_task_seed42_excl3ep.json"
 
 [checkpoint]

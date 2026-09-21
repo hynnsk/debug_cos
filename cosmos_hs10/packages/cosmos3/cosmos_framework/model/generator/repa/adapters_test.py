@@ -7,13 +7,17 @@ import torch
 from cosmos_framework.model.generator.repa.adapters import (
     AvgPoolConvTargetAdapter,
     AvgPoolTargetAdapter,
+    RepaLinearProjector,
     RepaProjector,
     StridedConvTargetAdapter,
+    build_projector,
     build_target_adapter,
     concat_views_along_width,
     repa_cosine_loss,
+    repa_relation_loss,
     split_flat_tokens,
     strided_conv_geometry,
+    token_relation_matrix,
 )
 
 TEACHER_GRID = (8, 16, 16)
@@ -86,6 +90,28 @@ def test_projector_shapes_and_init():
     assert out.shape == (5, 8)
 
 
+def test_linear_projector_is_a_single_affine_map():
+    proj = RepaLinearProjector(12, 8)
+    proj.reset_parameters()
+    x = torch.randn(5, 12)
+    out = proj(x)
+    assert out.shape == (5, 8)
+    torch.testing.assert_close(out, x @ proj.fc.weight.T + proj.fc.bias)
+    assert sum(p.numel() for p in proj.parameters()) == 12 * 8 + 8
+    # exactly one Linear, no activation
+    assert [type(m) for m in proj.modules()] == [RepaLinearProjector, torch.nn.Linear]
+
+
+def test_build_projector_selects_variant_and_rejects_unknown():
+    mlp = build_projector("mlp", 12, 32, 8)
+    lin = build_projector("linear", 12, 32, 8)  # hidden_dim ignored
+    assert isinstance(mlp, RepaProjector) and isinstance(lin, RepaLinearProjector)
+    assert mlp(torch.randn(3, 12)).shape == lin(torch.randn(3, 12)).shape == (3, 8)
+    assert sum(p.numel() for p in mlp.parameters()) > sum(p.numel() for p in lin.parameters())
+    with pytest.raises(ValueError, match="projector_type"):
+        build_projector("conv", 12, 32, 8)
+
+
 def test_cosine_loss_extremes():
     a = torch.randn(7, 5)
     loss, cos = repa_cosine_loss(a, a)
@@ -95,6 +121,79 @@ def test_cosine_loss_extremes():
     torch.testing.assert_close(loss, torch.tensor(2.0), atol=1e-6, rtol=0)
     with pytest.raises(ValueError):
         repa_cosine_loss(a, a[:3])
+
+
+def _relation_inputs(counts=(7, 7, 7), d=5, seed=0):
+    g = torch.Generator().manual_seed(seed)
+    n = sum(counts)
+    return torch.randn(n, d, generator=g, requires_grad=True), torch.randn(n, d, generator=g), list(counts)
+
+
+def test_token_relation_matrix_is_cosine_similarity():
+    x = torch.randn(4, 6, 3)
+    rel = token_relation_matrix(x)
+    assert rel.shape == (4, 6, 6)
+    torch.testing.assert_close(rel.diagonal(dim1=-2, dim2=-1), torch.ones(4, 6), atol=1e-5, rtol=0)
+    ref = torch.nn.functional.cosine_similarity(x[0, :, None], x[0, None, :], dim=-1)
+    torch.testing.assert_close(rel[0], ref, atol=1e-5, rtol=0)
+    assert token_relation_matrix(x.to(torch.bfloat16)).dtype == torch.float32  # computed in fp32
+
+
+def test_relation_loss_extremes_and_invariances():
+    pred, target, counts = _relation_inputs()
+    zero = repa_relation_loss(target, target, counts)
+    torch.testing.assert_close(zero, torch.tensor(0.0), atol=1e-6, rtol=0)
+    # per-token rescaling does not change cosine relations; a global rotation of one side does not either,
+    # whereas the direct cosine loss is NOT rotation invariant.
+    q, _ = torch.linalg.qr(torch.randn(5, 5))
+    scale = torch.rand(pred.shape[0], 1) * 3 + 0.1
+    loss = repa_relation_loss(pred, target, counts)
+    torch.testing.assert_close(repa_relation_loss((pred * scale) @ q, target, counts), loss, atol=1e-5, rtol=0)
+    assert not torch.allclose(repa_cosine_loss(pred @ q, target)[0], repa_cosine_loss(pred, target)[0])
+    # relation entries live in [-1, 1], so every entry-wise gap |d| <= 2: l2 = mean d^2 <= 2 * mean |d| = 2 * l1
+    l1 = repa_relation_loss(pred, target, counts, distance="l1")
+    l2 = repa_relation_loss(pred, target, counts, distance="l2")
+    assert 0 < float(l2) <= 4 and 0 < float(l1) <= 2 and float(l2) <= 2 * float(l1)
+    # explicit worst case on one 2-token sample: relations +1 vs -1 -> off-diagonal gaps of 2 -> l2 = (0+4+4+0)/4
+    a = torch.tensor([[1.0, 0.0], [1.0, 0.0]])
+    b = torch.tensor([[1.0, 0.0], [-1.0, 0.0]])
+    torch.testing.assert_close(repa_relation_loss(a, b, [2]), torch.tensor(2.0), atol=1e-5, rtol=0)
+    torch.testing.assert_close(repa_relation_loss(a, b, [2], distance="l1"), torch.tensor(1.0), atol=1e-5, rtol=0)
+
+
+def test_relation_loss_batched_and_ragged_paths_agree_and_backprop():
+    pred, target, counts = _relation_inputs(counts=(7, 7, 7))
+    fast = repa_relation_loss(pred, target, counts)
+    # ragged path: reference computed sample by sample
+    parts = [
+        (token_relation_matrix(p) - token_relation_matrix(t)).square().sum()
+        for p, t in zip(torch.split(pred, counts), torch.split(target, counts))
+    ]
+    torch.testing.assert_close(fast, sum(parts) / (3 * 49), atol=1e-6, rtol=0)
+    pred2, target2, counts2 = _relation_inputs(counts=(4, 0, 9), seed=1)  # zero-token sample is skipped
+    ragged = repa_relation_loss(pred2, target2, counts2)
+    parts2 = [
+        (token_relation_matrix(p) - token_relation_matrix(t)).square().sum()
+        for p, t in zip(torch.split(pred2, counts2), torch.split(target2, counts2))
+        if p.shape[0] > 0
+    ]
+    torch.testing.assert_close(ragged, sum(parts2) / (16 + 81), atol=1e-6, rtol=0)
+    (fast + ragged).backward()
+    assert pred.grad is not None and torch.isfinite(pred.grad).all()
+    assert pred2.grad is not None and torch.isfinite(pred2.grad).all()
+    assert torch.count_nonzero(pred2.grad) > 0
+
+
+def test_relation_loss_rejects_bad_inputs():
+    pred, target, counts = _relation_inputs()
+    with pytest.raises(ValueError, match="same shape"):
+        repa_relation_loss(pred, target[:-1], counts)
+    with pytest.raises(ValueError, match="sums to"):
+        repa_relation_loss(pred, target, [7, 7])
+    with pytest.raises(ValueError, match="distance"):
+        repa_relation_loss(pred, target, counts, distance="cosine")
+    with pytest.raises(ValueError, match="at least one"):
+        repa_relation_loss(pred[:0], target[:0], [0, 0])
 
 
 def test_concat_views_along_width_layout():

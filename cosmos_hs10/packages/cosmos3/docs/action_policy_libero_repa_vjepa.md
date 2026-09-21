@@ -7,7 +7,7 @@ asked to predict, REPA-style (Yu et al., *Representation Alignment for Generatio
 
 ```
 loss_total = 10 * fm_vision + 10 * fm_action                     (unchanged hs08 recipe)
-           + repa.loss_weight * ( 1 - cos( MLP(h_k), adapter(V-JEPA-2.1(frames)) ) )   # default weight 0.5
+           + repa.loss_weight * ( 1 - cos( proj(h_k), adapter(V-JEPA-2.1(frames)) ) )  # default weight 0.5; proj = MLP (default) | Linear (v4)
 ```
 
 | Piece | Path |
@@ -32,7 +32,21 @@ so each view is a **5x5** token grid and the predicted (noised) part is **4 x 5 
 1..4; latent frame 0 is the clean conditioning frame and is never aligned). The hidden state read is the residual
 stream after `repa.layer_index` decoder blocks (default **8 of 28**; second candidate **14**), captured in the
 eager layer loop of `_impl_forward` (outside the per-block `torch.compile` / activation-checkpoint wrappers), then
-projected with the REPA MLP (`Linear-SiLU-Linear-SiLU-Linear`, hidden 2048, out = teacher dim).
+projected by the student-side projector: the REPA MLP (`Linear-SiLU-Linear-SiLU-Linear`, hidden 2048, out = teacher
+dim; `projector_type = "mlp"`, base / v2 / v3) or, in the v4 recipe, a single `Linear(2048, D_t)`
+(`projector_type = "linear"`), which removes the projector's own capacity so `h_k` itself has to line up with the
+teacher features up to an affine map.
+
+**Token-relation distillation (v5, VideoREPA-style).** Instead of pulling each projected student token onto its
+teacher token, `repa_rel_loss` matches the *geometry among the tokens of one video*: for every sample the
+`n x n` pairwise cosine-similarity maps `R(x) = normalize(x) normalize(x)^T` of the projected student tokens and of
+the adapted teacher tokens (`n = 4 x 5 x 10 = 200` predicted tokens per LIBERO window, so spatial pairs within a
+frame and temporal pairs across frames are covered by one map) are compared entry-wise with the squared
+(`relation_distance = "l2"`) or absolute (`"l1"`) difference, averaged over all entries of all samples. The term is
+invariant to any rotation / per-token rescaling of either feature space, so it constrains relations, not absolute
+directions. Both `repa_loss` (`1 - cos`) and `repa_rel_loss` are always computed and logged; the weights
+`loss_weight` / `relation_loss_weight` decide what is trained (`*_v5.toml`: `0.0` / `5.0`, parameter-free `avgpool`
+target, MLP projector). Cost: two `[B, 200, 200]` fp32 matmuls per step, negligible.
 
 **Teacher side (V-JEPA 2.1).** The dataset ships the un-resized uint8 frames as `data_batch["video_native"]`
 (`keep_native_video=True`). Frames 1..16 of **each camera view** (256x256, the native LIBERO resolution) go
@@ -65,6 +79,8 @@ Every knob lives under `[model.repa]` in the TOML (`RepaTomlConfig`, VFM only) a
 | key | default | notes |
 | --- | --- | --- |
 | `enabled` | `true` (experiment) / `false` (framework) | |
+| `relation_loss_weight` | `0.0` | weight of the VideoREPA-style token-relation loss `repa_rel_loss` (see below); v5 = `5.0` with `loss_weight = 0.0`. Always computed and logged, `0` = monitor only |
+| `relation_distance` | `l2` | entry-wise distance between the two relation maps: `l2` (squared) or `l1` (absolute) |
 | `loss_weight` | `0.5` | weight of `1 - cos`. NOTE: the flow-matching terms carry `loss_scale`/`action_loss_weight` = 10, so 0.5 is relatively ~20x weaker than the REPA paper's lambda=0.5 on an unscaled denoising loss; scan e.g. 0.5 / 2 / 5. |
 | `layer_index` | `8` | blocks applied before the read (1-based). Nemotron-2B has 28. |
 | `teacher` | `vjepa2_1_vit_base_384` | or `vjepa2_1_vit_large_384` (aliases `vitb` / `vitl`) |
@@ -76,7 +92,8 @@ Every knob lives under `[model.repa]` in the TOML (`RepaTomlConfig`, VFM only) a
 | `target_adapter_kernel_size` | `3` | variant 2 |
 | `target_adapter_depthwise` | `true` | variant 3 |
 | `target_grid_thw` | `[4, 5, 5]` | per-view token grid; needed to build variant 3, validated for all |
-| `projector_hidden_dim` | `2048` | |
+| `projector_type` | `mlp` | student-side projector: `mlp` = REPA `Linear-SiLU-Linear-SiLU-Linear`; `linear` = one `Linear(2048, D_t)` (v4 recipe: `h_k` itself has to become an affine image of the teacher features) |
+| `projector_hidden_dim` | `2048` | MLP hidden width; ignored for `linear` |
 | `num_views` | `2` | views concatenated along the canvas width |
 
 The experiment adds `repa_` to `optimizer.keys_to_select` (trainable: `net.repa_head.projector.*`,
@@ -99,10 +116,12 @@ REPA_TOML_FILE=examples/toml/sft_config/action_policy_libero_10_edge_repa_l14.to
 REPA_TOML_FILE=examples/toml/sft_config/action_policy_libero_10_edge_repa_vitl.toml NPROC_PER_NODE=2 sr 2 48 bash examples/launch_sft_action_policy_libero_10_edge_repa.sh
 REPA_TOML_FILE=examples/toml/sft_config/action_policy_libero_10_edge_repa_v2.toml   NPROC_PER_NODE=2 sr 2 48 bash examples/launch_sft_action_policy_libero_10_edge_repa.sh
 REPA_TOML_FILE=examples/toml/sft_config/action_policy_libero_10_edge_repa_v3.toml   NPROC_PER_NODE=2 sr 2 48 bash examples/launch_sft_action_policy_libero_10_edge_repa.sh
+NPROC_PER_NODE=2 sr 2 48 bash examples/launch_sft_action_policy_libero_10_edge_repa_v4.sh                     # v4: linear projector (avgpool, block 8)
+NPROC_PER_NODE=2 sr 2 48 bash examples/launch_sft_action_policy_libero_10_edge_repa_v5.sh                     # v5: token-relation L2 loss w5.0, direct cos off
 # any knob: EXTRA_TAIL_OVERRIDES="model.config.repa.loss_weight=2.0 job.name=hs10_repa_w2" ...
 ```
 
-Smoke test (4 iters, 2 GPUs): `sr 2 48 bash ~/project/_scratch/hs10_repa_smoke.sh` (`VARIANT=v2|v3|vitl|l14`).
+Smoke test (4 iters, 2 GPUs): `sr 2 48 bash ~/project/_scratch/hs10_repa_smoke.sh` (`VARIANT=v2|v3|v4|v5|vitl|l14`).
 CPU tests: `PYTHONPATH=. python -m pytest --noconftest -c /dev/null -p no:cacheprovider --rootdir=. cosmos_framework/model/generator/repa cosmos_framework/configs/toml_config/repa_toml_test.py`.
 
 ## 4. Cost

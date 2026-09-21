@@ -7,8 +7,15 @@ Identical to ``action_policy_libero_edge`` (cosmos_hs08 recipe: full ``moe_gen``
 mid-trained Cosmos3-Edge on the fixed 30-demo LIBERO-10 subset, held-out validation) plus a representation
 alignment term on the MoT generation pathway:
 
-    loss += repa.loss_weight * (1 - cos(MLP(h_k[video tokens]), adapter(V-JEPA-2.1(frames))))
+    loss += repa.loss_weight * (1 - cos(proj(h_k[video tokens]), adapter(V-JEPA-2.1(frames))))
+          + repa.relation_loss_weight * dist(R(proj(h_k)), R(adapter(V-JEPA-2.1(frames))))   # R = token-relation map
 
+* ``proj``: the REPA 3-layer SiLU MLP (``repa.projector_type="mlp"``, default) or a single linear layer
+  (``"linear"``, the ``*_v4.toml`` recipe).
+* ``R(x) = normalize(x) normalize(x)^T`` per sample (pairwise cosine similarities among the predicted tokens of one
+  video, spatial and temporal pairs alike); ``dist`` = squared (``"l2"``) or absolute (``"l1"``) entry-wise difference.
+  VideoREPA-style relation distillation; the ``*_v5.toml`` recipe trains it alone (``loss_weight=0``,
+  ``relation_loss_weight=5``). Both terms are always logged (``repa_loss``/``repa_cos_sim``, ``repa_rel_loss``).
 * ``h_k``: hidden state of the *predicted* (noised) video tokens after MoT block ``repa.layer_index`` (8 of 28
   by default; 14 is the next candidate).
 * teacher: frozen V-JEPA 2.1 ``ema_encoder`` (ViT-B/16 default, ViT-L/16 variant) on the 16 future frames of
@@ -52,6 +59,8 @@ def _action_policy_libero_edge_repa_model_config() -> dict:
     cfg["repa"] = dict(
         enabled=True,
         loss_weight=0.5,
+        relation_loss_weight=0.0,  # VideoREPA-style token-relation term; v5 = 5.0 (with loss_weight 0.0)
+        relation_distance="l2",  # "l2" (squared) | "l1" (absolute) entry-wise relation-map difference
         layer_index=8,  # output of MoT block 8 (of 28); next candidate: 14
         teacher="vjepa2_1_vit_base_384",  # ViT-B/16 default; "vjepa2_1_vit_large_384" = ViT-L/16
         teacher_checkpoint_path=None,  # $COSMOS_STORAGE/checkpoints/vjepa2_1/<release file>
@@ -62,7 +71,8 @@ def _action_policy_libero_edge_repa_model_config() -> dict:
         target_adapter_kernel_size=3,
         target_adapter_depthwise=True,
         target_grid_thw=(4, 5, 5),  # per-view MoT token grid: 4 predicted latent frames x 5 x 5 (160-px content)
-        projector_hidden_dim=2048,
+        projector_type="mlp",  # REPA MLP; "linear" = single Linear(hidden_size, D_t) (v4 recipe)
+        projector_hidden_dim=2048,  # MLP hidden width (unused for "linear")
         num_views=2,  # third-person | wrist, concatenated along width
         native_video_key="video_native",
     )
@@ -224,9 +234,15 @@ action_policy_libero_edge_repa = LazyDict(
                 param_count=dict(save_s3=False),
                 skip_nan_step=dict(max_consecutive_nan=100),
                 training_stats=dict(log_freq=100),
-                # val/loss_total, val/flow_matching_loss_{action,vision}, val/repa_loss, val/repa_cos_sim
+                # val/loss_total, val/flow_matching_loss_{action,vision}, val/repa_loss, val/repa_cos_sim, val/repa_rel_loss
                 val_loss_breakdown=L(ValLossBreakdownCallback)(
-                    keys=["flow_matching_loss_action", "flow_matching_loss_vision", "repa_loss", "repa_cos_sim"],
+                    keys=[
+                        "flow_matching_loss_action",
+                        "flow_matching_loss_vision",
+                        "repa_loss",
+                        "repa_cos_sim",
+                        "repa_rel_loss",
+                    ],
                 ),
             ),
         ),

@@ -132,15 +132,24 @@ class RectifiedFlowTrainingConfig:
 class RepaConfig:
     """V-JEPA 2.1 representation alignment (REPA) on the MoT generation pathway.
 
-    Adds ``loss_weight * (1 - cos(MLP(h_k), adapter(vjepa(frames))))`` to the training loss, where ``h_k`` is
+    Adds ``loss_weight * (1 - cos(proj(h_k), adapter(vjepa(frames))))`` to the training loss, where ``proj`` is
+    the REPA MLP (``projector_type="mlp"``) or a single linear layer (``"linear"``), ``h_k`` is
     the hidden state of the (predicted, i.e. noised) video tokens after ``layer_index`` MoT decoder blocks and
     the target is the frozen V-JEPA 2.1 ``ema_encoder`` run on the raw future frames of every camera view.
+    A second, VideoREPA-style term ``relation_loss_weight * dist(R(proj(h_k)), R(adapter(vjepa(frames))))`` matches
+    the per-sample token-relation maps ``R(x) = normalize(x) normalize(x)^T`` (pairwise cosine similarities among the
+    predicted tokens of one video) instead of the tokens themselves. Both terms are always computed and logged
+    (``repa_loss`` / ``repa_cos_sim`` and ``repa_rel_loss``); their weights decide what is trained.
     See ``model/generator/repa/`` and ``docs/action_policy_libero_repa_vjepa.md``.
     """
 
     enabled: bool = False
     # Weight of the (unweighted, in [0, 2]) cosine loss ``1 - cos`` in the total loss.
     loss_weight: float = 0.5
+    # Weight of the token-relation distillation loss (v5 recipe: 5.0 with loss_weight 0.0). 0 = monitor only.
+    relation_loss_weight: float = 0.0
+    # Entry-wise distance between the student and teacher relation maps: "l2" (squared) or "l1" (absolute).
+    relation_distance: str = attrs.field(default="l2", validator=attrs.validators.in_({"l2", "l1"}))
     # Number of MoT decoder blocks applied before the aligned hidden state is read (REPA "depth"): 8 = output
     # of the 8th block (0-based block index 7). Nemotron-2B (Cosmos3-Edge) has 28 blocks.
     layer_index: int = 8
@@ -168,7 +177,10 @@ class RepaConfig:
     # LIBERO-10 concat_view: 17 frames -> 5 latent frames (4 predicted); 256x512 -> 192x320 canvas with a 160-px
     # content height -> 5x10 tokens after the padding crop, i.e. 5x5 per view.
     target_grid_thw: tuple[int, int, int] = (4, 5, 5)
-    # REPA projector: 3-layer SiLU MLP hidden width.
+    # Student-side projector: "mlp" = REPA's Linear-SiLU-Linear-SiLU-Linear (default), "linear" = one
+    # Linear(hidden_size, D_t) so h_k itself has to become an affine image of the teacher features (v4 recipe).
+    projector_type: str = attrs.field(default="mlp", validator=attrs.validators.in_({"mlp", "linear"}))
+    # REPA projector: 3-layer SiLU MLP hidden width (ignored for projector_type="linear").
     projector_hidden_dim: int = 2048
     # Camera views concatenated along the width of the canvas; each is encoded by the teacher separately.
     num_views: int = 2

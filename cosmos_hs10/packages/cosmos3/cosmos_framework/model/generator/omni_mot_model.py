@@ -51,7 +51,7 @@ from cosmos_framework.model.generator.mot.context_parallel_utils import (
     context_parallel_broadcast_tensor_list,
 )
 from cosmos_framework.model.generator.mot.cosmos3_vfm_network import Cosmos3VFMNetwork, Cosmos3VFMNetworkConfig
-from cosmos_framework.model.generator.repa.adapters import repa_cosine_loss
+from cosmos_framework.model.generator.repa.adapters import repa_cosine_loss, repa_relation_loss
 from cosmos_framework.model.generator.repa.alignment import RepaTeacherTokens
 from cosmos_framework.model.generator.repa.vjepa_teacher import VJEPA21Teacher, resolve_teacher_spec
 from cosmos_framework.model.generator.mot.inference_text_kv_memory import (
@@ -505,6 +505,7 @@ class OmniMoTModel(ImaginaireModel):
             repa_layer_index=int(repa_cfg.layer_index),
             repa_teacher_embed_dim=resolve_teacher_spec(repa_cfg.teacher).embed_dim,
             repa_projector_hidden_dim=int(repa_cfg.projector_hidden_dim),
+            repa_projector_type=str(repa_cfg.projector_type),
             repa_target_adapter=repa_cfg.target_adapter,
             repa_target_adapter_kernel_size=int(repa_cfg.target_adapter_kernel_size),
             repa_target_adapter_depthwise=bool(repa_cfg.target_adapter_depthwise),
@@ -539,8 +540,9 @@ class OmniMoTModel(ImaginaireModel):
         object.__setattr__(self, "repa_teacher", teacher)
         log.info(
             f"REPA enabled: teacher={teacher.spec.name} (D={teacher.embed_dim}, grid={teacher.grid_thw}, "
-            f"input {teacher.input_size}px), MoT block {repa_cfg.layer_index}, target_adapter={repa_cfg.target_adapter}, "
-            f"loss_weight={repa_cfg.loss_weight}"
+            f"input {teacher.input_size}px), MoT block {repa_cfg.layer_index}, projector={repa_cfg.projector_type}, "
+            f"target_adapter={repa_cfg.target_adapter}, loss_weight={repa_cfg.loss_weight}, "
+            f"relation_loss_weight={repa_cfg.relation_loss_weight} ({repa_cfg.relation_distance})"
         )
 
     def _compute_repa_teacher_tokens(
@@ -1939,18 +1941,32 @@ class OmniMoTModel(ImaginaireModel):
             )
             total_loss = total_loss * sample_level_scale.to(dtype=total_loss.dtype)
 
-        # 1b. V-JEPA 2.1 representation alignment (REPA): ``1 - cos(MLP(h_k), adapter(teacher))`` over the
-        # predicted video tokens, weighted by ``repa.loss_weight``. The teacher is frozen; the adapter (variants
-        # 2/3) is the only learnable part on the target side.
+        # 1b. V-JEPA 2.1 representation alignment (REPA) over the predicted video tokens (``proj`` = REPA MLP or,
+        # with ``repa.projector_type="linear"``, a single Linear; the teacher is frozen and the adapter (variants
+        # 2/3) is the only learnable part on the target side):
+        #   * ``repa_loss``     = ``1 - cos(proj(h_k), adapter(teacher))``, weight ``repa.loss_weight``;
+        #   * ``repa_rel_loss`` = VideoREPA-style token-relation distillation, ``dist(R(proj(h_k)), R(target))`` with
+        #     ``R`` the per-sample pairwise cosine-similarity map, weight ``repa.relation_loss_weight`` (v5 recipe).
+        # Both are always computed and logged; a zero weight contributes exactly 0 to ``total_loss``.
         if self.repa_enabled and "repa_pred" in out_net:
+            repa_cfg = self.config.repa
             repa_pred = out_net["repa_pred"]
             if out_net.get("repa_empty", False):
                 repa_loss = 0.0 * repa_pred.sum()  # probe: keeps the REPA parameters in the graph, contributes 0
+                repa_rel_loss = repa_loss
             else:
-                repa_loss, repa_cos = repa_cosine_loss(repa_pred, out_net["repa_target"])
+                repa_target = out_net["repa_target"]
+                repa_loss, repa_cos = repa_cosine_loss(repa_pred, repa_target)
                 losses_dict["repa_cos_sim"] = repa_cos
-            total_loss += repa_loss * self.config.repa.loss_weight
+                repa_rel_loss = repa_relation_loss(
+                    repa_pred,
+                    repa_target,
+                    out_net["repa_num_tokens_per_sample"],
+                    distance=repa_cfg.relation_distance,
+                )
+            total_loss += repa_loss * repa_cfg.loss_weight + repa_rel_loss * repa_cfg.relation_loss_weight
             losses_dict["repa_loss"] = repa_loss
+            losses_dict["repa_rel_loss"] = repa_rel_loss
 
         # 2. Load balancing auxiliary losses
         device_mesh, context_parallel_mesh = self._get_load_balancing_loss_meshes()

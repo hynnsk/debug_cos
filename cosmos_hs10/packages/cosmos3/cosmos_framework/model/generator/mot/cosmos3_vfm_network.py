@@ -88,6 +88,7 @@ class Cosmos3VFMNetworkConfig(PretrainedConfig):
         repa_layer_index: int = 8,
         repa_teacher_embed_dim: int = 768,
         repa_projector_hidden_dim: int = 2048,
+        repa_projector_type: str = "mlp",
         repa_target_adapter: str = "avgpool",
         repa_target_adapter_kernel_size: int = 3,
         repa_target_adapter_depthwise: bool = True,
@@ -163,6 +164,7 @@ class Cosmos3VFMNetworkConfig(PretrainedConfig):
         self.repa_layer_index = int(repa_layer_index)
         self.repa_teacher_embed_dim = int(repa_teacher_embed_dim)
         self.repa_projector_hidden_dim = int(repa_projector_hidden_dim)
+        self.repa_projector_type = str(repa_projector_type)  # "mlp" (REPA default) | "linear" (v4 recipe)
         self.repa_target_adapter = repa_target_adapter
         self.repa_target_adapter_kernel_size = int(repa_target_adapter_kernel_size)
         self.repa_target_adapter_depthwise = bool(repa_target_adapter_depthwise)
@@ -301,6 +303,7 @@ class Cosmos3VFMNetwork(PreTrainedModel):
                 hidden_size=self.hidden_size,
                 teacher_embed_dim=config.repa_teacher_embed_dim,
                 projector_hidden_dim=config.repa_projector_hidden_dim,
+                projector_type=getattr(config, "repa_projector_type", "mlp"),
                 target_adapter=config.repa_target_adapter,
                 adapter_kernel_size=config.repa_target_adapter_kernel_size,
                 adapter_depthwise=config.repa_target_adapter_depthwise,
