@@ -1,0 +1,82 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# cosmos_hs09 -- LIBERO-10 few-shot post-training (3 demos/task = 30 episodes) in the LoRA regime.
+# OURS: same recipe, but LoRA + heads + time_embedder start from theta_meta (META_ACTION_INIT_PATH).
+# Trainable: LoRA(rank 32) on *_moe_gen q/k/v/o + mlp up/down, action heads, time_embedder -- one LR 1e-4,
+# no per-module multipliers (see action_policy_libero_lora_edge.py). Everything else frozen.
+# Held-out validation (50 disjoint demos) every 100 iters and at iteration 0 -> wandb val/*.
+# The baseline and metainit TOMLs differ ONLY in the [checkpoint].meta_action_init_* lines.
+# Env: LIBERO_ROOT, BASE_CHECKPOINT_PATH, WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT, META_ACTION_INIT_PATH.
+# See docs/action_fewshot_meta_lora.md.
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_libero_lora_edge"
+project      = "cosmos3_action_libero"
+group        = "edge_libero10_fewshot_lora"
+name         = "edge_libero10_3ep_lora_r32_metainit_2gpu_bs256_seed42"
+wandb_mode   = "online"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+lora_enabled        = true
+lora_rank           = 32
+lora_alpha          = 64
+lora_target_modules = "q_proj_moe_gen,k_proj_moe_gen,v_proj_moe_gen,o_proj_moe_gen,mlp_moe_gen.up_proj,mlp_moe_gen.down_proj"
+lora_freeze_base    = false    # LoRA + heads + time_embedder train together; optimizer.keys_to_select selects
+
+[model.ema]
+enabled         = true
+rate            = 0.1
+iteration_shift = 0
+
+[model.parallelism]
+data_parallel_shard_degree     = 2      # 2-GPU run: NPROC_PER_NODE=2 sr 2 48 ... (4 for the 4-GPU variant)
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr           = 1.0e-04   # single LR for LoRA / heads / time_embedder, no 5x head multiplier. LoRA-typical range is
+                         # 1e-4..5e-4 (B=0 start, alpha/r=2; the codebase's own LoRA recipe uses 5e-4); 5e-5 is the
+                         # FULL-fine-tune LR of the original recipe and would underfit the fresh heads in 2000 steps.
+weight_decay = 0.0
+
+[scheduler]
+cycle_lengths = [2000]
+warm_up_steps = [200]     # shorter warmup for the adapter-only trainable set (500 in the full-moe_gen recipe)
+
+[trainer]
+max_iter        = 2000
+logging_iter    = 20
+grad_accum_iter = 1
+# held-out validation
+run_validation          = true
+run_validation_on_start = true   # iteration 0 = the initialization itself (fresh vs meta) before any update
+validation_iter         = 100
+max_val_iter            = 32     # x 128 windows x 2 ranks ~= the whole 50-episode val set per pass
+
+[dataloader_train]
+max_samples_per_batch = 128      # per rank -> global batch 128 x 2 ranks = 256
+episode_subset_path   = "libero_10_3ep_per_task_seed42.json"          # 3 demos/task x 10 tasks = 30 episodes
+
+[dataloader_val]
+max_samples_per_batch = 128
+episode_subset_path   = "libero_10_val_5ep_per_task_seed42_excl3ep.json"  # 5 held-out demos/task, disjoint from train
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 500
+# ---- ours: meta-learned initialization of the whole trainable set (baseline TOML leaves these unset) ----
+meta_action_init_path                   = "${oc.env:META_ACTION_INIT_PATH}"
+meta_action_init_domain_id              = 5      # EMBODIMENT_TO_DOMAIN_ID["libero"]
+meta_action_init_include_modality_embed = true
+meta_action_init_include_lora           = true
+meta_action_init_include_time_embedder  = true

@@ -59,6 +59,8 @@ def _action_policy_libero_edge_repa_model_config() -> dict:
     cfg["repa"] = dict(
         enabled=True,
         loss_weight=0.5,
+        objective="token",  # "temporal_difference" (v8) | "spatial_normalized" (v10)
+        spatial_norm_eps=1.0e-6,
         relation_loss_weight=0.0,  # VideoREPA-style token-relation term; v5 = 5.0 (with loss_weight 0.0)
         relation_distance="l2",  # "l2" (squared) | "l1" (absolute) entry-wise relation-map difference
         layer_index=8,  # output of MoT block 8 (of 28); next candidate: 14
@@ -75,6 +77,18 @@ def _action_policy_libero_edge_repa_model_config() -> dict:
         projector_hidden_dim=2048,  # MLP hidden width (unused for "linear")
         num_views=2,  # third-person | wrist, concatenated along width
         native_video_key="video_native",
+    )
+    # Optional anti-collapse regularizer over MoT visual tokens only. v9 enables this from TOML. It introduces no
+    # parameters and therefore needs no optimizer/checkpoint allowlist entry.
+    cfg["sigreg"] = dict(
+        enabled=False,
+        loss_weight=0.1,
+        layer_index=8,
+        num_slices=256,
+        num_points=17,
+        integration_max=5.0,
+        slice_batch_size=64,
+        seed=0,
     )
     return cfg
 
@@ -242,6 +256,10 @@ action_policy_libero_edge_repa = LazyDict(
                         "repa_loss",
                         "repa_cos_sim",
                         "repa_rel_loss",
+                        "repa_cos_sim_centered",
+                        "repa_cos_sim_transition",
+                        "repa_cos_sim_spatial_norm",
+                        "sigreg_loss",
                     ],
                 ),
             ),

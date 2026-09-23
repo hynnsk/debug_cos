@@ -51,6 +51,7 @@ LoRA and non-LoRA checkpoints interoperate) and `model.config.lora_*`; wired in 
 | meta experiment | `configs/base/experiment/action/meta/action_fewshot_meta_lora_edge.py` |
 | meta run / smoke TOML | `examples/toml/sft_config/action_fewshot_meta_lora_edge{,_smoke}.toml` |
 | meta launcher | `examples/launch_meta_action_fewshot_lora_edge.sh` (MASTER_PORT 50015) |
+| vision-loss variant (6c) | `examples/toml/sft_config/action_fewshot_meta_lora_edge_vision_loss.toml` + `examples/launch_meta_action_fewshot_lora_edge_vision_loss.sh` (MASTER_PORT 50017) |
 | downstream LoRA recipe (train + **val** loaders) | `configs/base/experiment/action/posttrain_config/action_policy_libero_lora_edge.py` |
 | baseline / ours TOML | `examples/toml/sft_config/action_policy_libero_10_lora_edge{,_metainit}.toml` |
 | baseline / ours launcher | `examples/launch_sft_action_policy_libero_10_lora_edge{,_metainit}.sh` |
@@ -166,6 +167,49 @@ heads trainable) but starts from the LoRA-regime theta_meta:
 
 The eval server rebuilds the LoRA modules from the run's `config.yaml`, so the trained checkpoint evaluates
 like any other.
+
+## 6c. Variant: vision loss in the OUTER loop (`action_fewshot_meta_lora_edge_vision_loss.toml`)
+
+The base recipe meta-trains with the action loss in both loops. Measured on LIBERO (`val/*` at iteration 0), that
+theta_meta degraded the video term 3.2x (vision 0.61 vs 0.19 for the fresh baseline; action 2.88 vs 1.42) -- the
+5-step FOMAML "launch pad" moves the shared trunk (LoRA on every `*_moe_gen` projection, the single `time_embedder`
+used for vision AND action timesteps) off the video manifold of an objective it never saw. Both gaps close by
+downstream iteration 100, so this is a second-order effect; the variant exists to test whether keeping the video
+capability intact at theta_meta helps the first few hundred post-training steps.
+
+Design: the INNER loop is unchanged (action-only, `inner_lr` keeps its meaning). The OUTER (query) objective becomes
+
+    outer = raw flow_matching_loss_action + outer_vision_weight * raw flow_matching_loss_vision   (query demos)
+
+i.e. "after adapting actions on the K support demos, the model should predict both actions and video well on the Q
+held-out demos". The query video is already tokenized and forwarded in the base recipe (mode `wam`, `vision_gen=True`);
+only the outer backward grows. New parameters are trained? No -- `llm2vae` (the only vision-exclusive tensor) is not in
+this theta_meta; the term only redirects the shared-trunk gradient.
+
+Why RAW terms and weight 1.0: the model stores `flow_matching_loss_vision/_action` unscaled and folds the x10 into
+`total_loss` only (`omni_mot_model.py` around 1690/1767), so weight 1.0 reproduces Cosmos3's own 1:1 balance at the
+scale the base run's `meta_lr = 1e-4` was tuned for. **Do not emulate this with `loss_mode = "total"`** -- that also
+multiplies the action gradient by 10 (a confounded 10x step-size change). `from_dict` rejects
+`outer_vision_weight > 0` together with `loss_mode = "total"` for that reason.
+
+Data: the Q query demos of the sampled embodiment, nothing else. Do not add LIBERO or external video -- it leaks the
+target domain into the meta stage and weakens the embodiment-agnostic claim.
+
+Tuning: watch `query_loss_vision` (adapted, raw) and `query_loss_vision_zero_shot`; they should stay near the ~0.11 the
+shared init produces on the meta embodiments instead of rising. `query_loss` still reports the raw ACTION term, so it is
+directly comparable with the base run: if it ends > 20% above the base run's ~0.08, lower the weight to 0.3-0.5; if
+vision still rises, raise it to 2-3. `outer_loss` = action + w x vision is logged as well.
+
+Files: `examples/toml/sft_config/action_fewshot_meta_lora_edge_vision_loss.toml` (= base TOML + `outer_vision_weight`,
+run name `edge_meta_lora_r32_fomaml_adam_k5q5_w8_vision1.0_seed42`), `examples/launch_meta_action_fewshot_lora_edge_vision_loss.sh`
+(MASTER_PORT 50017), knob `MetaTrainConfig.outer_vision_weight` + `_outer_terms` in `scripts/train_action_meta.py`,
+tests `scripts/train_action_meta_test.py`. With the default 0.0 the outer objective is the very same tensor as before
+(tested), so the base launcher/TOML behave exactly as they did.
+
+```bash
+NPROC_PER_NODE=4 sr 4 48 examples/launch_meta_action_fewshot_lora_edge_vision_loss.sh
+# downstream: unchanged -- META_ACTION_INIT_PATH=<...>/fewshot_meta_lora/edge_meta_lora_r32_fomaml_adam_k5q5_w8_vision1.0_seed42/meta_action_init.pt
+```
 
 ## 7. Caveats
 

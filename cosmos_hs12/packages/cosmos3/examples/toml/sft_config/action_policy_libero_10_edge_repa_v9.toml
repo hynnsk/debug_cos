@@ -1,0 +1,83 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# v9: base absolute-feature REPA + Epps-Pulley SIGReg on MoT visual tokens only.
+# SIGReg defaults to block 8 and can be moved to the final block with model.config.sigreg.layer_index=28.
+# The task's vision/action losses are both scaled by 10, so weight 0.1 gives SIGReg an effective relative
+# coefficient of 0.01 on the corresponding unscaled-loss convention.
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_libero_edge_repa"
+project      = "cosmos3_action_libero"
+group        = "edge_libero10_fewshot_repa"
+name         = "hs10_repa_v9_sigreg_l8_w0.1"
+wandb_mode   = "online"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+
+[model.repa]
+enabled            = true
+loss_weight        = 5.0
+objective          = "token"
+layer_index        = 8
+teacher            = "vjepa2_1_vit_base_384"
+teacher_input_size = 256
+target_adapter     = "avgpool"
+target_grid_thw    = [4, 5, 5]
+
+[model.sigreg]
+enabled          = true
+loss_weight      = 0.1
+layer_index      = 8
+num_slices       = 256
+num_points       = 17
+integration_max  = 5.0
+slice_batch_size = 64
+seed             = 0
+
+[model.ema]
+enabled         = true
+rate            = 0.1
+iteration_shift = 0
+
+[model.parallelism]
+data_parallel_shard_degree     = 2
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 5.0e-05
+
+[scheduler]
+cycle_lengths = [2000]
+warm_up_steps = [200]
+
+[trainer]
+max_iter                = 2000
+logging_iter            = 20
+grad_accum_iter         = 1
+run_validation          = true
+run_validation_on_start = true
+validation_iter         = 100
+max_val_iter            = 32
+
+[dataloader_train]
+max_samples_per_batch = 128
+episode_subset_path   = "libero_10_3ep_per_task_seed42.json"
+
+[dataloader_val]
+max_samples_per_batch = 128
+episode_subset_path   = "libero_10_val_5ep_per_task_seed42_excl3ep.json"
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 500

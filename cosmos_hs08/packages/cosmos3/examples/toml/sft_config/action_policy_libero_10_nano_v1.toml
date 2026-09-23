@@ -1,0 +1,89 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# LIBERO-10 action-policy SFT run config for the `action_policy_libero_nano`
+# experiment (Cosmos3-Nano base = Qwen3-VL-8B MoT).
+#
+# FEW-SHOT variant (cosmos_hs08): the Nano counterpart of
+# action_policy_libero_10_edge.toml. Trains on the SAME fixed 30-demonstration
+# subset of libero_10 (3 randomly sampled demos per task x 10 tasks, seed 42;
+# episode indices frozen in
+# cosmos_framework/data/generator/action/episode_subsets/libero_10_3ep_per_task_seed42.json)
+# instead of all 379 demos, with the same held-out validation set, LR, schedule
+# and global batch (256 windows / step) as the Edge run.
+#
+# Topology differs from the Edge TOML (shard 2 x 128 windows/rank) because Nano is
+# ~5x larger (30 GB vs 6.3 GB bf16 DCP) and the Edge run already peaked at ~39 GB
+# per 48 GB GPU: here FSDP shard 8 x 32 windows/rank = the same 256 global batch on
+# one 8-GPU node (e.g. NPROC_PER_NODE=8 sr 8 48 bash examples/launch_sft_action_policy_libero_10_nano.sh).
+# The upstream full-data Nano recipe (HSDP 2x8, 74000 packed tokens, selective AC,
+# gbs 2048, 16000-iter cycle) is what this file replaced; remove
+# [dataloader_train].episode_subset_path to train on the full suite again.
+# Env: LIBERO_ROOT, BASE_CHECKPOINT_PATH (Cosmos3-Nano DCP), WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT.
+# See docs/action_policy_libero_posttrain.md.
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_libero_nano"
+project      = "cosmos3_action_libero"
+group        = "nano_libero10_fewshot"
+name         = "hs08_nano_v1"
+wandb_mode   = "offline"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056   # Edge few-shot value (the full-data Nano recipe uses 74000)
+
+[model.ema]
+enabled         = true
+rate            = 0.1
+iteration_shift = 0
+
+[model.parallelism]
+data_parallel_shard_degree     = 8    # one 8 x 48 GB node; Nano does not fit shard 2 like Edge
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"               # Edge few-shot value; the full-data Nano recipe uses "selective"
+save_ops_regex = ["fmha"]
+
+[model.compile]
+# Off on 48 GB Ampere (A40/A6000): with compile on, Inductor's fused RMSNorm-backward kernel for the
+# 4096-wide Qwen3-VL-8B language region needs 114760 B of shared memory > the 101376 B hardware limit
+# ("No valid triton configs ... out of resource") and the first training step dies; the forward/validation
+# pass compiles fine. Edge (2048-wide) keeps compile on. Re-enable on H100-class GPUs (228 KB smem).
+enabled = false
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 5.0e-05
+
+[scheduler]
+cycle_lengths = [2000]
+warm_up_steps = [200]
+
+[trainer]
+max_iter        = 2000
+logging_iter    = 20
+grad_accum_iter = 1               # global batch = 32 windows x 8 ranks x 1 = 256 (= Edge: 128 x 2)
+# Held-out validation (50 LIBERO-10 demos disjoint from the 30 training demos; docs/action_policy_libero_posttrain.md)
+# -> wandb val/loss_total, val/flow_matching_loss_action, val/flow_matching_loss_vision (+ val/loss from wandb_val).
+run_validation          = true
+run_validation_on_start = true   # iteration 0 = the fresh-init model before any update
+validation_iter         = 200
+max_val_iter            = 16     # x 32 windows x 8 ranks = 4096 windows per pass (same coverage as Edge: 16 x 128 x 2)
+
+[dataloader_train]
+max_samples_per_batch = 32
+# Fixed few-shot subset: 3 demos/task x 10 tasks = 30 episodes (see header).
+episode_subset_path = "libero_10_3ep_per_task_seed42.json"
+
+[dataloader_val]
+max_samples_per_batch = 32
+episode_subset_path   = "libero_10_val_5ep_per_task_seed42_excl3ep.json"  # 5 held-out demos/task, disjoint from train
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 500

@@ -1,0 +1,89 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# cosmos_hs09 -- cross-embodiment few-shot META-TRAINING in the LoRA regime, VISION-LOSS VARIANT.
+# Identical to action_fewshot_meta_lora_edge.toml except [custom.meta] outer_vision_weight (and the run name):
+# the OUTER (query) loss becomes  raw flow_matching_loss_action + outer_vision_weight * raw flow_matching_loss_vision
+# on the Q query demos of the sampled embodiment (their video is already tokenized and forwarded; only the outer
+# backward grows). The INNER loop stays action-only, so inner_lr / meta_lr keep their meaning. Motivation: the
+# action-only theta_meta degraded the video term 3.2x at LIBERO iteration 0 (val vision 0.61 vs 0.19 baseline); this
+# term asks for an init whose action-only adaptation does not break video prediction. Weight 1.0 = Cosmos3's own
+# 1:1 raw balance (its total is 10 x vision + 10 x action). Do NOT emulate this with loss_mode = "total": that also
+# multiplies the action gradient by 10 and invalidates meta_lr. Tuning: query_loss_vision (adapted) should stay near
+# its ~0.11 start instead of rising; if query_loss (adapted action) worsens by > 20% vs the base run, lower to
+# 0.3-0.5; if vision still rises, raise to 2-3. See docs/action_fewshot_meta_lora.md section 6c.
+# Experiment: action_fewshot_meta_lora_edge; entry point: cosmos_framework.scripts.train_action_meta.
+# theta_meta = action heads + action_modality_embed + LoRA(rank 32, alpha 64) on every *_moe_gen q/k/v/o +
+# mlp up/down + time_embedder (~38M params) -- exactly the trainable set of the downstream LoRA
+# post-training (action_policy_libero_10_lora_edge*.toml). Backbone / moe_gen base weights frozen.
+# Inner loop: Adam on the fast weights (adaptation magnitude independent of the gradient scale, see
+# cosmos_hs07_2); outer loop: AdamW on theta_meta with the all-reduced first-order meta-gradient.
+# Output: <IMAGINAIRE_OUTPUT_ROOT>/cosmos3_action_meta/fewshot_meta_lora/<name>/meta_action_init[_iter_XXXXXX].pt
+# Env: ROBOT_FEWSHOT_ROOT, BASE_CHECKPOINT_PATH, WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT.
+# See docs/action_fewshot_meta_lora.md.
+
+[job]
+task         = "vfm"
+experiment   = "action_fewshot_meta_lora_edge"
+project      = "cosmos3_action_meta"
+group        = "fewshot_meta_lora"
+name         = "edge_meta_lora_r32_fomaml_adam_k5q5_w8_vision1.0_seed42"
+wandb_mode   = "online"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+# must match the downstream recipe (action_policy_libero_lora_edge) -- the meta init maps onto these adapters
+lora_enabled        = true
+lora_rank           = 32
+lora_alpha          = 64
+lora_target_modules = "q_proj_moe_gen,k_proj_moe_gen,v_proj_moe_gen,o_proj_moe_gen,mlp_moe_gen.up_proj,mlp_moe_gen.down_proj"
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[trainer]
+max_iter     = 1000       # ~60 s/iter on 4x A40 with windows_per_demo=8 -> ~17 h. The outer LR
+                          # anneals to meta_lr_min_ratio AT max_iter, so change this value rather than stopping early.
+logging_iter = 10
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 100
+
+# ---- meta-learning knobs (docs/action_fewshot_meta.md, docs/action_fewshot_meta_lora.md) --------------------
+[custom.meta]
+# episodic sampler: K support demos x w windows, Q query demos x w windows, per meta-episode
+k_shot                = 5
+q_query               = 5
+windows_per_demo      = 8         # windows per demonstration (K-shot itself is k_shot); ~60 s / iter on 4x A40
+                                  # (16 with max_samples_per_batch = 80 doubles the batch and the iteration time)
+disjoint_tasks        = "auto"    # support/query task sets disjoint when the embodiment has >= 4 tasks
+max_samples_per_batch = 40        # = k_shot * windows_per_demo -> support / query are ONE packed batch each
+num_workers           = 8
+loader_timeout_s      = 1800
+seed                  = 42
+# theta_meta groups
+include_modality_embed = true
+include_lora           = true     # LoRA adapters (needs [model] lora_enabled)
+include_time_embedder  = true
+init_source            = "fresh"  # heads fresh (= baseline init); LoRA A~kaiming / B=0 and mid-trained time_embedder from the model
+scratch_domain_id      = 31       # unused DomainAwareLinear row that carries the head fast weights
+# inner loop (support): Adam on fp32 fast weights; each coordinate moves ~inner_lr per step
+inner_steps           = 5
+inner_lr              = 1.2e-4
+inner_optimizer       = "adam"
+inner_grad_clip       = 1.0
+# outer loop (query): AdamW on theta_meta
+meta_lr               = 1.0e-4
+meta_grad_clip        = 1.0
+meta_lr_warmup_iters  = 50
+meta_lr_min_ratio     = 0.1
+loss_mode             = "action"  # inner AND the action part of the outer loss: RAW flow-matching action loss
+outer_vision_weight   = 1.0       # VARIANT: outer loss = raw action + 1.0 x raw vision of the query demos (0 = base run).
+                                  # Logs query_loss_vision[_zero_shot], outer_loss, query_loss_vision/<embodiment>.
+eval_zero_shot_every  = 5         # query_loss vs query_loss_zero_shot = the adaptation-gain metric

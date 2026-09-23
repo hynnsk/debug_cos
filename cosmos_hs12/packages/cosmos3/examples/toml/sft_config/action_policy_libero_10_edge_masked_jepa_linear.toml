@@ -1,0 +1,84 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+# hs12: 30 fixed demonstrations; independent held-out validation.
+# See docs/action_policy_libero_masked_jepa.md. Weight is relative to FM scales of 10.
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_libero_edge_repa"
+project      = "cosmos3_action_libero"
+group        = "edge_libero10_fewshot_masked_jepa"
+name         = "hs12_masked_jepa_linear_l8_w0.5"
+wandb_mode   = "online"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+
+[model.repa]
+enabled         = true
+loss_weight     = 0.5
+layer_index     = 8                        # output of MoT block 8; next candidate 14
+teacher         = "vjepa2_1_vit_base_384"  # ViT-B/16 (D=768); "vjepa2_1_vit_large_384" = ViT-L/16 (D=1024)
+teacher_input_size = 256                   # native LIBERO resolution == V-JEPA 2.1 RoPE base grid
+target_adapter  = "avgpool"                # variant 1 | "avgpool_conv" (2) | "strided_conv" (3)
+target_grid_thw = [4, 5, 5]                # per-view MoT token grid (validated at runtime)
+
+# Pixel-masked auxiliary branch; normal action/video FM inputs are unchanged.
+objective = "masked_prediction"
+projector_type = "linear"
+projector_hidden_dim = 512
+masked_ratio_min = 0.4
+masked_ratio_max = 0.7
+masked_visible_weight = 0.25
+masked_max_samples = 16
+masked_warmup_steps = 200
+masked_seed = 42
+center_targets = false
+relation_loss_weight = 0.0
+teacher_batch_size = 16
+
+[model.ema]
+enabled         = true
+rate            = 0.1
+iteration_shift = 0
+
+[model.parallelism]
+data_parallel_shard_degree     = 2
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 5.0e-05
+
+[scheduler]
+cycle_lengths = [2000]
+warm_up_steps = [200]
+
+[trainer]
+seed = 42
+max_iter        = 2000
+logging_iter    = 20
+grad_accum_iter = 1
+run_validation          = true
+run_validation_on_start = true
+validation_iter         = 200
+max_val_iter            = 16
+
+[dataloader_train]
+max_samples_per_batch = 128
+episode_subset_path = "libero_10_3ep_per_task_seed42.json"
+
+[dataloader_val]
+max_samples_per_batch = 16
+episode_subset_path   = "libero_10_val_5ep_per_task_seed42_excl3ep.json"
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 100

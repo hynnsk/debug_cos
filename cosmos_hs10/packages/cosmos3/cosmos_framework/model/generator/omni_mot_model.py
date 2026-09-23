@@ -20,20 +20,6 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.nn.modules.module import _IncompatibleKeys
 
-from cosmos_framework.utils.flags import DEVICE, Device
-from cosmos_framework.utils.lazy_config import LazyDict
-from cosmos_framework.utils.lazy_config import instantiate as lazy_instantiate
-from cosmos_framework.utils.lazy_config.registry import locate
-from cosmos_framework.model._base import ImaginaireModel
-from cosmos_framework.utils import log, misc
-from cosmos_framework.utils.count_params import count_params
-from cosmos_framework.model.generator.algorithm.loss.flow_matching import (
-    ACTION_SLOT_SAMPLE_COUNT_KEY,
-    ACTION_SLOT_SAMPLE_LOSS_KEY,
-    ActionSlotLossStats,
-    compute_flow_matching_loss,
-)
-from cosmos_framework.model.generator.algorithm.loss.load_balancing import compute_load_balancing_loss
 from cosmos_framework.configs.base.defaults.model_config import OmniMoTModelConfig
 from cosmos_framework.configs.base.defaults.parallelism import PRECISION_TO_TORCH_DTYPE
 from cosmos_framework.data.generator.action.utils.action_processing import (
@@ -41,7 +27,23 @@ from cosmos_framework.data.generator.action.utils.action_processing import (
     get_action_processing_records,
 )
 from cosmos_framework.data.generator.action.utils.unified_action_schema import UNIFIED_ACTION_SLOT_GROUPS
+from cosmos_framework.data.generator.sequence_packing import (
+    PackedSequence,
+    SequencePlan,
+    build_sequence_plans_from_data_batch,
+    pack_input_sequence,
+)
+from cosmos_framework.data.generator.sequence_packing.modality import add_special_tokens
+from cosmos_framework.data.generator.sequence_packing.packers import is_item_generated
 from cosmos_framework.data.generator.utils import IMAGE_RES_SIZE_INFO, VIDEO_RES_SIZE_INFO
+from cosmos_framework.model._base import ImaginaireModel
+from cosmos_framework.model.generator.algorithm.loss.flow_matching import (
+    ACTION_SLOT_SAMPLE_COUNT_KEY,
+    ACTION_SLOT_SAMPLE_LOSS_KEY,
+    ActionSlotLossStats,
+    compute_flow_matching_loss,
+)
+from cosmos_framework.model.generator.algorithm.loss.load_balancing import compute_load_balancing_loss
 from cosmos_framework.model.generator.diffusion.rectified_flow import RectifiedFlow
 from cosmos_framework.model.generator.diffusion.samplers.edm import EDMSampler
 from cosmos_framework.model.generator.diffusion.samplers.fixed_step import FixedStepSampler
@@ -51,9 +53,6 @@ from cosmos_framework.model.generator.mot.context_parallel_utils import (
     context_parallel_broadcast_tensor_list,
 )
 from cosmos_framework.model.generator.mot.cosmos3_vfm_network import Cosmos3VFMNetwork, Cosmos3VFMNetworkConfig
-from cosmos_framework.model.generator.repa.adapters import repa_cosine_loss, repa_relation_loss
-from cosmos_framework.model.generator.repa.alignment import RepaTeacherTokens
-from cosmos_framework.model.generator.repa.vjepa_teacher import VJEPA21Teacher, resolve_teacher_spec
 from cosmos_framework.model.generator.mot.inference_text_kv_memory import (
     InferenceTextKVMemoryState,
     UndKVCache,
@@ -64,6 +63,19 @@ from cosmos_framework.model.generator.mot.inference_text_kv_memory import (
 from cosmos_framework.model.generator.mot.modeling_utils import has_noisy_tokens
 from cosmos_framework.model.generator.mot.parallelize_vfm_network import parallelize_vfm_network
 from cosmos_framework.model.generator.reasoner.qwen3_vl.utils import tokenize_caption
+from cosmos_framework.model.generator.repa.adapters import (
+    centered_cosine_similarity,
+    repa_centered_cosine_loss,
+    repa_cosine_loss,
+    repa_relation_loss,
+    repa_spatial_normalized_cosine_loss,
+    repa_temporal_difference_cosine_loss,
+)
+from cosmos_framework.model.generator.repa.alignment import RepaTeacherTokens
+from cosmos_framework.model.generator.repa.sigreg import sigreg_loss
+from cosmos_framework.model.generator.repa.teachers import build_repa_teacher, resolve_repa_teacher_spec
+from cosmos_framework.model.generator.tokenizers.interface import VideoTokenizerInterface
+from cosmos_framework.model.generator.upsampler.prompts import build_messages, clean_response
 from cosmos_framework.model.generator.utils.data_and_condition import (
     GenerationDataClean,
     GenerationDataNoised,
@@ -90,21 +102,17 @@ from cosmos_framework.model.generator.vision_encoder import (
     normalize_uint8_item,
     validate_multiview_length,
 )
-from cosmos_framework.data.generator.sequence_packing import (
-    PackedSequence,
-    SequencePlan,
-    build_sequence_plans_from_data_batch,
-    pack_input_sequence,
-)
-from cosmos_framework.data.generator.sequence_packing.modality import add_special_tokens
-from cosmos_framework.data.generator.sequence_packing.packers import is_item_generated
-from cosmos_framework.model.generator.tokenizers.interface import VideoTokenizerInterface
-from cosmos_framework.model.generator.upsampler.prompts import build_messages, clean_response
+from cosmos_framework.utils import log, misc
+from cosmos_framework.utils.count_params import count_params
+from cosmos_framework.utils.flags import DEVICE, Device
 from cosmos_framework.utils.generator.data_utils import get_vision_data_resolution, read_positive_int_metadata
 from cosmos_framework.utils.generator.dtensor_helper import DTensorFastEmaModelUpdater
 from cosmos_framework.utils.generator.model_weights_stats import WeightTrainingStat
 from cosmos_framework.utils.generator.parallelism import ParallelDims
 from cosmos_framework.utils.generator.quantization import swap_modelopt_fp8_linears_on_meta
+from cosmos_framework.utils.lazy_config import LazyDict
+from cosmos_framework.utils.lazy_config import instantiate as lazy_instantiate
+from cosmos_framework.utils.lazy_config.registry import locate
 
 
 def _all_group_ranks_allow(
@@ -336,7 +344,6 @@ class OmniMoTModel(ImaginaireModel):
         else:
             self.tokenizer_sound_gen = None
 
-
     def build_net(
         self,
         dtype: torch.dtype,
@@ -422,6 +429,7 @@ class OmniMoTModel(ImaginaireModel):
                 sound_latent_fps=self.config.sound_latent_fps,
                 enable_input_bias=self.config.enable_input_bias,
                 **self._repa_network_config_kwargs(),
+                **self._sigreg_network_config_kwargs(),
             )
             network_config._attn_implementation_internal = "eager"
             net = Cosmos3VFMNetwork(
@@ -486,11 +494,16 @@ class OmniMoTModel(ImaginaireModel):
 
     def _repa_teacher_grid_thw(self) -> tuple[int, int, int]:
         repa_cfg = self.config.repa
-        patch, tubelet = 16, 2  # V-JEPA 2.1 ViT-*/16 with 2-frame tubelets
+        spec = resolve_repa_teacher_spec(repa_cfg.teacher)
+        patch, tubelet = (
+            spec.patch_size,
+            spec.tubelet_size,
+        )  # V-JEPA 2.1: 16 px / 2-frame tubelets; DINOv2: 14 px / per frame
         if repa_cfg.teacher_num_frames % tubelet != 0 or repa_cfg.teacher_input_size % patch != 0:
             raise ValueError(
-                f"repa.teacher_num_frames={repa_cfg.teacher_num_frames} must be even and "
-                f"repa.teacher_input_size={repa_cfg.teacher_input_size} a multiple of 16"
+                f"repa.teacher_num_frames={repa_cfg.teacher_num_frames} must be a multiple of {tubelet} and "
+                f"repa.teacher_input_size={repa_cfg.teacher_input_size} a multiple of {patch} for teacher {spec.name} "
+                f"(default input size {spec.default_input_size})"
             )
         side = repa_cfg.teacher_input_size // patch
         return (repa_cfg.teacher_num_frames // tubelet, side, side)
@@ -503,7 +516,7 @@ class OmniMoTModel(ImaginaireModel):
         return dict(
             repa_enabled=True,
             repa_layer_index=int(repa_cfg.layer_index),
-            repa_teacher_embed_dim=resolve_teacher_spec(repa_cfg.teacher).embed_dim,
+            repa_teacher_embed_dim=resolve_repa_teacher_spec(repa_cfg.teacher).embed_dim,
             repa_projector_hidden_dim=int(repa_cfg.projector_hidden_dim),
             repa_projector_type=str(repa_cfg.projector_type),
             repa_target_adapter=repa_cfg.target_adapter,
@@ -514,8 +527,27 @@ class OmniMoTModel(ImaginaireModel):
             repa_num_views=int(repa_cfg.num_views),
         )
 
+    @property
+    def sigreg_enabled(self) -> bool:
+        sigreg_cfg = getattr(self.config, "sigreg", None)
+        return bool(sigreg_cfg is not None and sigreg_cfg.enabled)
+
+    @property
+    def sigreg_on_residual_tokens(self) -> bool:
+        """Legacy SIGReg input: the raw residual stream at ``sigreg.layer_index`` (needs the network-side capture)."""
+        return self.sigreg_enabled and getattr(self.config.sigreg, "input", "repa_projection") == "residual_tokens"
+
+    def _sigreg_network_config_kwargs(self) -> dict[str, Any]:
+        """Intermediate-layer capture arguments for visual-token SIGReg (residual_tokens mode only)."""
+        if not self.sigreg_on_residual_tokens:
+            return {}
+        return dict(
+            sigreg_enabled=True,
+            sigreg_layer_index=int(self.config.sigreg.layer_index),
+        )
+
     def _set_up_repa_teacher(self) -> None:
-        """Build the frozen V-JEPA 2.1 teacher on the training device.
+        """Build the frozen teacher (V-JEPA 2.1 by default, DINOv2 for ``repa.teacher="dinov2_*"``) on the training device.
 
         Kept OUT of the ``nn.Module`` registry (``object.__setattr__``) so it never shows up in
         ``parameters()`` / ``state_dict()`` / ``train()`` of the ImaginaireModel: it is not trained, not
@@ -527,7 +559,7 @@ class OmniMoTModel(ImaginaireModel):
                 "REPA needs the raw frames of the batch on every rank, but context parallelism broadcasts a "
                 "tokenized payload without them; run REPA with context_parallel_shard_degree=1."
             )
-        teacher = VJEPA21Teacher(
+        teacher = build_repa_teacher(
             repa_cfg.teacher,
             checkpoint_path=repa_cfg.teacher_checkpoint_path,
             input_size=int(repa_cfg.teacher_input_size),
@@ -736,6 +768,26 @@ class OmniMoTModel(ImaginaireModel):
         object.__setattr__(self, "repa_teacher", None)
         if self.repa_enabled:
             self._set_up_repa_teacher()
+        if self.sigreg_enabled:
+            sigreg_cfg = self.config.sigreg
+            if self.sigreg_on_residual_tokens:
+                where = f"raw residual stream of ALL vision tokens after MoT block {sigreg_cfg.layer_index}"
+            else:
+                if not self.repa_enabled:
+                    raise ValueError(
+                        "sigreg.input='repa_projection' regularizes the REPA projector output and therefore needs "
+                        "model.config.repa.enabled=True (or use sigreg.input='residual_tokens')."
+                    )
+                where = (
+                    f"REPA projector output of the predicted video tokens (MoT block {self.config.repa.layer_index}, "
+                    f"D={resolve_repa_teacher_spec(self.config.repa.teacher).embed_dim})"
+                )
+            log.info(
+                f"SIGReg enabled on the {where}: loss_weight={sigreg_cfg.loss_weight}, "
+                f"normalize_by_count={sigreg_cfg.normalize_by_count}, num_slices={sigreg_cfg.num_slices}, "
+                f"num_points={sigreg_cfg.num_points}, integration=[-{sigreg_cfg.integration_max}, "
+                f"{sigreg_cfg.integration_max}]"
+            )
 
         torch.cuda.empty_cache()
 
@@ -1570,6 +1622,7 @@ class OmniMoTModel(ImaginaireModel):
             data_batch_packed=packed_sequence,
             memory=memory,
             repa_teacher_tokens=repa_teacher_tokens,
+            capture_sigreg=self.sigreg_on_residual_tokens,
         )
 
         loss, losses_dict = self._compute_losses(
@@ -1581,6 +1634,7 @@ class OmniMoTModel(ImaginaireModel):
             timesteps_action=timesteps_action,
             timesteps_sound=timesteps_sound,
             timesteps_lidar=timesteps_lidar,
+            iteration=iteration,
         )
 
         _vision_tokens = len(packed_sequence.vision.sequence_indexes) if packed_sequence.vision else 0
@@ -1753,6 +1807,7 @@ class OmniMoTModel(ImaginaireModel):
         timesteps_action: torch.Tensor | None = None,
         timesteps_sound: torch.Tensor | None = None,
         timesteps_lidar: torch.Tensor | None = None,
+        iteration: int = 0,
     ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """Compute flow matching loss and auxiliary load balancing losses.
 
@@ -1944,7 +1999,8 @@ class OmniMoTModel(ImaginaireModel):
         # 1b. V-JEPA 2.1 representation alignment (REPA) over the predicted video tokens (``proj`` = REPA MLP or,
         # with ``repa.projector_type="linear"``, a single Linear; the teacher is frozen and the adapter (variants
         # 2/3) is the only learnable part on the target side):
-        #   * ``repa_loss``     = ``1 - cos(proj(h_k), adapter(teacher))``, weight ``repa.loss_weight``;
+        #   * ``repa_loss`` = cosine alignment selected by ``repa.objective``: absolute tokens (base), same-patch
+        #     temporal differences (v8), or per-frame spatially normalized tokens (v10);
         #   * ``repa_rel_loss`` = VideoREPA-style token-relation distillation, ``dist(R(proj(h_k)), R(target))`` with
         #     ``R`` the per-sample pairwise cosine-similarity map, weight ``repa.relation_loss_weight`` (v5 recipe).
         # Both are always computed and logged; a zero weight contributes exactly 0 to ``total_loss``.
@@ -1956,8 +2012,44 @@ class OmniMoTModel(ImaginaireModel):
                 repa_rel_loss = repa_loss
             else:
                 repa_target = out_net["repa_target"]
-                repa_loss, repa_cos = repa_cosine_loss(repa_pred, repa_target)
+                objective = str(repa_cfg.objective)
+                if objective == "temporal_difference":
+                    repa_loss, objective_cos = repa_temporal_difference_cosine_loss(
+                        repa_pred,
+                        repa_target,
+                        out_net["repa_num_tokens_per_sample"],
+                        out_net["repa_frame_indexes_per_sample"],
+                    )
+                    losses_dict["repa_cos_sim_transition"] = objective_cos
+                elif objective == "spatial_normalized":
+                    repa_loss, objective_cos = repa_spatial_normalized_cosine_loss(
+                        repa_pred,
+                        repa_target,
+                        out_net["repa_num_tokens_per_sample"],
+                        out_net["repa_frame_indexes_per_sample"],
+                        eps=float(repa_cfg.spatial_norm_eps),
+                    )
+                    losses_dict["repa_cos_sim_spatial_norm"] = objective_cos
+                elif objective == "token" and repa_cfg.center_targets:
+                    # Centered objective: the shared (batch-mean) teacher direction is removed from both sides, so only
+                    # the token-specific structure is trained. ``repa_cos_sim`` still logs the raw cosine.
+                    repa_loss, repa_cos_centered = repa_centered_cosine_loss(repa_pred, repa_target)
+                elif objective == "token":
+                    repa_loss, repa_cos = repa_cosine_loss(repa_pred, repa_target)
+                    # Shortcut detector (no gradient): cosine after removing the batch-mean teacher direction. On LIBERO
+                    # a constant / per-position-mean prediction already reads raw cos ~0.92-0.95 but ~0 here.
+                    repa_cos_centered = centered_cosine_similarity(repa_pred, repa_target)
+                else:
+                    raise ValueError(f"Unknown REPA objective {objective!r}")
+
+                # The raw absolute-token cosine remains comparable across every variant. Specialized objective
+                # cosines above say what v8/v10 actually optimize.
+                if objective != "token" or repa_cfg.center_targets:
+                    _, repa_cos = repa_cosine_loss(repa_pred.detach(), repa_target)
+                if objective != "token":
+                    repa_cos_centered = centered_cosine_similarity(repa_pred, repa_target)
                 losses_dict["repa_cos_sim"] = repa_cos
+                losses_dict["repa_cos_sim_centered"] = repa_cos_centered
                 repa_rel_loss = repa_relation_loss(
                     repa_pred,
                     repa_target,
@@ -1967,6 +2059,32 @@ class OmniMoTModel(ImaginaireModel):
             total_loss += repa_loss * repa_cfg.loss_weight + repa_rel_loss * repa_cfg.relation_loss_weight
             losses_dict["repa_loss"] = repa_loss
             losses_dict["repa_rel_loss"] = repa_rel_loss
+
+        # 1c. LeJEPA / LeWorldModel SIGReg on visual tokens only. ``sigreg_visual_tokens`` was sliced from the
+        # selected MoT residual stream before it reached this loss, so text/action/sound/LiDAR tokens are excluded.
+        if self.sigreg_enabled:
+            sigreg_cfg = self.config.sigreg
+            if self.sigreg_on_residual_tokens:
+                sigreg_tokens = out_net.get("sigreg_visual_tokens")
+            else:
+                # Shared-space SIGReg (LeJEPA / LeWorldModel structure): regularize the REPA projector output of the
+                # predicted video tokens, the tensor the REPA cosine loss is computed on. The clean conditioning frame
+                # is not part of it. ``repa_pred`` is the probe (no real tokens) when ``repa_empty``.
+                sigreg_tokens = None if out_net.get("repa_empty", False) else out_net.get("repa_pred")
+            if sigreg_tokens is not None and sigreg_tokens.ndim == 2 and sigreg_tokens.shape[0] > 0:
+                dp_group, _ = self._loss_averaging_group()
+                sigreg_value = sigreg_loss(
+                    sigreg_tokens,
+                    num_slices=int(sigreg_cfg.num_slices),
+                    num_points=int(sigreg_cfg.num_points),
+                    integration_max=float(sigreg_cfg.integration_max),
+                    slice_batch_size=int(sigreg_cfg.slice_batch_size),
+                    seed=int(sigreg_cfg.seed) + int(iteration),
+                    process_group=dp_group,
+                    normalize_by_count=bool(sigreg_cfg.normalize_by_count),
+                )
+                total_loss += sigreg_value * sigreg_cfg.loss_weight
+                losses_dict["sigreg_loss"] = sigreg_value
 
         # 2. Load balancing auxiliary losses
         device_mesh, context_parallel_mesh = self._get_load_balancing_loss_meshes()
@@ -5702,6 +5820,7 @@ class OmniMoTModel(ImaginaireModel):
         memory: MemoryState | None = None,
         video_temporal_causal: bool | None = None,
         repa_teacher_tokens: RepaTeacherTokens | torch.Tensor | list[torch.Tensor] | None = None,
+        capture_sigreg: bool = False,
     ) -> dict:
         """
         Runs the MoT network on a packed multi-modal sequence to predict velocity (v) targets.
@@ -5727,6 +5846,8 @@ class OmniMoTModel(ImaginaireModel):
         net_kwargs: dict[str, Any] = {}
         if repa_teacher_tokens is not None:
             net_kwargs["repa_teacher_tokens"] = repa_teacher_tokens
+        if capture_sigreg:
+            net_kwargs["capture_sigreg"] = True
         out_net = net(
             packed_seq=data_batch_packed,
             memory=memory,
@@ -5735,7 +5856,14 @@ class OmniMoTModel(ImaginaireModel):
         )
         output_dict = dict()
         output_dict["preds_vision"] = out_net["preds_vision"]
-        for key in ("repa_pred", "repa_target", "repa_empty", "repa_num_tokens_per_sample"):
+        for key in (
+            "repa_pred",
+            "repa_target",
+            "repa_empty",
+            "repa_num_tokens_per_sample",
+            "repa_frame_indexes_per_sample",
+            "sigreg_visual_tokens",
+        ):
             if key in out_net:
                 output_dict[key] = out_net[key]
         if "preds_lidar" in out_net:

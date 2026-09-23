@@ -5,7 +5,6 @@ from typing import Any, Literal
 
 import attrs
 
-from cosmos_framework.utils.lazy_config import LazyDict
 from cosmos_framework.configs.base.defaults.activation_checkpointing import ActivationCheckpointingConfig
 from cosmos_framework.configs.base.defaults.compile import CompileConfig
 from cosmos_framework.configs.base.defaults.ema import EMAConfig
@@ -15,6 +14,7 @@ from cosmos_framework.configs.base.defaults.quantization import QuantizationConf
 from cosmos_framework.configs.base.defaults.reasoner import VLMConfig
 from cosmos_framework.model.generator.mot.action_io_projector import ACTION_IO_PROJECTOR_TYPES
 from cosmos_framework.model.generator.utils.load_balancing_stats import LBLConfig
+from cosmos_framework.utils.lazy_config import LazyDict
 
 # Mirrors ``cosmos3.common.args.AttentionIOLayout``. Defined locally on purpose: importing
 # the ``cosmos3`` workspace package at module scope makes the whole cosmos3 config tree
@@ -146,14 +146,31 @@ class RepaConfig:
     enabled: bool = False
     # Weight of the (unweighted, in [0, 2]) cosine loss ``1 - cos`` in the total loss.
     loss_weight: float = 0.5
+    # Which token-level signal is aligned by the cosine term:
+    #   token                -- the original absolute projected feature;
+    #   temporal_difference  -- same-patch P(h[t+1]) - P(h[t]) transitions;
+    #   spatial_normalized   -- per-frame, per-channel normalization over spatial patches before cosine.
+    objective: str = attrs.field(
+        default="token", validator=attrs.validators.in_({"token", "temporal_difference", "spatial_normalized"})
+    )
+    # Denominator stabilizer for objective="spatial_normalized" (std over patches + eps).
+    spatial_norm_eps: float = 1.0e-6
     # Weight of the token-relation distillation loss (v5 recipe: 5.0 with loss_weight 0.0). 0 = monitor only.
     relation_loss_weight: float = 0.0
     # Entry-wise distance between the student and teacher relation maps: "l2" (squared) or "l1" (absolute).
     relation_distance: str = attrs.field(default="l2", validator=attrs.validators.in_({"l2", "l1"}))
+    # Center the cosine loss: subtract the (detached) batch-mean teacher target from BOTH the projected student tokens
+    # and the targets before the cosine. V-JEPA 2.1 tokens share a dominant common direction (on LIBERO a constant
+    # prediction already scores raw cos ~0.92), so the raw objective is mostly satisfied by that shortcut; centering
+    # makes only the token-specific part count. ``repa_cos_sim`` stays the raw cosine, ``repa_cos_sim_centered`` the
+    # centered one, whichever is trained.
+    center_targets: bool = False
     # Number of MoT decoder blocks applied before the aligned hidden state is read (REPA "depth"): 8 = output
     # of the 8th block (0-based block index 7). Nemotron-2B (Cosmos3-Edge) has 28 blocks.
     layer_index: int = 8
-    # Teacher backbone: "vjepa2_1_vit_base_384" (ViT-B/16, D=768, default) or "vjepa2_1_vit_large_384" (ViT-L/16, 1024).
+    # Teacher backbone: "vjepa2_1_vit_base_384" (ViT-B/16, D=768, default) or "vjepa2_1_vit_large_384" (ViT-L/16, 1024);
+    # or a DINOv2 image encoder "dinov2_vitb14" (D=768; also vits14 / vitl14) applied per frame -- then set
+    # teacher_input_size to a multiple of 14 (224 -> the same 16x16 grid) and teacher_checkpoint_path may name an HF repo/dir.
     teacher: str = "vjepa2_1_vit_base_384"
     # Explicit checkpoint file/dir. None = $COSMOS_STORAGE/checkpoints/vjepa2_1/<release file> (download if absent).
     teacher_checkpoint_path: str | None = None
@@ -186,6 +203,53 @@ class RepaConfig:
     num_views: int = 2
     # data_batch key holding the un-resized uint8 frames [C,T,H,V*W] (set keep_native_video=True on the dataset).
     native_video_key: str = "video_native"
+
+
+@attrs.define(slots=False)
+class SigRegConfig:
+    """Sketched Isotropic Gaussian regularization (LeJEPA / LeWorldModel SIGReg) of MoT visual tokens.
+
+    SIGReg projects the selected token vectors onto random unit directions and applies the Epps--Pulley
+    characteristic-function test against N(0, 1); the empirical characteristic function is synchronized over the
+    data-parallel group.
+
+    ``input`` selects the regularized space:
+      * ``"repa_projection"`` (default): the REPA projector output of the predicted (noised) video tokens, i.e. the
+        same ``[N, D_teacher]`` tensor the REPA cosine loss is computed on. This mirrors both papers, where SIGReg
+        acts on the projector output that the prediction loss lives in (LeJEPA: MLP+BN -> 16-128 dims; LeWorldModel:
+        1-layer MLP+BN on the CLS token), and it automatically excludes the clean conditioning frame. Requires
+        ``repa.enabled``; the layer is ``repa.layer_index`` (``sigreg.layer_index`` is ignored).
+      * ``"residual_tokens"``: legacy behaviour -- the raw block-``layer_index`` residual stream (2048-dim) of ALL
+        vision tokens including the clean conditioning frame, no projector or normalization.
+
+    ``normalize_by_count``: the Epps--Pulley statistic is ``N * integral(|ecf - cf|^2 w)``; the ``N`` factor is what
+    makes it O(1) under the null hypothesis, but far from Gaussian it is O(N), and here ``N`` is the number of TOKENS
+    (~5e4 per step) rather than the papers' batch of pooled embeddings (~1e2-1e3). With ``True`` the statistic is the
+    per-token integral instead (bounded, roughly in [0, 1.8], batch-size invariant), so ``loss_weight`` can be read
+    relative to the other per-token-mean losses.
+    """
+
+    enabled: bool = False
+    input: str = attrs.field(
+        default="repa_projection", validator=attrs.validators.in_({"repa_projection", "residual_tokens"})
+    )
+    normalize_by_count: bool = True
+    # With normalize_by_count=True the statistic is O(1); 1.0 keeps it secondary to the REPA term (weight 5) and the
+    # x10-scaled flow-matching terms under clip_norm=1.0. The legacy v9 setting was 0.1 on the un-normalized
+    # statistic (~5e4 at init), which dominated the clipped gradient.
+    loss_weight: float = 1.0
+    # residual_tokens mode only: MoT decoder blocks applied before the regularized hidden states (8 or 28 for Edge).
+    layer_index: int = 8
+    # Random Cramer--Wold directions. 256 is the reference implementation's efficient default; 1024 is the paper
+    # default and can be selected from TOML when the extra compute is acceptable.
+    num_slices: int = 256
+    # Trapezoid quadrature of the Epps--Pulley integral on [-integration_max, integration_max].
+    num_points: int = 17
+    integration_max: float = 5.0
+    # Process random directions in chunks so token-level SIGReg does not materialize [N, num_slices, num_points].
+    slice_batch_size: int = 64
+    # Base seed; the training iteration is added so directions change per step but stay synchronized across ranks.
+    seed: int = 0
 
 
 @attrs.define(slots=False)
@@ -291,6 +355,9 @@ class OmniMoTModelConfig:
 
     # V-JEPA 2.1 representation alignment loss (off by default).
     repa: RepaConfig = RepaConfig()
+
+    # Optional SIGReg anti-collapse regularizer on MoT visual tokens (off by default).
+    sigreg: SigRegConfig = SigRegConfig()
 
     # Model configs
     vlm_config: VLMConfig = VLMConfig()

@@ -306,26 +306,45 @@ class RepaTomlConfig(BaseModel):
 
     enabled: Optional[bool] = Field(default=None, description="Turn the REPA loss on/off.")
     loss_weight: Optional[float] = Field(
-        default=None, description="Weight of the unweighted cosine loss (1 - cos) in the total loss. Recipe default 0.5."
+        default=None,
+        description="Weight of the unweighted cosine loss (1 - cos) in the total loss. Recipe default 0.5.",
+    )
+    objective: Optional[str] = Field(
+        default=None,
+        description="Cosine objective: 'token', 'temporal_difference', or per-frame 'spatial_normalized'.",
+    )
+    spatial_norm_eps: Optional[float] = Field(
+        default=None, description="Denominator epsilon for objective='spatial_normalized'."
     )
     relation_loss_weight: Optional[float] = Field(
         default=None,
         description="Weight of the VideoREPA-style token-relation loss (student vs teacher pairwise cosine-similarity maps). 0 = log only.",
     )
+    center_targets: Optional[bool] = Field(
+        default=None,
+        description="Subtract the batch-mean teacher target from both sides before the cosine loss (removes the shared V-JEPA direction shortcut).",
+    )
     relation_distance: Optional[str] = Field(
-        default=None, description="Entry-wise distance of the relation loss: 'l2' (squared, default) or 'l1' (absolute)."
+        default=None,
+        description="Entry-wise distance of the relation loss: 'l2' (squared, default) or 'l1' (absolute).",
     )
     layer_index: Optional[int] = Field(
         default=None,
         description="MoT decoder blocks applied before the aligned hidden state is read (8 = output of block 8 of 28).",
     )
     teacher: Optional[str] = Field(
-        default=None, description="'vjepa2_1_vit_base_384' (ViT-B/16, default) or 'vjepa2_1_vit_large_384' (ViT-L/16)."
+        default=None,
+        description=(
+            "'vjepa2_1_vit_base_384' (ViT-B/16, default) or 'vjepa2_1_vit_large_384' (ViT-L/16); or 'dinov2_vitb14' "
+            "(DINOv2 ViT-B/14 per frame; set teacher_input_size=224)."
+        ),
     )
     teacher_checkpoint_path: Optional[str] = Field(
         default=None, description="Checkpoint file or dir; default $COSMOS_STORAGE/checkpoints/vjepa2_1/<release file>."
     )
-    teacher_input_size: Optional[int] = Field(default=None, description="Square teacher input side (256 = native grid).")
+    teacher_input_size: Optional[int] = Field(
+        default=None, description="Square teacher input side (256 = native grid)."
+    )
     teacher_num_frames: Optional[int] = Field(default=None, description="Raw frames per view fed to the teacher (16).")
     teacher_batch_size: Optional[int] = Field(default=None, description="Clips per teacher forward chunk.")
     target_adapter: Optional[str] = Field(
@@ -337,12 +356,46 @@ class RepaTomlConfig(BaseModel):
         default=None, description="Variant 3 per-view target grid [T, H, W]; LIBERO-10 concat_view = [4, 5, 5]."
     )
     projector_type: Optional[str] = Field(
-        default=None, description="Student-side projector: 'mlp' (REPA 3-layer SiLU MLP, default) or 'linear' (one Linear)."
+        default=None,
+        description="Student-side projector: 'mlp' (REPA 3-layer SiLU MLP, default) or 'linear' (one Linear).",
     )
     projector_hidden_dim: Optional[int] = Field(
         default=None, description="REPA MLP hidden width (2048); ignored for projector_type='linear'."
     )
     num_views: Optional[int] = Field(default=None, description="Camera views concatenated along the canvas width (2).")
+
+
+class SigRegTomlConfig(BaseModel):
+    """SIGReg on visual tokens from a selectable MoT layer. VFM only; lands at ``model.config.sigreg.*``."""
+
+    model_config = _PYDANTIC_MODEL_CONFIG
+
+    enabled: Optional[bool] = Field(default=None, description="Enable visual-token SIGReg.")
+    input: Optional[str] = Field(
+        default=None,
+        description=(
+            "'repa_projection' (default: REPA projector output of the predicted video tokens, the space the REPA loss "
+            "lives in; needs repa.enabled) or 'residual_tokens' (legacy: raw block-layer_index residual stream of all "
+            "vision tokens)."
+        ),
+    )
+    normalize_by_count: Optional[bool] = Field(
+        default=None,
+        description="Per-token Epps-Pulley integral (bounded, O(1)) instead of the N-scaled test statistic (O(N) far from Gaussian).",
+    )
+    loss_weight: Optional[float] = Field(default=None, description="Weight of SIGReg in the total training loss.")
+    layer_index: Optional[int] = Field(
+        default=None, description="MoT decoder blocks applied before SIGReg (8 or 28 for Cosmos3-Edge)."
+    )
+    num_slices: Optional[int] = Field(default=None, description="Number of random Cramer-Wold directions.")
+    num_points: Optional[int] = Field(default=None, description="Epps-Pulley trapezoid quadrature points.")
+    integration_max: Optional[float] = Field(
+        default=None, description="Positive endpoint of the symmetric Epps-Pulley integration interval."
+    )
+    slice_batch_size: Optional[int] = Field(
+        default=None, description="Random directions evaluated per memory-bounded chunk."
+    )
+    seed: Optional[int] = Field(default=None, description="Base seed for synchronized random directions.")
 
 
 class ModelConfig(BaseModel):
@@ -405,8 +458,7 @@ class ModelConfig(BaseModel):
     lora_rank: int = Field(
         default=16,
         description=(
-            "LoRA rank `r`. Adapter shape is (rank × hidden_dim) per target "
-            "module. Standard values are 4, 8, 16, 32."
+            "LoRA rank `r`. Adapter shape is (rank × hidden_dim) per target module. Standard values are 4, 8, 16, 32."
         ),
     )
     lora_alpha: int = Field(
@@ -427,12 +479,11 @@ class ModelConfig(BaseModel):
     ema: EMAConfig = Field(default_factory=EMAConfig)
     parallelism: ParallelismConfig = Field(default_factory=ParallelismConfig)
     compile: CompileConfig = Field(default_factory=CompileConfig)
-    activation_checkpointing: ActivationCheckpointingConfig = Field(
-        default_factory=ActivationCheckpointingConfig
-    )
+    activation_checkpointing: ActivationCheckpointingConfig = Field(default_factory=ActivationCheckpointingConfig)
     tokenizer: ModelTokenizerConfig = Field(default_factory=ModelTokenizerConfig)
     backbone: BackboneConfig = Field(default_factory=BackboneConfig)
     repa: RepaTomlConfig = Field(default_factory=RepaTomlConfig)
+    sigreg: SigRegTomlConfig = Field(default_factory=SigRegTomlConfig)
 
 
 # ---------------------------------------------------------------- optimizer
@@ -522,15 +573,12 @@ class SchedulerConfig(BaseModel):
     )
     f_start: list[float] = Field(
         default_factory=lambda: [1.0e-6],
-        description=(
-            "Initial LR multiplier at step 0, before warmup ramps up."
-        ),
+        description=("Initial LR multiplier at step 0, before warmup ramps up."),
     )
     verbosity_interval: int = Field(
         default=0,
         description=(
-            "How often the scheduler logs the current LR (in optimizer "
-            "steps). 0 = silent. VFM only — skipped on VLM."
+            "How often the scheduler logs the current LR (in optimizer steps). 0 = silent. VFM only — skipped on VLM."
         ),
     )
     warm_up_steps: list[int] = Field(
@@ -582,8 +630,7 @@ class GradClipCallback(BaseModel):
     clip_norm: float = Field(
         default=1.0,
         description=(
-            "Maximum global L2 norm of the gradient. Steps with a larger "
-            "norm are rescaled so ||grad|| ≤ clip_norm."
+            "Maximum global L2 norm of the gradient. Steps with a larger norm are rescaled so ||grad|| ≤ clip_norm."
         ),
     )
     force_finite: bool = Field(
@@ -616,8 +663,7 @@ class TrainerConfig(BaseModel):
     distributed_parallelism: str = Field(
         default="fsdp",
         description=(
-            "Distributed strategy. 'fsdp' (the only supported value today) "
-            "routes through cosmos's FSDP wrapper."
+            "Distributed strategy. 'fsdp' (the only supported value today) routes through cosmos's FSDP wrapper."
         ),
     )
     grad_accum_iter: int = Field(
@@ -726,10 +772,7 @@ class DataloaderTrainConfig(BaseModel):
     )
     seed: int = Field(
         default=42,
-        description=(
-            "Dataloader RNG seed. Skipped on VLM (CosmosDataLoader has "
-            "no seed ctor kwarg there)."
-        ),
+        description=("Dataloader RNG seed. Skipped on VLM (CosmosDataLoader has no seed ctor kwarg there)."),
     )
     episode_subset_path: Optional[str] = Field(
         default=None,
@@ -845,8 +888,7 @@ def load_experiment_from_toml(
         base_config_path = TASK_TO_BASE_CONFIG[task]
     except KeyError as e:
         raise ValueError(
-            f"{toml_path}: [job].task={task!r} is not supported. "
-            f"Valid values: {sorted(TASK_TO_BASE_CONFIG)}"
+            f"{toml_path}: [job].task={task!r} is not supported. Valid values: {sorted(TASK_TO_BASE_CONFIG)}"
         ) from e
 
     overrides = build_hydra_overrides(raw)
@@ -858,10 +900,7 @@ def load_experiment_from_toml(
             if not o or o == "--":
                 continue
             if "=" not in o:
-                raise ValueError(
-                    f"extra override {o!r} must be Hydra dotted-path syntax "
-                    f"(e.g. 'optimizer.lr=1e-5')."
-                )
+                raise ValueError(f"extra override {o!r} must be Hydra dotted-path syntax (e.g. 'optimizer.lr=1e-5').")
             overrides.append(o)
 
     # Import lazily so this module stays cheap to import in non-training contexts.

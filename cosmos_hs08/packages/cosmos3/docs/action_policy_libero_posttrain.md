@@ -73,7 +73,7 @@ export IMAGINAIRE_OUTPUT_ROOT=/path/to/output_root
 
 # Preset A — libero_10-only (LIBERO_ROOT = the libero_10 suite dir):
 export LIBERO_ROOT=<nfs>/LIBERO_LeRobot_v3/libero_10
-bash examples/launch_sft_action_policy_libero_10_nano.sh        # HSDP 2x8; set NNODES/NODE_RANK/MASTER_ADDR per node
+NPROC_PER_NODE=8 bash examples/launch_sft_action_policy_libero_10_nano.sh   # this repo: few-shot 30-demo TOML, FSDP shard 8 on one 8-GPU node (see below)
 
 # Preset B — libero-all 4-suite (LIBERO_ROOT = the LIBERO_LeRobot_v3 parent dir):
 export LIBERO_ROOT=<nfs>/LIBERO_LeRobot_v3
@@ -90,9 +90,15 @@ batch 2048 = `max_samples_per_batch` 128 × 16 ranks × grad_accum 1). They diff
 `libero_10` has 379 demonstrations over 10 tasks (29–49 per task; episode indices
 are interleaved across tasks, so "episodes 0–9" would NOT give one task's first
 demos). To post-train on a **fixed** N-demos-per-task subset instead, set
-`[dataloader_train].episode_subset_path` in the run TOML. This repo (cosmos_hs04)
-uses **3 demos per task = 30 episodes** in `action_policy_libero_10_edge.toml`
-(cosmos_hs03 uses the bundled 10-per-task file, 100 episodes):
+`[dataloader_train].episode_subset_path` in the run TOML. This repo (cosmos_hs08)
+uses **3 demos per task = 30 episodes** in both `action_policy_libero_10_edge.toml`
+(Cosmos3-Edge, FSDP shard 2 x 128 windows/rank) and `action_policy_libero_10_nano.toml`
+(Cosmos3-Nano, FSDP shard 8 x 32 windows/rank on one 8 x 48 GB node -- the same
+256-window global batch; Nano is ~5x larger and does not fit the Edge topology). The Nano
+TOML also sets `[model.compile].enabled = false`: on A40/A6000 (100 KB shared memory)
+Inductor's fused RMSNorm-backward kernel for the 4096-wide Qwen3 language region needs
+~115 KB and the first training step dies with `No valid triton configs ... out of resource`.
+cosmos_hs03 uses the bundled 10-per-task file, 100 episodes:
 
 ```toml
 [dataloader_train]
@@ -125,8 +131,10 @@ output filename if you change the seed/N so existing runs stay reproducible.
 
 ### Held-out validation loss (`val/*` in wandb)
 
-The Edge recipe can evaluate the training objective on demonstrations it never trains on. Enable it
-from the run TOML (already on in `action_policy_libero_10_edge.toml`):
+Both libero_10-only recipes (`action_policy_libero_edge` / `action_policy_libero_nano`) can evaluate the
+training objective on demonstrations they never train on. Enable it from the run TOML (already on in
+`action_policy_libero_10_edge.toml` and `action_policy_libero_10_nano.toml`; the Nano TOML uses 32 windows/rank
+x 8 ranks x `max_val_iter` 16 = the same 4096 windows per pass):
 
 ```toml
 [trainer]
@@ -151,7 +159,8 @@ windows each time) and runs under EMA when EMA is enabled. Logged (rank 0):
 * `val/num_batches`, `val/num_nonfinite`.
 
 Implementation: `OmniMoTModel.validation_step` (= `training_step` under `no_grad`),
-`callbacks/val_loss_breakdown.py`, `dataloader_val` in `action_policy_libero_edge.py`. Closed-loop success
+`callbacks/val_loss_breakdown.py`, `dataloader_val` in `action_policy_libero_edge.py` /
+`action_policy_libero_nano.py` (both experiments define it; it is idle unless `run_validation` is on). Closed-loop success
 rate is still measured separately (below).
 
 ## 3. Closed-loop eval

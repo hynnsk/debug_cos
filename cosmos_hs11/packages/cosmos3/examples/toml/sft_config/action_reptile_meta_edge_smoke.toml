@@ -1,0 +1,80 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+# 2-GPU smoke of action_reptile_meta_edge (3 meta-iterations, 2 inner steps, tiny episodes, 2 YAM repos, DCP save at iter 2).
+#   TOML_FILE=examples/toml/sft_config/action_reptile_meta_edge_smoke.toml NPROC_PER_NODE=2 sr 2 48 examples/launch_reptile_meta_edge.sh
+
+# Env: ROBOT_FEWSHOT_ROOT, BASE_CHECKPOINT_PATH, WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT. See docs/action_reptile_meta.md.
+
+[job]
+task         = "vfm"
+experiment   = "action_reptile_meta_edge"
+project      = "cosmos3_action_meta"
+group        = "smoke"
+name         = "edge_reptile_full_smoke"
+wandb_mode   = "disabled"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+lora_enabled = false          # full-parameter mode
+
+[model.parallelism]
+data_parallel_shard_degree     = 2    # 2-GPU smoke
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+# ---- INNER optimizer = the downstream full-FT optimizer (FusedAdam) ----------------------------------------------
+[optimizer]
+lr             = 5.0e-05      # downstream full-FT LR; the inner loop must resemble the post-training it prepares for
+weight_decay   = 0.05
+keys_to_select = ["moe_gen", "time_embedder", "vae2llm", "llm2vae", "k_norm_und_for_gen", "action2llm", "llm2action", "action_modality_embed"]
+
+[optimizer.lr_multipliers]
+action2llm            = 1.0   # heads are meta-learned across episodes, not fresh per episode -> no 5x boost
+llm2action            = 1.0
+action_modality_embed = 1.0
+
+[trainer]
+max_iter     = 3
+logging_iter = 1
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 2
+keys_to_skip_loading = ["net_ema.", "action2llm", "llm2action", "action_modality_embed"]
+
+# ---- Reptile knobs (docs/action_reptile_meta.md) --------------------------------------------------------------------
+[custom.meta]
+theta_mode                  = "full"
+# episodic sampler: K support demos x w windows shared by all ranks (sharded), Q query demos for diagnostics only
+k_shot                = 2
+q_query               = 2
+windows_per_demo      = 4
+max_samples_per_batch = 4
+disjoint_tasks        = "auto"
+num_workers           = 2
+loader_timeout_s      = 1800
+seed                  = 42
+# inner loop: k standard optimizer steps from theta (~20 passes over the K demos, a miniature of the 3-demo post-training)
+inner_steps           = 2
+inner_warmup_steps    = 1
+inner_grad_clip       = 1.0
+inner_reset_optimizer = true
+# outer loop: theta <- theta + eps * (theta_tilde - theta); eps 0.5 -> 0.05 linearly over max_iter
+meta_optimizer        = "sgd"
+meta_lr               = 0.5
+meta_lr_min_ratio     = 0.1
+meta_lr_warmup_iters  = 0
+meta_batch_embodiments = 1        # >1 averages the displacement of several embodiments per meta step (x cost)
+loss_mode             = "total"   # the recipe's objective (10 x vision + 10 x action, EDGE_MODEL_CONFIG loss_scale / action_loss_weight) -- mimics post-training
+scratch_domain_id     = 31
+eval_query_every      = 1
+
+[custom.meta.dataset_kwargs.molmoact2_yam]
+max_repos = 2
