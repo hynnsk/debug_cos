@@ -192,3 +192,29 @@ raw cosine REPA loss wants `pred ∝ target`, and the V-JEPA targets carry a dom
 energy). With `center_targets = false` the two terms disagree about the mean of `pred`; with `center_targets = true`
 (v6-style centered cosine) they are compatible, and SIGReg additionally pins the scale of the centered predictions,
 which removes the `1/||u||` blow-up seen in v6. Log keys: `sigreg_loss` (train + val).
+
+## 8. Cosmos3-Nano recipes (`*_nano_repa_v{1,7,10}`)
+
+Experiment `action_policy_libero_nano_repa` = the cosmos_hs08 few-shot Nano recipe (Cosmos3-Nano = Qwen3-VL-8B MoT,
+hidden 4096, **36 blocks**; 30 train / 50 val demos; FSDP **shard 8 x 32 windows/rank** on one 8 x 48 GB node; AC full;
+**torch.compile off** -- Inductor's fused RMSNorm-backward for the 4096-wide language region exceeds Ampere's shared
+memory) plus the REPA head. Nothing in the REPA code is tier-specific: the projector reads `hidden_size` from the
+backbone, the `_repa_capture_layer` hook lives in the shared MoT layer loop, and the video-token grid is the same
+5 x 5 x 10 (same VAE / patchify / 192x320 canvas). Two defaults change for the larger student: the **ViT-L teachers**
+(`vjepa2_1_vit_large_384`, `dinov2_vitl14`, both D=1024, both already on shared storage / in the HF cache) and
+**`layer_index = 10`** (the Edge depth 8 of 28 mapped onto 36 blocks). Every knob stays TOML-editable under `[model.repa]`.
+
+| recipe | TOML / launcher | teacher | objective |
+| --- | --- | --- | --- |
+| Nano v1 | `action_policy_libero_10_nano_repa_v1.{toml,sh}` | V-JEPA 2.1 ViT-L/16 @256 | token cosine |
+| Nano v7 | `action_policy_libero_10_nano_repa_v7.{toml,sh}` | DINOv2 ViT-L/14 @224 | token cosine |
+| Nano v10 | `action_policy_libero_10_nano_repa_v10.{toml,sh}` | V-JEPA 2.1 ViT-L/16 @256 | spatial_normalized |
+
+```bash
+NPROC_PER_NODE=8 sr 8 48 bash examples/launch_sft_action_policy_libero_10_nano_repa_v1.sh    # also _v7 / _v10
+# smoke (3 iters, 4 windows/rank): VARIANT=v7 sr 8 48 bash ~/project/_scratch/hs10_nano_repa_smoke.sh
+```
+
+Cost: the teacher sees 32 x 2 = 64 clips per rank per step (Edge: 256), so ViT-L costs about what ViT-B did on Edge.
+Memory: hs08 measured 33.4 GiB allocated / 41 GiB reserved per GPU for the Nano few-shot recipe without REPA; the
+REPA head adds ~13 M params (4096 -> 2048 -> 2048 -> 1024) and the fp32 ViT-L teacher ~1.2 GB, so expect ~36 GiB.

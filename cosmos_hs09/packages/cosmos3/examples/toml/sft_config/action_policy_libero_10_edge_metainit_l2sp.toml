@@ -1,7 +1,15 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
-# cosmos_hs09 -- META INIT -> FULL fine-tune. LIBERO-10 few-shot post-training (3 demos/task = 30 episodes) with the
+# cosmos_hs09 -- META INIT -> FULL fine-tune + L2-SP. Identical to action_policy_libero_10_edge_metainit.toml except the
+# [trainer.callbacks.l2sp] section (and the run name): after every optimizer step the meta-initialised groups are pulled
+# toward their starting values, p <- p - lr_t * alpha * (p - p0) (decoupled, AdamW-style; docs section 6d), so the
+# meta init is not washed out by 2000 steps of full fine-tuning. Under a persistent Adam drift the deviation saturates
+# at ~1/alpha per weight: alpha 100 keeps a ~0.02-scale meta head weight within ~0.01 of its init, while still letting
+# the heads adapt to LIBERO's action space. The trunk (moe_gen, ...) is NOT anchored by default. Watch wandb
+# l2sp/rel_dev/<group>; raise alpha if the meta groups drift too far, lower it if val action loss lags the plain metainit run.
+#
+# Base recipe: LIBERO-10 few-shot post-training (3 demos/task = 30 episodes) with the
 # ORIGINAL Cosmos3 recipe (full moe_gen + time_embedder + vae2llm/llm2vae + k_norm_und_for_gen + action heads
 # trainable; experiment action_policy_libero_edge), initialized from the LoRA-regime theta_meta
 # (action_fewshot_meta_lora_edge: LoRA adapters + heads + time_embedder).
@@ -22,7 +30,7 @@ task         = "vfm"
 experiment   = "action_policy_libero_edge"
 project      = "cosmos3_action_libero"
 group        = "edge_libero10_fewshot"
-name         = "edge_libero10_3ep_fullft_metainit_2gpu_bs256_seed42_vision"
+name         = "edge_libero10_3ep_fullft_metainit_l2sp100"
 wandb_mode   = "online"
 
 [model]
@@ -76,6 +84,21 @@ run_validation          = true
 run_validation_on_start = true   # iteration 0 = the meta-initialized model before any update
 validation_iter         = 200
 max_val_iter            = 16     # x 64 windows x 4 ranks = 4096 windows ~= half of the 50-episode val set per pass (same windows every time)
+
+# ---- L2-SP (cosmos_hs09): decoupled pull of the meta-initialised groups toward their starting point ------------------
+[trainer.callbacks.l2sp]
+log_every = 100                  # wandb l2sp/rel_dev/<pattern> = ||p - p0|| / ||p0|| (head tables include 31 untouched rows), l2sp/rate/<pattern> = lr_t * alpha
+
+[trainer.callbacks.l2sp.alphas]  # name-substring -> alpha; first match wins; 0 = not anchored
+action2llm            = 100.0    # meta head rows (init scale ~0.02): sustained drift capped near 0.01 per weight
+llm2action            = 100.0
+action_modality_embed = 100.0
+time_embedder         = 100.0    # meta-initialised shared timestep MLP
+moe_gen               = 0.0      # trunk anchor toward the base checkpoint is OFF. It starts to bind around 500-1000 (measured
+vae2llm               = 0.0      #   full-FT trunk movement ~1e-3 per weight) and costs ~2.8 GB/GPU of fp32 anchors on 2 GPUs.
+llm2vae               = 0.0
+k_norm_und_for_gen    = 0.0
+lora_                 = 0.0      # frozen anyway (lr multiplier 0)
 
 [dataloader_train]
 max_samples_per_batch = 128       # per rank; x 4 ranks = global batch 256

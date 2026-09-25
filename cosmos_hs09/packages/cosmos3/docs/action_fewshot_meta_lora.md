@@ -52,6 +52,7 @@ LoRA and non-LoRA checkpoints interoperate) and `model.config.lora_*`; wired in 
 | meta run / smoke TOML | `examples/toml/sft_config/action_fewshot_meta_lora_edge{,_smoke}.toml` |
 | meta launcher | `examples/launch_meta_action_fewshot_lora_edge.sh` (MASTER_PORT 50015) |
 | vision-loss variant (6c) | `examples/toml/sft_config/action_fewshot_meta_lora_edge_vision_loss.toml` + `examples/launch_meta_action_fewshot_lora_edge_vision_loss.sh` (MASTER_PORT 50017) |
+| L2-SP variant (6d) | `examples/toml/sft_config/action_policy_libero_10_edge_metainit_l2sp.toml` + `examples/launch_sft_action_policy_libero_10_edge_metainit_l2sp.sh`; `callbacks/l2sp.py` |
 | downstream LoRA recipe (train + **val** loaders) | `configs/base/experiment/action/posttrain_config/action_policy_libero_lora_edge.py` |
 | baseline / ours TOML | `examples/toml/sft_config/action_policy_libero_10_lora_edge{,_metainit}.toml` |
 | baseline / ours launcher | `examples/launch_sft_action_policy_libero_10_lora_edge{,_metainit}.sh` |
@@ -209,6 +210,49 @@ tests `scripts/train_action_meta_test.py`. With the default 0.0 the outer object
 ```bash
 NPROC_PER_NODE=4 sr 4 48 examples/launch_meta_action_fewshot_lora_edge_vision_loss.sh
 # downstream: unchanged -- META_ACTION_INIT_PATH=<...>/fewshot_meta_lora/edge_meta_lora_r32_fomaml_adam_k5q5_w8_vision1.0_seed42/meta_action_init.pt
+```
+
+## 6d. Variant: meta init -> full fine-tune with L2-SP toward the init (`action_policy_libero_10_edge_metainit_l2sp.toml`)
+
+Purpose: in the full-FT recipe (6b) the meta-initialised groups -- head rows, `action_modality_embed`,
+`time_embedder` -- are ordinary trainable parameters, and 2000 Adam steps can move each weight by up to
+`sum(lr_t)` ~ 0.05, i.e. more than the ~0.02 init scale. L2-SP (Li, Grandvalet & Davoine, 2018) replaces the L2
+pull toward zero by a pull toward the *starting point*; here it is applied **decoupled**, AdamW-style, after every
+optimizer step (`callbacks/l2sp.py`):
+
+    p <- p - lr_t * alpha * (p - p0)           lr_t = current lr of p's optimizer group (schedule + lr_multipliers)
+
+Why decoupled and not a loss term: through Adam a loss penalty is rescaled per coordinate by the second-moment
+estimate, so its strength is no longer `alpha`. Decoupled, the rule has a clean reading: under a persistent Adam drift
+(~lr per step) the deviation saturates at **~1/alpha per weight, independent of lr**. alpha 100 caps a 0.02-scale meta
+head weight at ~0.01 of sustained drift while non-persistent gradients move it far less; alpha 20 would allow 0.05 (= no
+protection), alpha 1000 would nearly freeze the group. The e-folding time of a deviation at peak lr is 1/(lr*alpha) =
+200 steps for lr 5e-5, alpha 100.
+
+`p0` is captured at `on_train_start` of the fresh run, i.e. after checkpoint load *and* meta-init injection, and saved
+per rank to `<job dir>/l2sp_anchors/rank{r}_of_{W}.pt`; a resume reloads those original anchors (same world size
+required) instead of re-anchoring at the resumed weights. The pull runs on the local FSDP shards before the EMA update,
+so `net_ema` follows.
+
+Which groups: the TOML anchors exactly the meta-initialised trainable groups (`action2llm`, `llm2action`,
+`action_modality_embed`, `time_embedder`) at alpha 100. The meta LoRA is frozen anyway (lr multiplier 0 -> rate 0). The
+trunk (`moe_gen`, `vae2llm`, `llm2vae`, `k_norm_und_for_gen`) is left at 0: anchoring it toward the base checkpoint is the
+classic L2-SP regulariser against overfitting 30 demos, but it only starts to bind around alpha 500-1000 (measured
+full-FT trunk movement ~1e-3 per weight) and costs ~2.8 GB/GPU of fp32 anchors on 2 GPUs; turn it on deliberately.
+
+Diagnostics (wandb + console, every `log_every` steps): `l2sp/rel_dev/<pattern>` = ||p - p0|| / ||p0|| over that
+pattern's tensors (the 32-row head tables include 31 rows that never move, so their number is diluted; compare runs, not
+absolute values) and `l2sp/rate/<pattern>` = lr_t * alpha. Tuning: if `val/flow_matching_loss_action` lags the plain
+metainit run (6b) at the same iteration, alpha is too strong -> 30-50; if `rel_dev` of the meta groups still climbs like
+the 6b run, raise to 200-300.
+
+Plumbing: `[trainer.callbacks.l2sp]` in the TOML schema (`toml_config/sft_config.py`), the `l2sp` entry with all alphas 0
+in the `action_policy_libero_edge` callbacks dict (a complete no-op for every other recipe), tests
+`callbacks/l2sp_test.py`. Only the run name and the `[trainer.callbacks.l2sp]` section differ from the 6b TOML (tested).
+
+```bash
+export LIBERO_ROOT=... META_ACTION_INIT_PATH=<meta run>/meta_action_init.pt
+NPROC_PER_NODE=2 sr 2 48 examples/launch_sft_action_policy_libero_10_edge_metainit_l2sp.sh
 ```
 
 ## 7. Caveats

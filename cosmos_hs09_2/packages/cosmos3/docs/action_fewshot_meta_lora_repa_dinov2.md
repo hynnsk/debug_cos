@@ -28,6 +28,7 @@ parameter-free `avgpool` adapter pools 16 frames -> 4 latent frames (bins of 4 =
 | --- | --- |
 | Recipe TOML (**the** deliverable) | `examples/toml/sft_config/action_policy_libero_10_edge_metainit_repa_dinov2.toml` = `action_policy_libero_10_edge_metainit.toml` + `[model.repa]` (hs10 v7) + `"repa_"` in `keys_to_skip_loading` + experiment/name |
 | Launcher | `examples/launch_sft_action_policy_libero_10_edge_metainit_repa_dinov2.sh` (port 50018, `REPA_TOML_FILE` override) |
+| v10 variant (V-JEPA, spatial normalization) | `examples/toml/sft_config/action_policy_libero_10_edge_metainit_repa_v10.toml`, `examples/launch_sft_action_policy_libero_10_edge_metainit_repa_v10.sh` (port 50019) |
 | Experiment | `configs/base/experiment/action/posttrain_config/action_policy_libero_edge_repa.py` = hs10's experiment + the hs09 `lora_` LR-multiplier hook; registered in `configs/base/config.py` |
 | REPA code (ported 1:1 from cosmos_hs10) | `model/generator/repa/` (adapters, alignment head, DINOv2 + V-JEPA teachers, teacher registry, SIGReg), capture in `mot/unified_mot.py::_impl_forward`, `repa_pred/repa_target` in `mot/cosmos3_vfm_network.py`, teacher call + loss term in `omni_mot_model.py` (`_set_up_repa_teacher`, `_compute_repa_teacher_tokens`, `_compute_losses`) |
 | Config schema | `configs/base/defaults/model_config.py::RepaConfig` (+ `SigRegConfig`), `configs/toml_config/sft_config.py::RepaTomlConfig` (`[model.repa]`), `toml_config_helper.py` VLM blocklist |
@@ -40,6 +41,27 @@ config, `lora_freeze_base=false`, lr / multipliers / schedule / batch / validati
 so the pair (metainit, metainit + REPA) isolates the distillation loss. The meta init never touches `repa_head`
 (theta_meta has no such group; `apply_meta_action_init_to_net` only writes the groups the file carries), and
 `repa_head` is skipped at the base-DCP load because the base has no such tensors.
+
+## Variant: hs10 v10 (V-JEPA 2.1, per-frame spatial normalization) with meta init
+
+`examples/toml/sft_config/action_policy_libero_10_edge_metainit_repa_v10.toml` / `examples/launch_sft_action_policy_libero_10_edge_metainit_repa_v10.sh`
+(port 50019; a thin wrapper that sets `REPA_TOML_FILE` and execs the dinov2 launcher). Same meta init, same trainable
+set and schedule; only `[model.repa]` differs from the DINOv2 recipe:
+
+```
+teacher = vjepa2_1_vit_base_384 (frozen ema_encoder, 256 px, 2-frame tubelets -> 8x16x16 tokens per view), avgpool -> 4x5x5
+objective = spatial_normalized:  SN(x[t,p]) = (x[t,p] - mean_p x[t,p]) / (std_p x[t,p] + 1e-6)   per frame t, per channel
+loss_total += 5.0 * (1 - cos(SN(MLP(h_8)), SN(target)))        trained cosine -> repa_cos_sim_spatial_norm
+```
+
+The spatial normalization removes, per frame and channel, the mean over the patches -- i.e. the dominant common
+direction of V-JEPA tokens that lets a constant prediction score raw `repa_cos_sim` ~0.9 -- so only the within-frame
+spatial structure is distilled. Statistics never mix frames, samples, or the student/teacher sides. `repa_cos_sim`
+(raw) and `repa_cos_sim_centered` are still logged for comparison with the other arms. Teacher weights:
+`$COSMOS_STORAGE/checkpoints/vjepa2_1/vjepa2_1_vitb_dist_vitG_384.pt` (present on this cluster).
+
+Note the hs10 v10 TOML validated every 100 iters with 32 x 128 windows/rank; this one keeps the hs09 meta-init cadence
+(every 200 iters, 16 x 16 windows/rank) so the three arms (metainit, + dinov2, + v10) share their validation set.
 
 ## Commands
 
@@ -56,6 +78,9 @@ PYTHONPATH=. python -m cosmos_framework.scripts.train --sft-toml=examples/toml/s
 
 # (1) meta init + DINOv2 REPA, 2 GPUs (shard 2, 128 windows/rank -> global 256, 2000 iters, val at 0 and every 200)
 NPROC_PER_NODE=2 sr 2 48 examples/launch_sft_action_policy_libero_10_edge_metainit_repa_dinov2.sh
+
+# (1b) meta init + V-JEPA 2.1 spatially-normalized REPA (hs10 v10 loss), same recipe otherwise
+NPROC_PER_NODE=2 sr 2 48 examples/launch_sft_action_policy_libero_10_edge_metainit_repa_v10.sh
 
 # (2) the matching control without the distillation loss (unchanged cosmos_hs09 recipe)
 NPROC_PER_NODE=2 sr 2 48 examples/launch_sft_action_policy_libero_10_edge_metainit.sh

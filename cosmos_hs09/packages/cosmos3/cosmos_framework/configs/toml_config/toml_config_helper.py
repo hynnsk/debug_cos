@@ -92,6 +92,7 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         ("optimizer", "eps"): None,                                            # VLM_OPTIMIZER_KWARGS has no eps field
         ("scheduler", "verbosity_interval"): None,                             # VLM_LAMBDACOSINE_KWARGS has no verbosity_interval
         ("trainer", "callbacks", "compile_tokenizer"): None,                   # VFM-only callback (VLM has no torch.compile of the tokenizer)
+        ("trainer", "callbacks", "l2sp"): None,                                # VFM action-SFT-only callback (cosmos_hs09 L2-SP)
         # Rename / re-route to the VLM path
         ("model", "attn_implementation"): ("model", "config", "policy", "attn_implementation"),
         ("model", "ema"): ("model", "config", "ema"),

@@ -118,8 +118,11 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 # Guard: the TOML's data_parallel_shard_degree vs the number of ranks. The framework treats
 # data_parallel_replicate_degree=1 as "auto" and fills replicate = NPROC / shard, so launching a
 # shard-2 TOML on 4 GPUs silently becomes HSDP 2x2 with DOUBLE the global batch (bs/rank x NPROC).
-_SHARD="$(grep -E '^\s*data_parallel_shard_degree\s*=' "$TOML_FILE" | head -1 | sed -E 's/.*=\s*([0-9]+).*/\1/')"
-_BS="$(grep -E '^\s*max_samples_per_batch\s*=' "$TOML_FILE" | head -1 | sed -E 's/.*=\s*([0-9]+).*/\1/')"
+# Strip the inline TOML comment BEFORE extracting the value: the greedy `.*=` otherwise latches onto the last
+# `=<digits>` of the line, e.g. the `NPROC_PER_NODE=4` inside the comment of the metainit TOML, and reports a
+# spurious "shard 4 x replicate 0" warning while the framework (which parses the TOML properly) runs shard 2.
+_SHARD="$(grep -E '^\s*data_parallel_shard_degree\s*=' "$TOML_FILE" | head -1 | sed -E 's/#.*//; s/.*=\s*([0-9]+).*/\1/')"
+_BS="$(grep -E '^\s*max_samples_per_batch\s*=' "$TOML_FILE" | head -1 | sed -E 's/#.*//; s/.*=\s*([0-9]+).*/\1/')"
 if [[ -n "$_SHARD" && "$_SHARD" != "$NPROC_PER_NODE" ]]; then
     echo ">>> WARNING: TOML data_parallel_shard_degree=$_SHARD but NPROC_PER_NODE=$NPROC_PER_NODE -> the framework will run" >&2
     echo ">>>          HSDP shard $_SHARD x replicate $((NPROC_PER_NODE / _SHARD)); global batch = ${_BS:-?} x $NPROC_PER_NODE ranks" >&2

@@ -10,7 +10,10 @@ from cosmos_framework.configs.toml_config.sft_config import SFTExperimentConfig
 from cosmos_framework.configs.toml_config.toml_config_helper import build_hydra_overrides
 
 _TOML_DIR = Path(__file__).resolve().parents[3] / "examples" / "toml" / "sft_config"
-_REPA_TOMLS = sorted(_TOML_DIR.glob("action_policy_libero_10_edge_repa*.toml"))
+_REPA_TOMLS = sorted(
+    list(_TOML_DIR.glob("action_policy_libero_10_edge_repa*.toml"))
+    + list(_TOML_DIR.glob("action_policy_libero_10_nano_repa*.toml"))
+)
 
 
 @pytest.mark.parametrize("toml_path", _REPA_TOMLS, ids=[p.stem for p in _REPA_TOMLS])
@@ -19,7 +22,15 @@ def test_repa_tomls_validate_and_route_to_model_config_repa(toml_path: Path):
     cfg = SFTExperimentConfig.model_validate(raw)
     assert cfg.model.repa.enabled is True
     overrides = build_hydra_overrides(raw)
-    assert "experiment=action_policy_libero_edge_repa" in overrides
+    tier = "nano" if "_nano_" in toml_path.stem else "edge"
+    assert f"experiment=action_policy_libero_{tier}_repa" in overrides
+    if tier == "nano":
+        # Nano: ViT-L teachers, block 10 of 36, shard 8 x 32, compile off (Ampere smem), see docs section 8
+        assert raw["model"]["repa"]["teacher"] in ("vjepa2_1_vit_large_384", "dinov2_vitl14")
+        assert raw["model"]["repa"]["layer_index"] == 10
+        assert raw["model"]["parallelism"]["data_parallel_shard_degree"] == 8
+        assert raw["model"]["compile"]["enabled"] is False
+        assert raw["dataloader_train"]["max_samples_per_batch"] == 32
     assert "model.config.repa.enabled=true" in overrides
     assert any(o.startswith("model.config.repa.layer_index=") for o in overrides)
     assert any(o.startswith("model.config.repa.target_adapter=") for o in overrides)

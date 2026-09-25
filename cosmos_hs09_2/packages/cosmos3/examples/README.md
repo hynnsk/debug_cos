@@ -21,6 +21,7 @@ This directory contains:
 | LIBERO-10 few-shot **LoRA** post-training, baseline (cosmos_hs09) | `launch_sft_action_policy_libero_10_lora_edge.sh` (docs/action_fewshot_meta_lora.md) |
 | ... with meta-learned LoRA + heads + time_embedder init (cosmos_hs09) | `launch_sft_action_policy_libero_10_lora_edge_metainit.sh` |
 | ... meta init -> full FT + **DINOv2 ViT-B/14 REPA distillation** (cosmos_hs09_2, hs10 v7 loss) | `launch_sft_action_policy_libero_10_edge_metainit_repa_dinov2.sh` (docs/action_fewshot_meta_lora_repa_dinov2.md) |
+| ... meta init -> full FT + **V-JEPA 2.1 spatially-normalized REPA** (cosmos_hs09_2, hs10 v10 loss) | `launch_sft_action_policy_libero_10_edge_metainit_repa_v10.sh` |
 | Cross-embodiment meta-training, LoRA regime (cosmos_hs09) | `launch_meta_action_fewshot_lora_edge.sh` |
 | ... LoRA regime + video loss in the OUTER loop (cosmos_hs09, docs/action_fewshot_meta_lora.md 6c) | `launch_meta_action_fewshot_lora_edge_vision_loss.sh` |
 | LIBERO-10 closed-loop eval                   | `eval_libero_closed_loop.sh`          |

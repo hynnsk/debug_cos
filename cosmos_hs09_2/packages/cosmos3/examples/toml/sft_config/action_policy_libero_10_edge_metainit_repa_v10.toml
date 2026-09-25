@@ -1,31 +1,37 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
-# cosmos_hs09_2 -- META INIT -> FULL fine-tune + DINOv2 REPA distillation loss.
+# cosmos_hs09_2 -- META INIT -> FULL fine-tune + V-JEPA 2.1 REPA with per-frame SPATIAL NORMALIZATION (hs10 v10).
 #
 # = examples/toml/sft_config/action_policy_libero_10_edge_metainit.toml (cosmos_hs09: LIBERO-10 few-shot
 #   post-training, 3 demos/task = 30 episodes, ORIGINAL Cosmos3 recipe with full moe_gen + time_embedder +
 #   vae2llm/llm2vae + k_norm_und_for_gen + action heads trainable, initialized from the LoRA-regime theta_meta
 #   of action_fewshot_meta_lora_edge: LoRA adapters (carried frozen, lr multiplier 0 == merged delta) + heads +
 #   time_embedder)
-# + the cosmos_hs10 v7 REPA loss (examples/toml/sft_config/action_policy_libero_10_edge_repa_v7.toml there):
-#       loss_total = 10 * fm_vision + 10 * fm_action                         (unchanged)
-#                  + repa.loss_weight * (1 - cos(MLP(h_8[video tokens]), avgpool(DINOv2-ViT-B/14(frames))))
-#   h_8 = residual stream of the PREDICTED video tokens after MoT block 8 (of 28); teacher = frozen
-#   facebook/dinov2-base applied per frame at 224 px (16x16 patches of 14 px) to frames 1..16 of each camera
-#   view; the parameter-free avgpool adapter pools 16 frames -> 4 latent frames (bins of 4, exactly the Wan VAE
-#   mapping) and 16x16 -> 5x5 per view; the two views are concatenated along width (4x5x10 tokens per window).
-#   New trainable params: net.repa_head.* (REPA 3-layer SiLU MLP 2048->2048->2048->768; "repa_" in
-#   keys_to_select). The DINOv2 teacher is NOT trained / checkpointed / sharded.
+# + the cosmos_hs10 v10 REPA loss (examples/toml/sft_config/action_policy_libero_10_edge_repa_v10.toml there):
+#       SpatialNorm(x[t,p]) = (x[t,p] - mean_p(x[t,p])) / (std_p(x[t,p]) + eps)      per frame t, per feature channel,
+#                                                                                  statistics over the spatial patches p
+#       loss_total = 10 * fm_vision + 10 * fm_action                                                     (unchanged)
+#                  + repa.loss_weight * (1 - cos(SpatialNorm(MLP(h_8[t,p])), SpatialNorm(avgpool(V-JEPA-2.1(frames))[t,p])))
+#   h_8 = residual stream of the PREDICTED video tokens after MoT block 8 (of 28); teacher = frozen V-JEPA 2.1
+#   ViT-B/16 ema_encoder ($COSMOS_STORAGE/checkpoints/vjepa2_1/vjepa2_1_vitb_dist_vitG_384.pt) on frames 1..16 of each
+#   camera view at its native 256 px (2-frame tubelets, 16x16 patches -> 8x16x16 tokens per view); the
+#   parameter-free avgpool adapter pools 8 -> 4 latent frames and 16x16 -> 5x5 per view; views concatenated along
+#   width (4x5x10 tokens per window). Statistics never mix frames, samples, or the student/teacher sides; the
+#   normalization removes the per-frame mean direction that lets a constant prediction score raw cos ~0.9 on
+#   V-JEPA tokens. Trained cosine -> `repa_cos_sim_spatial_norm`; `repa_cos_sim` stays the raw diagnostic.
+#   New trainable params: net.repa_head.* (REPA 3-layer SiLU MLP 2048->2048->2048->768; "repa_" in keys_to_select).
 #
-# The only differences to action_policy_libero_10_edge_metainit.toml: [job].experiment/group/name, the
-# [model.repa] block, and "repa_" in keys_to_skip_loading (absent from the base DCP). Everything the meta init
-# touches (LoRA carrier config, lr multipliers, [checkpoint].meta_action_init_*) is identical, so a comparison
-# against that TOML isolates the effect of the distillation loss.
+# Differences to action_policy_libero_10_edge_metainit_repa_dinov2.toml: [model.repa] objective/spatial_norm_eps/
+# teacher/teacher_input_size and the job name. Differences to the hs10 v10 TOML: everything the meta init needs
+# (LoRA carrier, lr multipliers, [checkpoint].meta_action_init_*) and the hs09 validation cadence (val every 200
+# iters, 16 x 16 windows/rank; hs10 v10 used 100 / 32 x 128). Everything else is identical, so
+# (metainit, metainit + dinov2, metainit + v10) differ only in the distillation loss.
 # Held-out validation (50 disjoint demos) at iteration 0 and every 200 iters -> wandb val/*: val/loss_total,
-# val/flow_matching_loss_{action,vision}, val/repa_loss, val/repa_cos_sim, val/repa_cos_sim_centered, val/repa_rel_loss.
+# val/flow_matching_loss_{action,vision}, val/repa_loss, val/repa_cos_sim, val/repa_cos_sim_spatial_norm,
+# val/repa_cos_sim_centered, val/repa_rel_loss.
 # Env: LIBERO_ROOT, BASE_CHECKPOINT_PATH, WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT, META_ACTION_INIT_PATH,
-#      HF_HOME (facebook/dinov2-base snapshot in $HF_HOME/hub; downloaded on first use if absent).
+#      COSMOS_STORAGE (V-JEPA checkpoint under $COSMOS_STORAGE/checkpoints/vjepa2_1/, downloaded if absent).
 # See docs/action_fewshot_meta_lora_repa_dinov2.md (and docs/action_policy_libero_repa_vjepa.md for the REPA code).
 
 [job]
@@ -33,7 +39,7 @@ task         = "vfm"
 experiment   = "action_policy_libero_edge_repa"
 project      = "cosmos3_action_libero"
 group        = "edge_libero10_fewshot"
-name         = "edge_libero10_3ep_fullft_metainit_repa_dinov2b_l8_avgpool_w5.0"
+name         = "edge_libero10_3ep_fullft_metainit_repa_v10_spatial_norm_vitb_l8_avgpool_w5.0"
 wandb_mode   = "online"
 
 [model]
@@ -46,15 +52,17 @@ lora_alpha          = 64
 lora_target_modules = "q_proj_moe_gen,k_proj_moe_gen,v_proj_moe_gen,o_proj_moe_gen,mlp_moe_gen.up_proj,mlp_moe_gen.down_proj"
 lora_freeze_base    = false    # full fine-tune: the injector must not freeze moe_gen etc.; keys_to_select selects
 
-# ---- cosmos_hs10 v7: DINOv2 ViT-B/14 REPA distillation (hs10 default setting: block 8, avgpool, MLP projector, w 5.0)
+# ---- cosmos_hs10 v10: V-JEPA 2.1 ViT-B/16 REPA, per-frame spatially normalized cosine (block 8, avgpool, MLP, w 5.0)
 [model.repa]
 enabled            = true
-loss_weight        = 5.0                   # unweighted 1 - cos in [0, 2]; the fm terms are x10-scaled (see hs10 docs)
-layer_index        = 8                     # output of MoT block 8 (of 28); next candidate 14
-teacher            = "dinov2_vitb14"       # facebook/dinov2-base (D=768), per frame; V-JEPA 2.1 = "vjepa2_1_vit_base_384"
-teacher_input_size = 224                   # 16x16 patches of 14 px (REPA reference setting)
-target_adapter     = "avgpool"             # variant 1 (parameter-free) | "avgpool_conv" (2) | "strided_conv" (3)
-target_grid_thw    = [4, 5, 5]             # per-view MoT token grid (validated at runtime)
+loss_weight        = 5.0                       # unweighted 1 - cos in [0, 2]; the fm terms are x10-scaled (see hs10 docs)
+objective          = "spatial_normalized"      # v10: normalize both sides per frame & channel over the spatial patches
+spatial_norm_eps   = 1.0e-6                    # denominator stabilizer (std over patches + eps)
+layer_index        = 8                         # output of MoT block 8 (of 28); next candidate 14
+teacher            = "vjepa2_1_vit_base_384"   # V-JEPA 2.1 ViT-B/16 ema_encoder (D=768); DINOv2 = "dinov2_vitb14" (+ input 224)
+teacher_input_size = 256                       # native LIBERO camera resolution == V-JEPA 2.1 RoPE base grid (16x16)
+target_adapter     = "avgpool"                 # variant 1 (parameter-free) | "avgpool_conv" (2) | "strided_conv" (3)
+target_grid_thw    = [4, 5, 5]                 # per-view MoT token grid (validated at runtime)
 
 [model.ema]
 enabled         = true

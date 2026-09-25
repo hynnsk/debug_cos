@@ -556,8 +556,36 @@ class GradClipCallback(BaseModel):
     )
 
 
+class L2SPAlphasConfig(BaseModel):
+    """Per-name-substring L2-SP strengths (cosmos_hs09). First matching pattern wins; 0 = not anchored.
+    The deviation of an anchored weight saturates at about 1/alpha per coordinate under a persistent Adam drift."""
+
+    model_config = _PYDANTIC_MODEL_CONFIG
+
+    action2llm: float = Field(default=0.0, description="Action input projector (meta-initialised head rows).")
+    llm2action: float = Field(default=0.0, description="Action output head (meta-initialised head rows).")
+    action_modality_embed: float = Field(default=0.0, description="Action modality embedding (meta-initialised).")
+    time_embedder: float = Field(default=0.0, description="Shared timestep MLP (meta-initialised in the LoRA regime).")
+    moe_gen: float = Field(default=0.0, description="Generation-tower trunk; classic L2-SP toward the base checkpoint.")
+    vae2llm: float = Field(default=0.0)
+    llm2vae: float = Field(default=0.0)
+    k_norm_und_for_gen: float = Field(default=0.0)
+    lora_: float = Field(default=0.0, description="Meta LoRA adapters (frozen by lr multiplier 0 in the metainit recipe).")
+
+
+class L2SPCallbackConfig(BaseModel):
+    """Decoupled L2-SP toward the starting point: after every optimizer step p <- p - lr_t * alpha * (p - p0)
+    (cosmos_hs09; docs/action_fewshot_meta_lora.md section 6d). Only experiments whose callbacks dict declares
+    ``l2sp`` accept this section (action_policy_libero_edge)."""
+
+    model_config = _PYDANTIC_MODEL_CONFIG
+
+    alphas: L2SPAlphasConfig = Field(default_factory=L2SPAlphasConfig)
+    log_every: int = Field(default=100, description="Log l2sp/rel_dev/<pattern> and l2sp/rate/<pattern> every N steps (0 = never).")
+
+
 class TrainerCallbacksConfig(BaseModel):
-    """Only the two callbacks the schema currently surfaces. The full
+    """Only the callbacks the schema currently surfaces. The full
     callbacks dict (norm_monitor, mfu, heart_beat, …) stays in the
     experiment Python.
     """
@@ -566,6 +594,7 @@ class TrainerCallbacksConfig(BaseModel):
 
     compile_tokenizer: CompileTokenizerCallback = Field(default_factory=CompileTokenizerCallback)
     grad_clip: GradClipCallback = Field(default_factory=GradClipCallback)
+    l2sp: L2SPCallbackConfig = Field(default_factory=L2SPCallbackConfig)
 
 
 class TrainerConfig(BaseModel):
