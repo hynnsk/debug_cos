@@ -31,7 +31,7 @@ experiment   = "action_reptile_meta_nano"
 project      = "cosmos3_action_meta"
 group        = "reptile_meta"
 name         = "nano_reptile_pretrain_v1"
-wandb_mode   = "online"
+wandb_mode   = "offline"
 
 [model]
 precision = "bfloat16"

@@ -76,18 +76,11 @@ fi
 # room at save time. expandable_segments lets the allocator grow segments instead of fragmenting.
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
-# Drop GPUs that fail a torch init (haring has one) and dodge a MASTER_PORT another torchrun of ours holds on
-# this node; see _node_guards.sh. Ask for one GPU more than NPROC_PER_NODE on a node with a broken GPU.
-source "$(dirname "${BASH_SOURCE[0]}")/_node_guards.sh"
-select_healthy_gpus "${NPROC_PER_NODE:-}" || exit 1
-NPROC_PER_NODE="${NPROC_PER_NODE:-${GPU_HEALTHY:-${SLURM_GPUS_ON_NODE:-4}}}"
-_USABLE="${GPU_HEALTHY:-${SLURM_GPUS_ON_NODE:-}}"
-if [[ -n "$_USABLE" && "$NPROC_PER_NODE" != "$_USABLE" ]]; then
-    echo ">>> WARNING: NPROC_PER_NODE=$NPROC_PER_NODE but $_USABLE usable GPU(s) are allocated; the rest stay idle." >&2
+NPROC_PER_NODE="${NPROC_PER_NODE:-${SLURM_GPUS_ON_NODE:-4}}"
+if [[ -n "${SLURM_GPUS_ON_NODE:-}" && "$NPROC_PER_NODE" != "$SLURM_GPUS_ON_NODE" ]]; then
+    echo ">>> WARNING: NPROC_PER_NODE=$NPROC_PER_NODE but SLURM allocated $SLURM_GPUS_ON_NODE GPU(s)." >&2
 fi
-: "${MASTER_PORT:=50026}"
-pick_free_master_port || exit 1
-TORCHRUN_ARGS=(--nproc_per_node="$NPROC_PER_NODE" --master_port="$MASTER_PORT")
+TORCHRUN_ARGS=(--nproc_per_node="$NPROC_PER_NODE" --master_port="${MASTER_PORT:-50026}")
 [[ -n "${NNODES:-}" ]]      && TORCHRUN_ARGS+=(--nnodes="$NNODES")
 [[ -n "${NODE_RANK:-}" ]]   && TORCHRUN_ARGS+=(--node_rank="$NODE_RANK")
 [[ -n "${MASTER_ADDR:-}" ]] && TORCHRUN_ARGS+=(--master_addr="$MASTER_ADDR")

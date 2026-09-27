@@ -186,23 +186,6 @@ lever. Read `iter_time` from the first ~10 iterations (skip iteration 1) and mul
 * A full-mode DCP is ~24 GB; 1000 iterations with `save_iter=250` write ~100 GB. Downstream reads only its `model/` part.
 * `bob` (broken RoCE) is excluded automatically for single-node runs via `NCCL_IB_DISABLE=1`; the
   hs09 `_sft_launcher_common.sh` shard-vs-NPROC guard applies to the downstream launchers.
-* `haring` has one A40 (PCI 57:00.0) stuck in "GPU requires reset" (since 2026-09-26). SLURM still hands it
-  out, torch's lazy CUDA init then dies on every rank once that device is merely visible, and this SLURM setup
-  (cgroup-constrained, `sr` = plain `srun`) gives users no way to pick GPU indices. All launchers therefore
-  source `examples/_node_guards.sh`: every allocated GPU is probed with a 1-GPU torch init, unusable ones are
-  dropped from `CUDA_VISIBLE_DEVICES`, and the run errors out (instead of hanging) when fewer GPUs work than
-  `NPROC_PER_NODE`. To use haring, ask SLURM for one GPU more than you need and pin the rank count:
-
-  ```bash
-  NPROC_PER_NODE=2 srun --oversubscribe --partition=vram48 -w haring -N 1 -n 1 -c 24 --gres=gpu:3 --pty \
-      examples/launch_sft_action_policy_libero_10_edge_reptileinit_repa_dinov2_v2.sh
-  # or avoid the node altogether (sr has no exclude flag; SLURM_EXCLUDE is not honoured here):
-  NPROC_PER_NODE=2 srun --oversubscribe --partition=vram48 -x haring -N 1 -n 1 -c 16 --gres=gpu:2 --pty <launcher>
-  ```
-
-  The same file moves `MASTER_PORT` to the next free port when another torchrun of ours already listens on
-  it on that node (the masked-JEPA and DINOv2-v2 launchers both defaulted to 50025 and the second one died
-  with `EADDRINUSE`; v2 now defaults to 50026).
 
 ## 8. Post-training variants on the Reptile init: DINOv2 REPA and masked V-JEPA 2.1
 

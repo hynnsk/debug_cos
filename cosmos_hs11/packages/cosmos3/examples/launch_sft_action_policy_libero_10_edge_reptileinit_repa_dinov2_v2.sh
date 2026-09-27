@@ -14,12 +14,9 @@
 # Optional: WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT, NPROC_PER_NODE, MASTER_PORT, EXTRA_TAIL_OVERRIDES.
 # Usage:
 #   NPROC_PER_NODE=4 sr 4 48 examples/launch_sft_action_policy_libero_10_edge_reptileinit_repa_dinov2_v2.sh
-#   On haring (one A40 needs a reset; _node_guards.sh drops it) ask for one GPU more than NPROC_PER_NODE:
-#   NPROC_PER_NODE=2 srun --oversubscribe --partition=vram48 -w haring -N 1 -n 1 -c 24 --gres=gpu:3 --pty \
-#       examples/launch_sft_action_policy_libero_10_edge_reptileinit_repa_dinov2_v2.sh
 
 TOML_FILE="${REPA_TOML_FILE:-${TOML_FILE:-examples/toml/sft_config/action_policy_libero_10_edge_reptileinit_repa_dinov2_v2.toml}}"
-: "${MASTER_PORT:=50026}"   # distinct from reptileinit (common default 50012) / repa_dinov2 (50024) / masked_jepa (50025)
+: "${MASTER_PORT:=50027}"   # distinct from reptileinit (common default 50012) / repa_dinov2 (50024) / masked_jepa (50025)
 export MASTER_PORT
 : "${COSMOS_STORAGE:=$HOME/project/cosmos_storage}"
 export COSMOS_STORAGE

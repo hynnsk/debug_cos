@@ -19,11 +19,8 @@
 #   TAIL_OVERRIDES       bash array of Hydra CLI overrides appended after `--`
 #                        (e.g. data_setting.max_tokens=16000 for VLM smokes).
 #   MASTER_PORT          torchrun --master_port; default 50012.
-#   NPROC_PER_NODE       torchrun --nproc_per_node; default = the usable GPUs of the SLURM
-#                        allocation (broken ones are probed and dropped, see _node_guards.sh),
-#                        else 2. Warns when it disagrees with the allocation; errors when
-#                        fewer GPUs work than asked for.
-#   SKIP_GPU_PROBE       1 = skip the per-GPU torch probe of _node_guards.sh.
+#   NPROC_PER_NODE       torchrun --nproc_per_node; default SLURM_GPUS_ON_NODE, else 4.
+#                        Warns when it disagrees with the SLURM allocation.
 #   NNODES               torchrun --nnodes; multi-node only (unset = single-node).
 #   NODE_RANK            torchrun --node_rank; this worker's 0-based index.
 #   MASTER_ADDR          torchrun --master_addr; rank-0 host (multi-node only — it
@@ -95,15 +92,9 @@ fi
 # SLURM allocation so `srun --gres=gpu:N <wrapper>` uses all N GPUs without the caller
 # having to restate N. A stale exported value silently leaves GPUs idle (a 2 on a
 # 4-GPU allocation halves the global batch and never fails), so say so loudly instead.
-# Drop GPUs that fail a torch init (haring has one, see _node_guards.sh) BEFORE deciding the rank count: an
-# explicit NPROC_PER_NODE must be met by healthy GPUs, the default is "all healthy GPUs of the allocation".
-# On a node with a broken GPU ask SLURM for one GPU more than NPROC_PER_NODE and this drops the bad one.
-source "$(dirname "${BASH_SOURCE[0]}")/_node_guards.sh"
-select_healthy_gpus "${NPROC_PER_NODE:-}" || exit 1
-NPROC_PER_NODE="${NPROC_PER_NODE:-${GPU_HEALTHY:-${SLURM_GPUS_ON_NODE:-2}}}"
-_USABLE="${GPU_HEALTHY:-${SLURM_GPUS_ON_NODE:-}}"
-if [[ -n "$_USABLE" && "$NPROC_PER_NODE" != "$_USABLE" ]]; then
-    echo ">>> WARNING: NPROC_PER_NODE=$NPROC_PER_NODE but $_USABLE usable GPU(s) are allocated on $(hostname -s); the rest stay idle. Unset NPROC_PER_NODE to use them all." >&2
+NPROC_PER_NODE="${NPROC_PER_NODE:-${SLURM_GPUS_ON_NODE:-2}}"
+if [[ -n "${SLURM_GPUS_ON_NODE:-}" && "$NPROC_PER_NODE" != "$SLURM_GPUS_ON_NODE" ]]; then
+    echo ">>> WARNING: NPROC_PER_NODE=$NPROC_PER_NODE but SLURM allocated $SLURM_GPUS_ON_NODE GPU(s) on $(hostname -s). Unset NPROC_PER_NODE to use the whole allocation." >&2
 fi
 echo ">>> $(date '+%H:%M:%S') ranks/node: $NPROC_PER_NODE${SLURM_GPUS_ON_NODE:+ (SLURM gres: $SLURM_GPUS_ON_NODE)}"
 
@@ -135,10 +126,7 @@ if [[ -n "$_SHARD" && "$_SHARD" != "$NPROC_PER_NODE" ]]; then
     echo ">>>          (not ${_BS:-?} x $_SHARD). Set NPROC_PER_NODE=$_SHARD, or change the TOML, if that is not intended." >&2
 fi
 
-# Move off MASTER_PORT when another torchrun of ours already listens on it on this node (two launchers that
-# defaulted to the same port died with EADDRINUSE on haring); _node_guards.sh, single-node only.
-pick_free_master_port || exit 1
-TORCHRUN_ARGS=(--nproc_per_node="$NPROC_PER_NODE" --master_port="$MASTER_PORT")
+TORCHRUN_ARGS=(--nproc_per_node="$NPROC_PER_NODE" --master_port="${MASTER_PORT:-50012}")
 [[ -n "${NNODES:-}" ]]      && TORCHRUN_ARGS+=(--nnodes="$NNODES")
 [[ -n "${NODE_RANK:-}" ]]   && TORCHRUN_ARGS+=(--node_rank="$NODE_RANK")
 [[ -n "${MASTER_ADDR:-}" ]] && TORCHRUN_ARGS+=(--master_addr="$MASTER_ADDR")

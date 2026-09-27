@@ -22,7 +22,7 @@ experiment   = "action_policy_libero_nano_repa"
 project      = "cosmos3_action_libero"
 group        = "nano_libero10_fewshot_repa"
 name         = "hs10_nano_repa_v7.7_dinov2_vitl_l36_avgpool_w5.0"
-wandb_mode   = "online"
+wandb_mode   = "offline"
 
 [model]
 precision = "bfloat16"
