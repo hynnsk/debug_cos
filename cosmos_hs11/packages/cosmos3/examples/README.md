@@ -5,7 +5,7 @@ Runnable artifacts for Cosmos3 supervised fine-tuning. The end-to-end walkthroug
 This directory contains:
 
 - `toml/sft_config/` — TOML recipes consumed by `cosmos_framework.scripts.train --sft-toml=…`. One file per recipe. The TOML is validated against the pydantic schema at [`cosmos_framework/configs/toml_config/sft_config.py`](../cosmos_framework/configs/toml_config/sft_config.py) at load time.
-- `launch_sft_*.sh` — paired launch shells. Each declares `TOML_FILE` plus `: "${DATASET_PATH:=…}"` / `: "${BASE_CHECKPOINT_PATH:=…}"` defaults (full repo-relative paths, matching what [`docs/training.md`](../docs/training.md) shows) and sources [`_sft_launcher_common.sh`](./_sft_launcher_common.sh), which sets the `torchrun` flags and forwards into `cosmos_framework.scripts.train`. `export`ing those vars in your shell before launching wins over the defaults; otherwise just run the shell after Steps 1+2 of `docs/training.md`.
+- `launch_sft_*.sh` — paired launch shells. Each declares `TOML_FILE` plus `: "${DATASET_PATH:=…}"` / `: "${BASE_CHECKPOINT_PATH:=…}"` defaults (full repo-relative paths, matching what [`docs/training.md`](../docs/training.md) shows) and sources [`_sft_launcher_common.sh`](./_sft_launcher_common.sh), which sets the `torchrun` flags and forwards into `cosmos_framework.scripts.train`. Both it and the standalone meta launchers source [`_node_guards.sh`](./_node_guards.sh) first: allocated GPUs that fail a torch init (haring's "requires reset" A40) are dropped from `CUDA_VISIBLE_DEVICES`, and `MASTER_PORT` moves to a free port when another torchrun of ours holds it on that node — on a node with a broken GPU request one GPU more than `NPROC_PER_NODE`. `export`ing those vars in your shell before launching wins over the defaults; otherwise just run the shell after Steps 1+2 of `docs/training.md`.
 - `inference.py`, `inference_pipeline.py` — runnable inference helpers; see [docs/inference.md](../docs/inference.md).
 
 ## Recipe → launch shell
@@ -23,6 +23,10 @@ This directory contains:
 | Cross-embodiment meta-training, LoRA regime (cosmos_hs09) | `launch_meta_action_fewshot_lora_edge.sh` |
 | **Reptile** meta-training, full-parameter (default) or LoRA via TOML_FILE (cosmos_hs11) | `launch_reptile_meta_edge.sh` (docs/action_reptile_meta.md) |
 | ... full-FT post-training warm-started from a Reptile checkpoint (cosmos_hs11) | `launch_sft_action_policy_libero_10_edge_reptileinit.sh` |
+| ... + DINOv2 ViT-B/14 REPA distillation (cosmos_hs10 v7 loss on the Reptile init) | `launch_sft_action_policy_libero_10_edge_reptileinit_repa_dinov2.sh` (docs/action_reptile_meta.md 8) |
+| ... + masked V-JEPA 2.1 feature prediction (cosmos_hs12 objective on the Reptile init) | `launch_sft_action_policy_libero_10_edge_reptileinit_masked_jepa.sh` (docs/action_reptile_meta.md 8) |
+| **Reptile** meta-training of Cosmos3-**Nano** (cosmos_hs11; bs128 / LoRA / smoke via TOML_FILE) | `launch_reptile_meta_nano.sh` (docs/action_reptile_meta.md 9) |
+| ... Nano full-FT post-training warm-started from a Nano Reptile checkpoint | `launch_sft_action_policy_libero_10_nano_reptileinit.sh` |
 | LIBERO-10 closed-loop eval                   | `eval_libero_closed_loop.sh`          |
 | Reasoner Alignment SFT                       | `launch_sft_llava_ov.sh`              |
 | Reasoner Alignment SFT (Cosmos3-Nano)        | `launch_sft_videophy2_nano.sh`        |

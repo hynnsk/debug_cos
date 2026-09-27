@@ -88,6 +88,8 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         ("model", "lora_target_modules"): None,
         ("model", "lora_freeze_base"): None,
         ("model", "tokenizer"): None,                                          # blocks model.tokenizer.*
+        ("model", "repa"): None,                                               # VFM-only REPA (V-JEPA) loss knobs
+        ("model", "sigreg"): None,                                             # VFM-only visual-token SIGReg knobs
         ("dataloader_train", "seed"): None,
         ("optimizer", "eps"): None,                                            # VLM_OPTIMIZER_KWARGS has no eps field
         ("scheduler", "verbosity_interval"): None,                             # VLM_LAMBDACOSINE_KWARGS has no verbosity_interval
@@ -221,5 +223,4 @@ def _hydra_format(v: Any, in_list: bool = False) -> str:
             return f"'{v}'"
         return v
     return str(v)
-
 

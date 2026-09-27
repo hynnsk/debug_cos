@@ -262,7 +262,7 @@ class WandbCallback(Callback):
 
         for key in output_batch.keys():
             # Curve can be plotted only on aggregated loss, not per-instance loss
-            if not key.startswith("_") and "loss" in key and "per_instance" not in key:
+            if not key.startswith("_") and ("loss" in key or key.startswith(("repa_cos", "jepa_"))) and "per_instance" not in key:
                 if key not in self.final_all_loss_log:
                     self.final_all_loss_log[key] = _LossRecord()
                 self.final_all_loss_log[key].loss += output_batch[key].detach().float()

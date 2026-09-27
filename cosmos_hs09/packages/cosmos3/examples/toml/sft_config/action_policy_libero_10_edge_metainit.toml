@@ -22,7 +22,7 @@ task         = "vfm"
 experiment   = "action_policy_libero_edge"
 project      = "cosmos3_action_libero"
 group        = "edge_libero10_fewshot"
-name         = "edge_libero10_3ep_fullft_metainit_2gpu_bs256_seed42_vision"
+name         = "edge_libero10_3ep_fullft_metainit_500it"
 wandb_mode   = "online"
 
 [model]
@@ -62,11 +62,11 @@ action_modality_embed = 1.0
 lora_                 = 0.0   # freeze the meta-learned LoRA delta (== merged into moe_gen); moe_gen trains around it
 
 [scheduler]
-cycle_lengths = [2000]        # linear decay to 0 at max_iter (matches the cosmos_hs08 baseline)
-warm_up_steps = [200]
+cycle_lengths = [500]        # linear decay to 0 at max_iter (matches the cosmos_hs08 baseline)
+warm_up_steps = [50]
 
 [trainer]
-max_iter        = 2000
+max_iter        = 500
 logging_iter    = 20
 grad_accum_iter = 1              # global 256 = 64 windows/rank x 4 ranks. (2-GPU alternative: shard 2, bs 64, accum 2.)
                                  # bs 128/rank OOMs on the 44 GiB cards (L40S gauguin, A40 haring/watteu); hs08_v2's
@@ -74,7 +74,7 @@ grad_accum_iter = 1              # global 256 = 64 windows/rank x 4 ranks. (2-GP
 # held-out validation
 run_validation          = true
 run_validation_on_start = true   # iteration 0 = the meta-initialized model before any update
-validation_iter         = 200
+validation_iter         = 100
 max_val_iter            = 16     # x 64 windows x 4 ranks = 4096 windows ~= half of the 50-episode val set per pass (same windows every time)
 
 [dataloader_train]

@@ -154,6 +154,7 @@ def custom_collate_fn(batch):
         "text_token_ids",
         "images",
         "video",
+        "video_native",  # native-resolution frames for the V-JEPA REPA teacher (one [C,T,H,W] tensor per sample)
         "action",
         "action_raw",
         "domain_id",

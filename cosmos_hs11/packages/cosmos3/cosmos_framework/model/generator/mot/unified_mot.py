@@ -12,9 +12,19 @@ import torch
 from torch import nn
 from torch.distributed import ProcessGroup
 
+from cosmos_framework.data.generator.sequence_packing.runtime import (
+    SequencePack,
+    from_all_seq,
+    from_und_gen_splits,
+    get_gen_seq,
+    get_num_real_tokens,
+    get_und_seq,
+    set_gen_seq,
+    set_und_seq,
+    zeros_like,
+)
 from cosmos_framework.model.attention import attention as imaginaire_attention
 from cosmos_framework.model.attention.masks import CausalType
-from cosmos_framework.utils import log
 from cosmos_framework.model.generator.mot.attention import (
     AttentionMaskType,
     dispatch_attention,
@@ -76,17 +86,7 @@ from cosmos_framework.model.generator.utils.load_balancing_stats import (
     LBLMetadata,
 )
 from cosmos_framework.model.generator.utils.memory import KVToStore, MemoryState, MemoryValue
-from cosmos_framework.data.generator.sequence_packing.runtime import (
-    SequencePack,
-    from_all_seq,
-    from_und_gen_splits,
-    get_gen_seq,
-    get_num_real_tokens,
-    get_und_seq,
-    set_gen_seq,
-    set_und_seq,
-    zeros_like,
-)
+from cosmos_framework.utils import log
 
 # Torch optimization settings
 torch._dynamo.config.cache_size_limit = 512
@@ -1027,6 +1027,14 @@ def _impl_forward(
     # Derive gen_only once (outside compile) if using MemoryState
     memory_gen_only = memory.is_gen_only() if memory is not None else False
 
+    # REPA (V-JEPA 2.1 representation alignment): ``Cosmos3VFMNetwork.forward`` sets ``_repa_capture_layer`` to the
+    # 0-based block index whose output (the residual stream, before the final norms) it wants, and reads the
+    # pack back from ``_repa_captured``. The read happens in this eager loop, outside the per-block
+    # torch.compile / activation-checkpoint wrappers, so it costs nothing when unset.
+    repa_capture_layer = getattr(self, "_repa_capture_layer", None)
+    sigreg_capture_layer = getattr(self, "_sigreg_capture_layer", None)
+    repa_stop_after_capture = getattr(self, "_repa_stop_after_capture", False)
+
     for i, decoder_layer in enumerate(self.layers):
         # MemoryState: produce read-only MemoryValue for this layer (outside compile)
         memory_value = memory.read_for_layer(i) if memory is not None else None
@@ -1039,6 +1047,13 @@ def _impl_forward(
             memory_value=memory_value,
             gen_only=memory_gen_only,
         )
+
+        if repa_capture_layer is not None and i == repa_capture_layer:
+            self._repa_captured = hidden_states
+            if repa_stop_after_capture:
+                return hidden_states, {}
+        if sigreg_capture_layer is not None and i == sigreg_capture_layer:
+            self._sigreg_captured = hidden_states
 
         # MemoryState: store K/V produced by this layer (outside compile)
         if kv_to_store is not None and memory is not None:

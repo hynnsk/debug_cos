@@ -8,7 +8,7 @@ task         = "vfm"
 experiment   = "action_policy_libero_edge_repa"
 project      = "cosmos3_action_libero"
 group        = "edge_libero10_fewshot_masked_jepa"
-name         = "hs12_masked_jepa_dense_l8_w0.5"
+name         = "hs12_masked_jepa_dense_l8_w5.0"
 wandb_mode   = "online"
 
 [model]
@@ -17,7 +17,7 @@ max_num_tokens_after_packing = 45056
 
 [model.repa]
 enabled         = true
-loss_weight     = 0.5
+loss_weight     = 5.0
 layer_index     = 8                        # output of MoT block 8; next candidate 14
 teacher         = "vjepa2_1_vit_base_384"  # ViT-B/16 (D=768); "vjepa2_1_vit_large_384" = ViT-L/16 (D=1024)
 teacher_input_size = 256                   # native LIBERO resolution == V-JEPA 2.1 RoPE base grid
@@ -81,4 +81,4 @@ episode_subset_path   = "libero_10_val_5ep_per_task_seed42_excl3ep.json"
 
 [checkpoint]
 load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
-save_iter = 100
+save_iter = 500

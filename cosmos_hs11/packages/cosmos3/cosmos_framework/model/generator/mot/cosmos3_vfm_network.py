@@ -3,18 +3,20 @@
 
 import math
 from collections.abc import Sequence
-from typing import List, Tuple
+from typing import List, Sequence, Tuple
 
 import torch
 from torch import nn
 from transformers.configuration_utils import PretrainedConfig
 from transformers.modeling_utils import PreTrainedModel
 
-from cosmos_framework.utils import log
 from cosmos_framework.configs.base.defaults.flex_attention import (
     AttentionScope,
     FlexBackendPreference,
 )
+from cosmos_framework.data.generator.sequence_packing import ModalityData, PackedSequence
+from cosmos_framework.data.generator.sequence_packing.natten import verify_natten_parameter_list
+from cosmos_framework.data.generator.sequence_packing.runtime import get_causal_seq, get_full_only_seq
 from cosmos_framework.model.generator.mot.action_io_projector import (
     ACTION_IO_PROJECTOR_DOMAIN_AWARE,
     ACTION_IO_PROJECTOR_TYPES,
@@ -32,10 +34,9 @@ from cosmos_framework.model.generator.mot.flex_attention import (
     resolve_flex_backend,
 )
 from cosmos_framework.model.generator.mot.modeling_utils import TimestepEmbedder, has_noisy_tokens
+from cosmos_framework.model.generator.repa.alignment import RepaAlignmentHead, RepaTeacherTokens
 from cosmos_framework.model.generator.utils.memory import MemoryState
-from cosmos_framework.data.generator.sequence_packing import ModalityData, PackedSequence
-from cosmos_framework.data.generator.sequence_packing.natten import verify_natten_parameter_list
-from cosmos_framework.data.generator.sequence_packing.runtime import get_causal_seq, get_full_only_seq
+from cosmos_framework.utils import log
 
 
 class Cosmos3VFMNetworkConfig(PretrainedConfig):
@@ -82,6 +83,21 @@ class Cosmos3VFMNetworkConfig(PretrainedConfig):
         sound_latent_fps: int = 25,
         enable_input_bias: bool = True,
         control_attends_sensor: bool = False,
+        # V-JEPA 2.1 representation alignment (REPA) head, see model/generator/repa/.
+        repa_enabled: bool = False,
+        repa_layer_index: int = 8,
+        repa_teacher_embed_dim: int = 768,
+        repa_projector_hidden_dim: int = 2048,
+        repa_projector_type: str = "mlp",
+        repa_target_adapter: str = "avgpool",
+        repa_target_adapter_kernel_size: int = 3,
+        repa_target_adapter_depthwise: bool = True,
+        repa_teacher_grid_thw=(8, 16, 16),
+        repa_target_grid_thw=(4, 5, 5),
+        repa_num_views: int = 2,
+        # SIGReg capture (no learnable head; only selects an intermediate visual-token residual stream).
+        sigreg_enabled: bool = False,
+        sigreg_layer_index: int = 8,
         **kwargs,
     ):
         self.vision_gen = vision_gen
@@ -145,6 +161,26 @@ class Cosmos3VFMNetworkConfig(PretrainedConfig):
             assert self.vision_gen, (
                 "Sound generation requires visual generation! We do NOT support sound only training!"
             )
+
+        # REPA (V-JEPA 2.1) alignment head parameters
+        self.repa_enabled = bool(repa_enabled)
+        self.repa_layer_index = int(repa_layer_index)
+        self.repa_teacher_embed_dim = int(repa_teacher_embed_dim)
+        self.repa_projector_hidden_dim = int(repa_projector_hidden_dim)
+        self.repa_projector_type = str(repa_projector_type)  # "mlp" (REPA default) | "linear" (v4 recipe)
+        self.repa_target_adapter = repa_target_adapter
+        self.repa_target_adapter_kernel_size = int(repa_target_adapter_kernel_size)
+        self.repa_target_adapter_depthwise = bool(repa_target_adapter_depthwise)
+        self.repa_teacher_grid_thw = tuple(int(v) for v in repa_teacher_grid_thw)
+        self.repa_target_grid_thw = tuple(int(v) for v in repa_target_grid_thw)
+        self.repa_num_views = int(repa_num_views)
+        if self.repa_enabled:
+            assert self.vision_gen, "REPA aligns video tokens and therefore requires vision_gen=True"
+
+        self.sigreg_enabled = bool(sigreg_enabled)
+        self.sigreg_layer_index = int(sigreg_layer_index)
+        if self.sigreg_enabled:
+            assert self.vision_gen, "SIGReg regularizes visual tokens and therefore requires vision_gen=True"
 
         super().__init__(**kwargs)
 
@@ -260,6 +296,39 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             if config.enable_sound_modality_embedding:
                 self.sound_modality_embed = nn.Parameter(torch.zeros(self.hidden_size))  # [hidden_size]
 
+        # V-JEPA 2.1 REPA head: REPA projector (student side) + teacher-grid adapter (target side). Registered
+        # here so FSDP / EMA / DCP / the optimizer (``keys_to_select`` substring ``repa_``) treat it like any
+        # other head. The frozen teacher itself lives on ``OmniMoTModel`` (outside the sharded network).
+        self.repa_head: RepaAlignmentHead | None = None
+        if getattr(config, "repa_enabled", False):
+            if not (1 <= config.repa_layer_index <= self.num_hidden_layers):
+                raise ValueError(
+                    f"repa_layer_index={config.repa_layer_index} must be in [1, {self.num_hidden_layers}] "
+                    "(number of MoT decoder blocks applied before the aligned hidden state is read)."
+                )
+            self.repa_layer_index = int(config.repa_layer_index)
+            self.repa_head = RepaAlignmentHead(
+                hidden_size=self.hidden_size,
+                teacher_embed_dim=config.repa_teacher_embed_dim,
+                projector_hidden_dim=config.repa_projector_hidden_dim,
+                projector_type=getattr(config, "repa_projector_type", "mlp"),
+                target_adapter=config.repa_target_adapter,
+                adapter_kernel_size=config.repa_target_adapter_kernel_size,
+                adapter_depthwise=config.repa_target_adapter_depthwise,
+                teacher_grid_thw=tuple(config.repa_teacher_grid_thw),
+                target_grid_thw=tuple(config.repa_target_grid_thw),
+                num_views=config.repa_num_views,
+            )
+
+        self.sigreg_enabled = bool(getattr(config, "sigreg_enabled", False))
+        self.sigreg_layer_index = int(getattr(config, "sigreg_layer_index", 8))
+        if self.sigreg_enabled:
+            if not (1 <= self.sigreg_layer_index <= self.num_hidden_layers):
+                raise ValueError(
+                    f"sigreg_layer_index={self.sigreg_layer_index} must be in [1, {self.num_hidden_layers}] "
+                    "(number of MoT decoder blocks applied before visual-token SIGReg)."
+                )
+
         self.config = config
         self.parallel_dims = None
 
@@ -324,7 +393,87 @@ class Cosmos3VFMNetwork(PreTrainedModel):
                 std = 1.0 / math.sqrt(self.hidden_size)
                 torch.nn.init.trunc_normal_(self.sound_modality_embed, std=std, a=-3 * std, b=3 * std)
 
+        if self.repa_head is not None:
+            self.repa_head.reset_parameters()
+
         self.language_model.init_weights(buffer_device=buffer_device)
+
+    def _repa_text_model(self) -> nn.Module:
+        """The MoT text model (``Nemotron3DenseVLTextModel`` & co.) whose ``_impl_forward`` loop does the capture."""
+        text_model = getattr(self.language_model, "model", None)
+        if text_model is None:
+            raise RuntimeError("REPA capture expects language_model.model (the MoT text model) to exist")
+        return text_model
+
+    def _compute_repa_targets(
+        self,
+        packed_seq: PackedSequence,
+        teacher_tokens,
+    ) -> tuple[torch.Tensor, list[int]] | None:
+        """Adapt the raw teacher tokens onto the MoT token grids BEFORE the MoT forward.
+
+        Runs inside ``forward`` because the target adapter's parameters belong to the root FSDP unit. Returns the
+        small ``[N,D_t]`` target (+ per-sample counts) so the caller can drop the raw teacher tensor right away.
+        """
+        assert self.repa_head is not None
+        vision = packed_seq.vision
+        if teacher_tokens is None or vision is None or vision.tokens is None:
+            return None
+        if isinstance(teacher_tokens, RepaTeacherTokens):
+            teacher_tokens = teacher_tokens.take()
+        return self.repa_head.compute_targets(
+            teacher_tokens, token_shapes=vision.token_shapes, noisy_frame_indexes=vision.noisy_frame_indexes
+        )
+
+    def _compute_repa_outputs(
+        self,
+        packed_seq: PackedSequence,
+        captured_pack,
+        repa_targets: tuple[torch.Tensor, list[int]] | None,
+        parallel_dims,
+        last_hidden_state: torch.Tensor,
+        output_dict: dict,
+    ) -> None:
+        """Project the captured layer-``k`` vision tokens and fill the ``repa_*`` outputs.
+
+        Runs inside ``forward`` on purpose: the REPA parameters belong to the root FSDP unit, whose weights are
+        only materialized during the network forward.
+        """
+        assert self.repa_head is not None
+        vision = packed_seq.vision
+        have_inputs = (
+            captured_pack is not None
+            and repa_targets is not None
+            and vision is not None
+            and isinstance(vision.sequence_indexes, torch.Tensor)
+            and vision.sequence_indexes.numel() > 0
+        )
+        pred = None
+        if have_inputs:
+            hidden_k = get_context_parallel_last_hidden_state(
+                packed_outputs=captured_pack, parallel_dims=parallel_dims
+            )  # [N_total,hidden_size] at decoder block ``repa_layer_index``
+            vision_hidden = hidden_k[vision.sequence_indexes]  # [N_vision_tokens,hidden_size], packing order
+            pred = self.repa_head.project(
+                vision_hidden, token_shapes=vision.token_shapes, noisy_frame_indexes=vision.noisy_frame_indexes
+            )
+        if pred is None:
+            # Same rule as the other heads: keep every REPA parameter in the autograd graph on every rank.
+            probe = self.repa_head.probe(last_hidden_state.device, last_hidden_state.dtype)
+            output_dict["repa_pred"] = probe.view(1, 1)
+            output_dict["repa_target"] = probe.detach().view(1, 1) + 1.0
+            output_dict["repa_empty"] = True
+            return
+        assert repa_targets is not None
+        target, counts = repa_targets
+        if target.shape[0] != pred.shape[0]:
+            raise RuntimeError(f"REPA pred/target row mismatch: {pred.shape[0]} vs {target.shape[0]}")
+        output_dict["repa_pred"] = pred  # [N_aligned,D_teacher]
+        output_dict["repa_target"] = target  # [N_aligned,D_teacher]
+        output_dict["repa_empty"] = False
+        output_dict["repa_num_tokens_per_sample"] = counts
+        # Needed by transition and per-frame spatial-normalization objectives to restore [frame, patch] structure.
+        output_dict["repa_frame_indexes_per_sample"] = list(vision.noisy_frame_indexes)
 
     def generate_reasoner_text(
         self,
@@ -1115,6 +1264,10 @@ class Cosmos3VFMNetwork(PreTrainedModel):
         packed_seq: PackedSequence,
         memory: MemoryState | None = None,
         video_temporal_causal: bool | None = None,
+        repa_teacher_tokens: RepaTeacherTokens | torch.Tensor | Sequence[torch.Tensor] | None = None,
+        capture_sigreg: bool = False,
+        repa_aux: dict | None = None,
+        repa_aux_only: bool = False,
     ) -> dict:
         """
         Forward pass for Cosmos3VFMNetwork.
@@ -1127,6 +1280,15 @@ class Cosmos3VFMNetwork(PreTrainedModel):
                 ``OmniMoTModel.build_memory_state()``.
             video_temporal_causal: Per-call attention-mode override; ``None``
                 (default) uses the config-selected ``self.video_temporal_causal``.
+
+            repa_teacher_tokens: Per-sample V-JEPA 2.1 tokens ``[V,T_t,H_p,W_p,D_t]`` (one clip per camera
+                view) when the REPA head is enabled; the layer-``repa_layer_index`` vision hidden states are
+                then projected and returned together with the adapted targets as ``repa_pred`` / ``repa_target``.
+            capture_sigreg: Return visual-token hidden states from ``sigreg_layer_index`` for SIGReg. Explicitly
+                opt-in per call so ordinary inference does not retain this intermediate activation.
+            repa_aux: Independent masked-video pack, teacher holder and target mask. Its prefix forward
+                executes inside this root forward so the projector remains under the root FSDP unit.
+            repa_aux_only: Internal prefix call; stop at the captured block and skip all output decoders.
 
         Returns:
             dict with keys:
@@ -1142,6 +1304,29 @@ class Cosmos3VFMNetwork(PreTrainedModel):
         # This is intentional for proper batch norm / dropout behavior
         # assert self.training, "Cosmos3VFMNetwork only supports training mode"
 
+        aux_outputs = {}
+        if repa_aux is not None:
+            if repa_aux_only or memory is not None:
+                raise ValueError("Masked prediction does not support recursion or persistent memory")
+            # Both branches run under a SINGLE root FSDP forward. The auxiliary
+            # branch stops at block k and never decodes or supervises actions.
+            aux = self.forward(
+                packed_seq=repa_aux["packed_seq"],
+                repa_teacher_tokens=repa_aux["teacher_tokens"],
+                video_temporal_causal=False,
+                repa_aux_only=True,
+            )
+            if aux.get("repa_empty", True):
+                raise ValueError("Masked prediction produced no aligned visual tokens")
+            aux_outputs = dict(
+                jepa_pred=aux["repa_pred"],
+                jepa_target=aux["repa_target"],
+                jepa_counts=aux["repa_num_tokens_per_sample"],
+                jepa_mask=repa_aux["mask"],
+            )
+        if repa_aux_only and (self.repa_head is None or repa_teacher_tokens is None):
+            raise ValueError("Auxiliary prefix requires a REPA head and teacher targets")
+
         packed_sequence, target_dtype = self._encode_text(packed_seq)  # packed_sequence: [N_total,hidden_size]
 
         # encode vision tokens
@@ -1155,7 +1340,7 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             original_latent_shapes_lidar = self._encode_lidar(packed_seq, packed_sequence, target_dtype)
 
         # encode action tokens
-        if self.config.action_gen:
+        if self.config.action_gen and not repa_aux_only:
             self._encode_action(packed_seq, packed_sequence, target_dtype)
 
         # encode sound tokens
@@ -1332,18 +1517,88 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             parallel_dims=sequence_shard_parallel_dims,
         )
 
-        packed_outputs, lbl_metadata = self.language_model(
-            input_pack,
-            attention_mask=attention_meta,
-            position_ids=packed_position_ids,
-            natten_metadata_list=natten_metadata_list,
-            memory=memory,
-        )
+        # REPA: build the (small) adapted teacher targets first and release the raw teacher tokens, then ask the
+        # MoT text model to keep the residual stream after block ``repa_layer_index`` (1-based).
+        repa_text_model = None
+        repa_targets = None
+        if self.repa_head is not None and repa_teacher_tokens is not None:
+            repa_targets = self._compute_repa_targets(packed_seq, repa_teacher_tokens)
+            repa_teacher_tokens = None
+            repa_text_model = self._repa_text_model()
+            repa_text_model._repa_capture_layer = self.repa_layer_index - 1
+            repa_text_model._repa_captured = None
+            repa_text_model._repa_stop_after_capture = repa_aux_only
+
+        sigreg_text_model = None
+        if capture_sigreg and self.sigreg_enabled:
+            sigreg_text_model = self._repa_text_model()
+            sigreg_text_model._sigreg_capture_layer = self.sigreg_layer_index - 1
+            sigreg_text_model._sigreg_captured = None
+
+        repa_captured = None
+        sigreg_captured = None
+        try:
+            packed_outputs, lbl_metadata = self.language_model(
+                input_pack,
+                attention_mask=attention_meta,
+                position_ids=packed_position_ids,
+                natten_metadata_list=natten_metadata_list,
+                memory=memory,
+            )
+        finally:
+            # Never leave capture/early-exit flags active after an exception.
+            # Decoder checkpoint recomputation does not consult these flags.
+            if repa_text_model is not None:
+                repa_captured = repa_text_model._repa_captured
+                repa_text_model._repa_capture_layer = None
+                repa_text_model._repa_captured = None
+                repa_text_model._repa_stop_after_capture = False
+            if sigreg_text_model is not None:
+                sigreg_captured = sigreg_text_model._sigreg_captured
+                sigreg_text_model._sigreg_capture_layer = None
+                sigreg_text_model._sigreg_captured = None
+        if repa_text_model is not None:
+            if repa_captured is None:
+                raise RuntimeError(
+                    f"REPA capture at MoT block {self.repa_layer_index} did not fire; the language model's "
+                    "_impl_forward loop must honour _repa_capture_layer."
+                )
+        if sigreg_text_model is not None:
+            if sigreg_captured is None:
+                raise RuntimeError(
+                    f"SIGReg capture at MoT block {self.sigreg_layer_index} did not fire; the language model's "
+                    "_impl_forward loop must honour _sigreg_capture_layer."
+                )
         last_hidden_state = get_context_parallel_last_hidden_state(
             packed_outputs=packed_outputs,
             parallel_dims=sequence_shard_parallel_dims,
         )  # [N_total,hidden_size]
-        output_dict = dict()
+        output_dict = dict(aux_outputs)
+
+        # REPA outputs (projected layer-k vision tokens + adapted teacher targets)
+        if self.repa_head is not None:
+            self._compute_repa_outputs(
+                packed_seq,
+                repa_captured,
+                repa_targets,
+                sequence_shard_parallel_dims,
+                last_hidden_state,
+                output_dict,
+            )
+
+        if repa_aux_only:
+            return output_dict
+
+        # SIGReg receives visual tokens only: no text, action, sound or LiDAR rows enter this tensor.
+        if sigreg_captured is not None:
+            sigreg_hidden = get_context_parallel_last_hidden_state(
+                packed_outputs=sigreg_captured, parallel_dims=sequence_shard_parallel_dims
+            )
+            vision = packed_seq.vision
+            if vision is None or not isinstance(vision.sequence_indexes, torch.Tensor):
+                output_dict["sigreg_visual_tokens"] = sigreg_hidden[:0]
+            else:
+                output_dict["sigreg_visual_tokens"] = sigreg_hidden[vision.sequence_indexes]
 
         # decode vision tokens
         if self.config.vision_gen:

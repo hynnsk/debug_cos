@@ -19,7 +19,7 @@ task         = "vfm"
 experiment   = "action_policy_libero_edge"
 project      = "cosmos3_action_libero"
 group        = "edge_libero10_fewshot"
-name         = "hs08_v2"
+name         = "hs08_v4"
 wandb_mode   = "offline"
 
 [model]
@@ -46,18 +46,18 @@ vae_path = "${oc.env:WAN_VAE_PATH}"
 lr = 5.0e-05
 
 [scheduler]
-cycle_lengths = [2000]
-warm_up_steps = [200]
+cycle_lengths = [500]
+warm_up_steps = [50]
 
 [trainer]
-max_iter        = 2000
+max_iter        = 500
 logging_iter    = 20
 grad_accum_iter = 1
 # Held-out validation (50 LIBERO-10 demos disjoint from the 30 training demos; docs/action_policy_libero_posttrain.md)
 # -> wandb val/loss_total, val/flow_matching_loss_action, val/flow_matching_loss_vision (+ val/loss from wandb_val).
 run_validation          = true
 run_validation_on_start = true   # iteration 0 = the fresh-init model before any update
-validation_iter         = 200
+validation_iter         = 100
 max_val_iter            = 16     # x 128 windows x 2 ranks ~= the whole 50-episode val set per pass
 
 [dataloader_train]
@@ -66,7 +66,7 @@ max_samples_per_batch = 128
 episode_subset_path = "libero_10_3ep_per_task_seed42.json"
 
 [dataloader_val]
-max_samples_per_batch = 128
+max_samples_per_batch = 16
 episode_subset_path   = "libero_10_val_5ep_per_task_seed42_excl3ep.json"  # 5 held-out demos/task, disjoint from train
 
 [checkpoint]

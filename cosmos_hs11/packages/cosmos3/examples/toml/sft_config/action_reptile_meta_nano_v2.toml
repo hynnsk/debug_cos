@@ -1,0 +1,100 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# cosmos_hs11 -- REPTILE meta-training of Cosmos3-Nano on 8 x H200 (141 GB), matched to a DOWNSTREAM post-training of 8 x 128 = 1024
+# windows per step at lr 5e-5 (action_policy_libero_10_nano_reptileinit_h200.toml). The inner loop mimics that procedure:
+#   episode = K64 demos x 16 windows = 1024 support windows; max_samples_per_batch 128 x 8 ranks = 1024 -> every inner step is one
+#   pass over the support at the downstream batch size; k = 20 steps (20 epochs) at the SAME lr 5e-5 (Cosmos3 keeps 5e-5 from
+#   gbs 256 to 2048 and Adam's k x lr displacement does not depend on the batch -> no sqrt scaling).
+# Why K grows and windows_per_demo does not: windows per demo are fractal 27, bridge 20, UR 135, franka 161, yam 2238 and the
+# sampler repeats windows when a demo is shorter than windows_per_demo; K64 x w16 fills 1024 without repeats.
+# Memory ~50 GB/GPU (22 GB fp32 weight/grad/Adam/theta shards + 128 x 0.22 GB activations). Time on 8 x H200: encode 1280
+# windows / 8 ranks ~10 s + 20 x ~8 s inner steps -> ~3 min per meta-iteration -> 1000 iterations ~ 2-2.5 days; a DCP is ~120 GB.
+# Optional levers (docs/action_reptile_meta.md 9b): meta_batch_embodiments = 2 (2x time, smoother theta); max_iter 1500-2000
+# (eps anneals over it); inner_steps 40 if the support -> query gap (support_loss_last vs query_loss) stays small.
+# Base recipe (the Edge run
+# action_reptile_meta_edge2.toml (K=16 demos x 16 windows = 256 support windows = ONE inner step = one pass, k=10 inner
+# FusedAdam steps at the downstream LR 5e-5, eps 0.5 -> 0.05), only the model tier and the topology differ:
+#   8 GPUs x 32 windows/rank = the same 256-window inner batch as Edge's 2 x 128 -> Edge-vs-Nano differ only in the model.
+# Memory (per GPU, shard 8, full activation checkpointing): ~22 GB of fp32 weights / grads / Adam / theta shards + ~0.22 GB
+# per window -> ~30 GB at 32 windows (measured 33 GB for the hs08 Nano post-training at 32); 64 windows ~37 GB fits A6000
+# only; 128 windows (~50 GB) fits NO 48 GB card -- 128 windows/rank is the H200 recipe (action_reptile_meta_nano_h200.toml).
+# Time: ~15 s per inner step at 32 windows/rank (Nano is ~4.9x the Edge FLOPs per window) -> ~3 min per meta-iteration
+# -> 1000 iterations ~ 2 days on one 8-GPU node. DCP snapshots are ~120 GB each (save_iter 500).
+# Output: <IMAGINAIRE_OUTPUT_ROOT>/cosmos3_action_meta/reptile_meta/<name>/checkpoints/iter_XXXXXXXXX + meta_action_init*.pt;
+# downstream: examples/toml/sft_config/action_policy_libero_10_nano_reptileinit.toml (REPTILE_CKPT_PATH + META_ACTION_INIT_PATH).
+# Env: ROBOT_FEWSHOT_ROOT, BASE_CHECKPOINT_PATH (= Cosmos3-Nano DCP), WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT. docs/action_reptile_meta.md 9.
+
+[job]
+task         = "vfm"
+experiment   = "action_reptile_meta_nano"
+project      = "cosmos3_action_meta"
+group        = "reptile_meta"
+name         = "nano_reptile_pretrain_v2"
+wandb_mode   = "online"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+lora_enabled = false          # full-parameter mode
+
+[model.compile]
+enabled = false               # REQUIRED for Nano on 48 GB Ampere (Inductor RMSNorm-backward smem overflow) and by Reptile
+
+[model.parallelism]
+data_parallel_shard_degree     = 8    # one 8 x 48 GB node: NPROC_PER_NODE=8 sr 8 48 ... (Nano does not fit fewer shards)
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+# ---- INNER optimizer = the downstream full-FT optimizer (FusedAdam) ----------------------------------------------
+[optimizer]
+lr             = 5.0e-05      # downstream full-FT LR; the inner loop must resemble the post-training it prepares for
+weight_decay   = 0.05
+keys_to_select = ["moe_gen", "time_embedder", "vae2llm", "llm2vae", "action2llm", "llm2action", "action_modality_embed"]   # = action_policy_libero_nano (Nano has no k_norm_und_for_gen)
+
+[optimizer.lr_multipliers]
+action2llm            = 1.0   # heads are meta-learned across episodes, not fresh per episode -> no 5x boost
+llm2action            = 1.0
+action_modality_embed = 1.0
+
+[trainer]
+max_iter     = 2000           # meta-iterations. eps anneals to meta_lr * meta_lr_min_ratio AT max_iter -> change this, do not stop early
+logging_iter = 10
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 500               # a full-mode Nano DCP is ~120 GB (63 GB fp32 weights + Adam moments) -> 2 snapshots per run
+keys_to_skip_loading = ["net_ema.", "action2llm", "llm2action", "action_modality_embed", "action_pos_embed"]   # DROID-trained Nano heads start fresh, like action_policy_libero_nano
+
+# ---- Reptile knobs (docs/action_reptile_meta.md) --------------------------------------------------------------------
+[custom.meta]
+theta_mode                  = "full"
+# episodic sampler: K support demos x w windows shared by all ranks (sharded), Q query demos for diagnostics only
+k_shot                = 64        # 64 demos x 16 windows = 1024 support = one 1024-window inner step (= the downstream gbs 8 x 128)
+q_query               = 16        # diagnostics only (no gradient); 16 x 16 = 256 query windows -> smoother query_loss / gain curves
+windows_per_demo      = 16        # bridge / fractal demos have only 20-28 windows: 16 covers them without repeats, so the support grows via k_shot
+max_samples_per_batch = 128        # per-rank windows per inner step: 8 ranks x 128 = 1024 = the downstream global batch = the whole support
+disjoint_tasks        = false
+num_workers           = 8
+loader_timeout_s      = 1800
+seed                  = 42
+# inner loop: k standard optimizer steps from theta (~20 passes over the K demos, a miniature of the 3-demo post-training)
+inner_steps           = 20        # 20 full-batch epochs over the 64-demo support (~8 s per step on H200 -> ~3 min per meta-iteration)
+inner_warmup_steps    = 2         # 10% of the inner loop; Adam restarts from an empty state every episode
+inner_grad_clip       = 1.0
+inner_reset_optimizer = true
+# outer loop: theta <- theta + eps * (theta_tilde - theta); eps 0.5 -> 0.05 linearly over max_iter
+meta_optimizer        = "sgd"
+meta_lr               = 0.5
+meta_lr_min_ratio     = 0.1
+meta_lr_warmup_iters  = 0
+meta_batch_embodiments = 1        # >1 averages the displacement of several embodiments per meta step (x cost)
+loss_mode             = "total"   # the recipe's objective (10 x vision + 10 x action, EDGE_MODEL_CONFIG loss_scale / action_loss_weight) -- mimics post-training
+scratch_domain_id     = 31
+eval_query_every      = 5         # zero-shot vs adapted query loss (diagnostics; 2 extra forward passes)

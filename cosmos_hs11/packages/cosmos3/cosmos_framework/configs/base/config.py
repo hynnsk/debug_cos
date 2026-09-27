@@ -104,9 +104,11 @@ def make_config() -> Config:
     import cosmos_framework.configs.base.experiment.sft.vision_sft_edge  # noqa: F401
 
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_libero_edge  # noqa: F401
+    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_libero_edge_repa  # noqa: F401
     import cosmos_framework.configs.base.experiment.action.meta.action_fewshot_meta_edge  # noqa: F401
     import cosmos_framework.configs.base.experiment.action.meta.action_fewshot_meta_lora_edge  # noqa: F401
     import cosmos_framework.configs.base.experiment.action.meta.action_reptile_meta_edge  # noqa: F401
+    import cosmos_framework.configs.base.experiment.action.meta.action_reptile_meta_nano  # noqa: F401
     import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_libero_lora_edge  # noqa: F401
 
     return c

@@ -22,6 +22,7 @@ TOML_FILE="examples/toml/sft_config/action_policy_libero_10_edge_metainit.toml"
 
 export LIBERO_ROOT="${LIBERO_ROOT:-}"
 export META_ACTION_INIT_PATH="${META_ACTION_INIT_PATH:-}"
+export MASTER_PORT=50013
 
 EXTRA_DATASET_CHECK='[[ -f "$LIBERO_ROOT/meta/info.json" ]] || { echo "ERROR: LIBERO_ROOT must be a local LeRobot dir containing meta/info.json (got: '\''$LIBERO_ROOT'\'')." >&2; exit 1; }; [[ -f "$META_ACTION_INIT_PATH" ]] || { echo "ERROR: META_ACTION_INIT_PATH must point at a meta_action_init.pt (got: '\''$META_ACTION_INIT_PATH'\''). Run examples/launch_meta_action_fewshot_edge.sh first." >&2; exit 1; }'
 

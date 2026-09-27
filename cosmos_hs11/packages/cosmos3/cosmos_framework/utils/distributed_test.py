@@ -434,6 +434,66 @@ def test_ensure_world_communicator_probes_once(monkeypatch: pytest.MonkeyPatch) 
 
 @pytest.mark.L0
 @pytest.mark.CPU
+def test_warm_up_checkpoint_collectives_runs_dcp_object_collectives_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_world(monkeypatch, world_size=4)
+    calls: list[str] = []
+
+    def fake_gather_object(obj: Any, object_gather_list: list[Any] | None = None, dst: int = 0, **_: Any) -> None:
+        calls.append("gather")
+        assert dst == 0 and object_gather_list is not None and len(object_gather_list) == 4
+        for i in range(4):
+            object_gather_list[i] = {"rank": i}
+
+    def fake_scatter_object_list(out: list[Any], inp: list[Any] | None, src: int = 0, **_: Any) -> None:
+        calls.append("scatter")
+        assert src == 0 and inp is not None and len(inp) == 4
+        out[0] = inp[0]
+
+    def fake_broadcast_object_list(objs: list[Any], src: int = 0, **_: Any) -> None:
+        calls.append("broadcast")
+        assert src == 0
+
+    monkeypatch.setattr(distributed.dist, "gather_object", fake_gather_object)
+    monkeypatch.setattr(distributed.dist, "scatter_object_list", fake_scatter_object_list)
+    monkeypatch.setattr(distributed.dist, "broadcast_object_list", fake_broadcast_object_list)
+
+    distributed.warm_up_checkpoint_collectives()
+
+    assert calls == ["gather", "scatter", "broadcast"]
+
+
+@pytest.mark.L0
+@pytest.mark.CPU
+def test_warm_up_checkpoint_collectives_rejects_inconsistent_world(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_world(monkeypatch, world_size=2)
+
+    def fake_gather_object(obj: Any, object_gather_list: list[Any] | None = None, **_: Any) -> None:
+        assert object_gather_list is not None
+        object_gather_list[0], object_gather_list[1] = {"rank": 1}, {"rank": 0}
+
+    def fake_scatter_object_list(out: list[Any], inp: list[Any] | None, **_: Any) -> None:
+        assert inp is not None
+        out[0] = inp[0]
+
+    monkeypatch.setattr(distributed.dist, "gather_object", fake_gather_object)
+    monkeypatch.setattr(distributed.dist, "scatter_object_list", fake_scatter_object_list)
+    monkeypatch.setattr(distributed.dist, "broadcast_object_list", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(RuntimeError, match="not consistent"):
+        distributed.warm_up_checkpoint_collectives()
+
+
+@pytest.mark.L0
+@pytest.mark.CPU
+def test_warm_up_checkpoint_collectives_is_a_no_op_for_a_single_rank(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_world(monkeypatch, world_size=1)
+    monkeypatch.setattr(distributed.dist, "gather_object", Mock(side_effect=AssertionError("must not be called")))
+
+    distributed.warm_up_checkpoint_collectives()
+
+
+@pytest.mark.L0
+@pytest.mark.CPU
 def test_ensure_world_communicator_rejects_inconsistent_world(monkeypatch: pytest.MonkeyPatch) -> None:
     _stub_world(monkeypatch, world_size=4)
 

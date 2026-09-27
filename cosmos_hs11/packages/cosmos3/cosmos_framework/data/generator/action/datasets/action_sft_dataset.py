@@ -330,6 +330,7 @@ def get_action_libero_sft_dataset(
     iterable_shuffle: bool = False,
     episode_shuffle_seed: int = 42,
     episode_subset_path: str | None = None,
+    keep_native_video: bool = False,
 ) -> Dataset:
     """Build the LIBERO action-policy SFT dataset (GA reproduction defaults).
 
@@ -343,7 +344,9 @@ def get_action_libero_sft_dataset(
     for ``conditioning_fps`` / prompt duration. ``episode_subset_path`` (optional)
     restricts training to a FIXED few-shot episode list (e.g. the bundled
     ``libero_10_10ep_per_task_seed42.json`` = 10 demos/task); see
-    ``LIBEROLeRobotDataset``.
+    ``LIBEROLeRobotDataset``. ``keep_native_video=True`` additionally ships the decoded
+    256x512 uint8 frames as ``video_native`` (V-JEPA REPA teacher input; see
+    ``ActionTransformPipeline``).
     """
     dataset = LIBEROLeRobotDataset(
         root=root,
@@ -371,6 +374,7 @@ def get_action_libero_sft_dataset(
         append_resolution_info=append_resolution_info,
         append_idle_frames=append_idle_frames,
         format_prompt_as_json=format_prompt_as_json,
+        keep_native_video=keep_native_video,
     )
     sft = ActionSFTDataset(dataset, transform, resolution)
     if iterable_shuffle:

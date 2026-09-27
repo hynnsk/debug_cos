@@ -77,6 +77,8 @@ For a per-subpackage tour with descriptions, see [`docs/code_structure.md`](./do
 | [docs/action_fewshot_meta.md](./docs/action_fewshot_meta.md) | Cross-embodiment few-shot meta-training of the action heads (cosmos_hs07). |
 | [docs/action_fewshot_meta_lora.md](./docs/action_fewshot_meta_lora.md) | LoRA-regime variant: theta_meta = LoRA + heads + time_embedder, LoRA post-training with held-out validation (cosmos_hs09). |
 | [docs/action_reptile_meta.md](./docs/action_reptile_meta.md) | Reptile meta-training (full-parameter or LoRA theta) with the standard FSDP stack; downstream warm start from the DCP (cosmos_hs11). |
+| [docs/action_policy_libero_repa_vjepa.md](./docs/action_policy_libero_repa_vjepa.md) | REPA module (V-JEPA 2.1 / DINOv2 teachers, adapters, SIGReg) ported from cosmos_hs10. |
+| [docs/action_policy_libero_masked_jepa.md](./docs/action_policy_libero_masked_jepa.md) | Masked V-JEPA 2.1 feature-prediction objective ported from cosmos_hs12. |
 
 Agent skills (codebase navigation, env troubleshooting, inference, post-training, setup) live in [`.agents/skills/`](./.agents/skills) and [`.claude/skills/`](./.claude/skills).
 

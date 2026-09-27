@@ -186,3 +186,105 @@ lever. Read `iter_time` from the first ~10 iterations (skip iteration 1) and mul
 * A full-mode DCP is ~24 GB; 1000 iterations with `save_iter=250` write ~100 GB. Downstream reads only its `model/` part.
 * `bob` (broken RoCE) is excluded automatically for single-node runs via `NCCL_IB_DISABLE=1`; the
   hs09 `_sft_launcher_common.sh` shard-vs-NPROC guard applies to the downstream launchers.
+* `haring` has one A40 (PCI 57:00.0) stuck in "GPU requires reset" (since 2026-09-26). SLURM still hands it
+  out, torch's lazy CUDA init then dies on every rank once that device is merely visible, and this SLURM setup
+  (cgroup-constrained, `sr` = plain `srun`) gives users no way to pick GPU indices. All launchers therefore
+  source `examples/_node_guards.sh`: every allocated GPU is probed with a 1-GPU torch init, unusable ones are
+  dropped from `CUDA_VISIBLE_DEVICES`, and the run errors out (instead of hanging) when fewer GPUs work than
+  `NPROC_PER_NODE`. To use haring, ask SLURM for one GPU more than you need and pin the rank count:
+
+  ```bash
+  NPROC_PER_NODE=2 srun --oversubscribe --partition=vram48 -w haring -N 1 -n 1 -c 24 --gres=gpu:3 --pty \
+      examples/launch_sft_action_policy_libero_10_edge_reptileinit_repa_dinov2_v2.sh
+  # or avoid the node altogether (sr has no exclude flag; SLURM_EXCLUDE is not honoured here):
+  NPROC_PER_NODE=2 srun --oversubscribe --partition=vram48 -x haring -N 1 -n 1 -c 16 --gres=gpu:2 --pty <launcher>
+  ```
+
+  The same file moves `MASTER_PORT` to the next free port when another torchrun of ours already listens on
+  it on that node (the masked-JEPA and DINOv2-v2 launchers both defaulted to 50025 and the second one died
+  with `EADDRINUSE`; v2 now defaults to 50026).
+
+## 8. Post-training variants on the Reptile init: DINOv2 REPA and masked V-JEPA 2.1
+
+Both add an auxiliary representation objective to the plain `action_policy_libero_10_edge_reptileinit.toml` recipe; the
+TOMLs differ from it only in `[job].experiment/name`, a `[model.repa]` block and `"repa_"` in `keys_to_skip_loading`, so
+the three arms (plain / REPA / masked JEPA) isolate the effect of the extra loss. Code ported from cosmos_hs10 (REPA
+module, `docs/action_policy_libero_repa_vjepa.md`) and cosmos_hs12 (`docs/action_policy_libero_masked_jepa.md`) via the
+cosmos_hs09_2 merge; experiment `action_policy_libero_edge_repa` (+ `repa_` in keys_to_select, `keep_native_video`).
+
+| variant | TOML / launcher | loss added to 10*fm_vision + 10*fm_action |
+| --- | --- | --- |
+| DINOv2 REPA (hs10 v7) | `action_policy_libero_10_edge_reptileinit_repa_dinov2.toml`, `launch_sft_action_policy_libero_10_edge_reptileinit_repa_dinov2.sh` (port 50024) | `5.0 * (1 - cos(MLP(h_8), avgpool(DINOv2-ViT-B/14(frames 1..16))))` on the predicted video tokens |
+| masked JEPA (hs12 dense) | `action_policy_libero_10_edge_reptileinit_masked_jepa.toml`, `launch_sft_action_policy_libero_10_edge_reptileinit_masked_jepa.sh` (port 50025) | `0.5 * ramp(step/200) * (mean_masked|p-y| + 0.25 mean_visible|p-y|)`, p = MLP(h_8) of a pixel-masked re-encoded clip, y = frozen V-JEPA 2.1 ViT-B tokens |
+
+```bash
+JOB=$COSMOS_STORAGE/outputs/cosmos3_action_meta/reptile_meta/<reptile run name>
+export LIBERO_ROOT=<libero_10 LeRobot dir>
+export REPTILE_CKPT_PATH=$JOB/checkpoints/iter_000001000
+export META_ACTION_INIT_PATH=$JOB/meta_action_init_iter_001000.pt
+NPROC_PER_NODE=4 sr 4 48 examples/launch_sft_action_policy_libero_10_edge_reptileinit_repa_dinov2.sh    # HF_HOME: facebook/dinov2-base
+NPROC_PER_NODE=4 sr 4 48 examples/launch_sft_action_policy_libero_10_edge_reptileinit_masked_jepa.sh    # COSMOS_STORAGE: vjepa2_1 ckpt
+```
+
+Notes: the REPA teachers are frozen and never checkpointed; `repa_head` (3-layer MLP) is the only new trainable module
+and starts fresh. Both recipes ship the native uint8 frames to the teacher (`keep_native_video`), which costs a few GB
+of host/GPU memory; 4 x 64 windows fits the 44 GiB cards, the 2-GPU x 128 layout only the 48 GiB A6000s. Watch
+`val/repa_cos_sim_centered` (raw `repa_cos_sim` saturates near 0.98) and, for masked JEPA, `jepa_masked_loss` vs
+`jepa_visible_loss` and `jepa_centered_cos`. The meta trainer's inner loop does not support either objective (it calls
+`training_step_from_inputs` without the raw batch), so these are post-training-only losses.
+
+## 9. Cosmos3-Nano
+
+The same trainer and knobs run on the Nano tier (Qwen3-VL-8B MoT: hidden 4096, 36 blocks, 15.75B params, generation
+tower 6.95B) through the experiment `action_reptile_meta_nano` (`configs/.../meta/action_reptile_meta_nano.py`), which
+mirrors `action_reptile_meta_edge` plus the few-shot Nano recipe's model deltas (`loss_scale` 10, fresh diffusion-expert
+init, `encode_exact_durations` [17, 61, 73], 45056 packed tokens) and `compile.enabled=False` (required on 48 GB Ampere).
+theta (full mode) = the `action_policy_libero_nano` trainable set: moe_gen + time_embedder + vae2llm + llm2vae + heads
+(no `k_norm_und_for_gen` on Nano); LoRA targets add `mlp_moe_gen.gate_proj`.
+
+| TOML | topology | inner batch | notes |
+| --- | --- | --- | --- |
+| `action_reptile_meta_nano.toml` (recommended) | shard 8 x 32 windows | 256 = K16 x w16, one pass/step | same optimisation as `action_reptile_meta_edge2.toml` (2 x 128); ~30 GB/GPU, ~3 min/iter, 1000 iters ~ 2 days |
+| `action_reptile_meta_lora_nano.toml` | shard 8 x 32 | 256 | LoRA mode, lr 1e-4 / wd 0 |
+| `action_reptile_meta_nano_smoke.toml` | shard 2 x 4 | tiny | 2 iterations, theta without moe_gen, no DCP (`save_at_end=false`) |
+| `action_reptile_meta_nano_h200.toml` (8 x H200, downstream gbs 1024) | shard 8 x 128 | 1024 = K64 x w16, one full-batch step | k = 20 (20 epochs), warmup 2, lr 5e-5, q 16; ~50 GB/GPU, ~3 min/iter, 1000 iters ~ 2-2.5 days; downstream pair `action_policy_libero_10_nano_reptileinit_h200.toml` (8 x 128) |
+
+Memory model (per GPU, shard 8, full activation checkpointing): fp32 master weights 63 GB + grads 28 GB + Adam 56 GB +
+theta copy 28 GB = 175 GB / 8 = ~22 GB persistent, + ~0.22 GB per 256-res window (from the hs08 Nano post-training:
+33 GB at 32 windows with an EMA copy instead of the theta copy). Compute: ~4.9x the Edge FLOPs per window -> ~15 s per
+inner step at 32 windows/rank. A full-mode Nano DCP is ~120 GB (63 GB weights + materialised Adam moments), hence
+`save_iter 500`. `[custom.meta] save_at_end=false` skips the final save (smoke runs).
+
+```bash
+export ROBOT_FEWSHOT_ROOT=$COSMOS_STORAGE/data/robot_fewshot BASE_CHECKPOINT_PATH=$COSMOS_STORAGE/checkpoints/Cosmos3-Nano
+NPROC_PER_NODE=8 sr 8 48 examples/launch_reptile_meta_nano.sh
+# downstream (few-shot Nano recipe = cosmos_hs08 action_policy_libero_10_nano_v2: shard 8 x 64, lr 5e-5, val 200 x 16)
+JOB=$COSMOS_STORAGE/outputs/cosmos3_action_meta/reptile_meta/nano_reptile_full_k16w16_s10_eps0.5_seed42
+export LIBERO_ROOT=... REPTILE_CKPT_PATH=$JOB/checkpoints/iter_000001000 META_ACTION_INIT_PATH=$JOB/meta_action_init_iter_001000.pt
+NPROC_PER_NODE=8 sr 8 48 examples/launch_sft_action_policy_libero_10_nano_reptileinit.sh
+# baseline with the same recipe and fresh heads: action_policy_libero_10_nano_fewshot.toml (launch with TOML_FILE=... via
+# launch_sft_action_policy_libero_10_nano.sh or the hs08 launcher)
+```
+
+The few-shot Nano post-training experiment (`action_policy_libero_nano.py`) was taken from cosmos_hs08 (adds the fixed
+episode subset, `dataloader_val` and the val callback; all off by default, so the original full-data
+`action_policy_libero_10_nano.toml` is unchanged).
+
+### 9b. Scaling the inner loop on big GPUs (H200): which knob buys what
+
+The per-rank batch of a Reptile inner step is the support share per rank, not a free "bigger batch" knob: with a
+full-batch inner loop, doubling it just halves the number of (smoother) steps. What the meta-init needs is an inner
+loop that resembles the downstream post-training (30 demos, minibatch 256, many epochs, lr 5e-5), so spend compute as:
+
+| lever | effect | recommendation |
+| --- | --- | --- |
+| `lr` | Adam moves ~lr per coordinate per step whatever the batch; Cosmos3 keeps 5e-5 from gbs 256 to 2048 | keep 5e-5 (the sqrt rule is about minibatch noise, irrelevant for a full-batch inner loop) |
+| `k_shot` | demos per episode; bridge/fractal demos have only 20-28 windows so K, not `windows_per_demo`, grows the support | support = downstream gbs: K = gbs / 16 (64 at gbs 1024); 32 at gbs 512 |
+| `windows_per_demo` | windows sampled per demo (repeats when a demo is shorter) | 16 |
+| `max_samples_per_batch` x ranks | windows per inner step | = the downstream global batch (256 here, 1024 on the H200 plan); support / that = minibatches per epoch |
+| `inner_steps` | epochs of adaptation per episode; the k=10 full-batch loop on 8 demos overfit (negative query gain) | 20 epochs over the support (k = 20 full-batch at gbs 1024, or 40 with 2 minibatches); warmup 10% |
+| `q_query` | diagnostics only | 16 |
+| `meta_batch_embodiments` | averages displacements before the meta step (smoother theta, x cost) | 1; 2 if time allows |
+| `max_iter` | eps anneals over it; more iterations = more theta drift budget | 1000; 1500-2000 affordable on H200 |
+| `compile.enabled` | works on Hopper (228 KB smem) and in principle with in-place theta rewrites, but untested in this trainer | leave off |
+

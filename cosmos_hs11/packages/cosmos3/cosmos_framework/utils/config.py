@@ -546,6 +546,9 @@ class Config:
         # cross-domain fabric fault reports itself here instead of hanging inside config validation
         # until an external reaper reclaims the allocation.
         distributed.ensure_world_communicator()
+        # Make NCCL set up the send/recv buffers that dcp.save/dcp.load need now, not at the first checkpoint
+        # save when the caching allocator may already hold the whole card (-> "NCCL Error 1: unhandled cuda error").
+        distributed.warm_up_checkpoint_collectives()
 
         # broadcast job.name across all ranks to make sure it is consistent
         # otherwise, unaligned job names leads unaligned path to save checkpoints

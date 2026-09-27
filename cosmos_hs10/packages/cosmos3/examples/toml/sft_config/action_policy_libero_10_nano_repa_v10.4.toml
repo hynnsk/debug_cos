@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# Nano REPA v10: V-JEPA 2.1 ViT-L/16 teacher with per-frame spatially normalized targets and predictions.
+#
+# Cosmos3-Nano (Qwen3-VL-8B MoT, hidden 4096, 36 blocks) LIBERO-10 few-shot post-training (30 train demos
+# `libero_10_3ep_per_task_seed42.json`, 50 held-out val demos, lr 5e-5, cycle 2000 / warmup 200, 256 windows/step)
+# + REPA loss on the MoT generation pathway (experiment `action_policy_libero_nano_repa`, cosmos_hs10).
+# Topology = the validated cosmos_hs08 Nano few-shot recipe: FSDP shard 8 x 32 windows/rank on ONE 8 x 48 GB node,
+# torch.compile OFF (Inductor's fused RMSNorm-backward for the 4096-wide language region exceeds Ampere's smem),
+# activation checkpointing "full". Launch: NPROC_PER_NODE=8 sr 8 48 bash examples/launch_sft_action_policy_libero_10_nano_repa_v10.sh
+#
+# Teacher tier: ViT-L (D=1024) to match the ~5x larger student (the Edge recipes use ViT-B). `layer_index` 10 of 36
+# ~= the Edge depth 8 of 28. All [model.repa] knobs (layer, teacher, weight, objective, adapter, projector) are TOML-editable;
+# schema: cosmos_framework/configs/toml_config/sft_config.py::RepaTomlConfig -> model.config.repa.*.
+# Env: LIBERO_ROOT, BASE_CHECKPOINT_PATH (Cosmos3-Nano DCP), WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT, COSMOS_STORAGE / HF_HOME
+# (teacher weights). See docs/action_policy_libero_repa_vjepa.md, section 8.
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_libero_nano_repa"
+project      = "cosmos3_action_libero"
+group        = "nano_libero10_fewshot_repa"
+name         = "hs10_nano_repa_v10.4_spatial_norm_vjepa_vitl_l12_avgpool_w0.5"
+wandb_mode   = "online"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056   # Edge few-shot value (the full-data Nano recipe uses 74000)
+
+[model.repa]
+enabled            = true
+loss_weight        = 0.5                       # weight of (1 - cos); fm terms carry x10, so 5.0 ~= the REPA paper's lambda 0.5
+objective          = "spatial_normalized"      # per-frame, per-channel mean/std over the 5x10 patches on BOTH sides, then cosine
+spatial_norm_eps   = 1.0e-6
+layer_index        = 12                        # MoT block whose residual stream is aligned (1..36); Edge used 8 of 28
+teacher            = "vjepa2_1_vit_large_384"   # V-JEPA 2.1 ViT-L/16 ema_encoder (D=1024)
+teacher_input_size = 256                       # native LIBERO resolution == V-JEPA 2.1 RoPE base grid
+target_adapter     = "avgpool"                 # variant 1 | "avgpool_conv" (2) | "strided_conv" (3)
+target_grid_thw    = [4, 5, 5]                 # per-view MoT token grid (validated at runtime)
+projector_type     = "mlp"                     # REPA 3-layer SiLU MLP 4096 -> 2048 -> 2048 -> 1024; "linear" = single Linear
+
+[model.ema]
+enabled         = true
+rate            = 0.1
+iteration_shift = 0
+
+[model.parallelism]
+data_parallel_shard_degree     = 8    # one 8 x 48 GB node; Nano does not fit shard 2 like Edge
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"               # Edge few-shot value; the full-data Nano recipe uses "selective"
+save_ops_regex = ["fmha"]
+
+[model.compile]
+# Off on 48 GB Ampere (A40/A6000): with compile on, Inductor's fused RMSNorm-backward kernel for the
+# 4096-wide Qwen3-VL-8B language region needs 114760 B of shared memory > the 101376 B hardware limit
+# ("No valid triton configs ... out of resource") and the first training step dies. Re-enable on H100-class GPUs.
+enabled = false
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 5.0e-05
+
+[scheduler]
+cycle_lengths = [2000]
+warm_up_steps = [200]
+
+[trainer]
+max_iter        = 2000
+logging_iter    = 20
+grad_accum_iter = 1               # global batch = 32 windows x 8 ranks x 1 = 256 (= Edge: 128 x 2)
+# Held-out validation (50 LIBERO-10 demos disjoint from the 30 training demos)
+# -> wandb val/loss_total, val/flow_matching_loss_{action,vision}, val/repa_loss, val/repa_cos_sim(_centered/_spatial_norm).
+run_validation          = true
+run_validation_on_start = true   # iteration 0 = the fresh-init model before any update
+validation_iter         = 200
+max_val_iter            = 16     # x 32 windows x 8 ranks = 4096 windows per pass
+
+[dataloader_train]
+max_samples_per_batch = 128
+episode_subset_path = "libero_10_3ep_per_task_seed42.json"   # 3 demos/task x 10 tasks = 30 episodes
+
+[dataloader_val]
+max_samples_per_batch = 32
+episode_subset_path   = "libero_10_val_5ep_per_task_seed42_excl3ep.json"  # 5 held-out demos/task, disjoint from train
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 500

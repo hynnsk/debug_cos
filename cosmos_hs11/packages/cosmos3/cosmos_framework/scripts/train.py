@@ -183,9 +183,33 @@ def _apply_deterministic_config_overrides(config: Config) -> None:
     )
 
 
+def _prepare_dataloader_process_limits() -> None:
+    """Keep many-tensor DataLoader batches from exhausting the per-process fd limit.
+
+    Compute nodes cap the soft ``nofile`` limit at 1024 while the packing loaders ship hundreds of tensors per
+    batch (and the V-JEPA REPA recipe adds a native-resolution clip per sample). With the default
+    ``file_descriptor`` sharing strategy every shared tensor holds an fd on the consumer, so the queue feeder
+    silently dies and the trainer hangs in its first collective. Use ``file_system`` sharing (backed by
+    /dev/shm) and raise the soft limit to the hard limit as belt-and-braces (inherited by forked workers).
+    Ported from cosmos_hs09 ``scripts/train_action_meta.py``.
+    """
+    import resource
+
+    torch.multiprocessing.set_sharing_strategy("file_system")
+    try:
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        target = hard if hard != resource.RLIM_INFINITY else max(soft, 65536)
+        if target > soft:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (target, hard))
+            logging.info(f"Raised RLIMIT_NOFILE soft limit {soft} -> {target}")
+    except (ValueError, OSError) as e:  # noqa: PERF203
+        logging.warning(f"Could not raise RLIMIT_NOFILE ({e}); relying on the file_system sharing strategy")
+
+
 @logging.catch(reraise=True)
 @telemetry.monitor
 def launch(config: Config, args: argparse.Namespace) -> None:
+    _prepare_dataloader_process_limits()
     # Need to initialize the distributed environment before calling config.validate() because it tries to synchronize
     # a buffer across ranks. If you don't do this, then you end up allocating a bunch of buffers on rank 0, and also that
     # check doesn't actually do anything.

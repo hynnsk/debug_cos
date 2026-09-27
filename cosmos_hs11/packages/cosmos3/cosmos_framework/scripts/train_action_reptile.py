@@ -121,6 +121,8 @@ class ReptileTrainConfig:
     eval_query_every: int = 5  # query loss at theta (zero-shot) and at theta_tilde (adapted) every N iters (0 = never)
     log_every: int | None = None  # defaults to trainer.logging_iter
     save_every: int | None = None  # defaults to checkpoint.save_iter
+    save_at_end: bool = True  # also save at max_iter (False: smoke runs skip the final DCP -- ~120 GB for Nano)
+    allow_theta_without_moe_gen: bool = False  # SMOKE ONLY: let mode='full' run with a reduced keys_to_select (fits 2 GPUs)
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "ReptileTrainConfig":
@@ -266,7 +268,10 @@ def launch(config: Config, cfg: ReptileTrainConfig, args: argparse.Namespace) ->
             "mode='lora' but no trainable LoRA parameters: set model.lora_enabled=true and keys_to_select accordingly"
         )
     if cfg.theta_mode == "full" and GROUP_MOE_GEN not in groups_present:
-        raise ValueError("mode='full' but moe_gen is not trainable: check optimizer.keys_to_select")
+        if cfg.allow_theta_without_moe_gen:
+            logging.warning("mode='full' but moe_gen is not trainable -- allowed by allow_theta_without_moe_gen (smoke runs only)")
+        else:
+            raise ValueError("mode='full' but moe_gen is not trainable: check optimizer.keys_to_select")
     if cfg.theta_mode == "full" and GROUP_LORA in groups_present:
         logging.warning(
             "mode='full' with trainable LoRA parameters -- they are meta-learned too (unusual; check the TOML)"
@@ -537,7 +542,7 @@ def launch(config: Config, cfg: ReptileTrainConfig, args: argparse.Namespace) ->
         else:
             if iteration % log_every == 0 or iteration == start_iter + 1:
                 state.theta_norms_by_group()  # collective: keep in step with rank 0
-        if iteration % save_every == 0 or iteration == max_iter:
+        if iteration % save_every == 0 or (iteration == max_iter and cfg.save_at_end):
             _save(iteration)
 
     if jsonl is not None:

@@ -546,6 +546,10 @@ class ActionTransformPipeline:
         enable_mode_specific_prompt: Whether to add the mode-specific prediction
             description to the prompt metadata and omit the source action caption
             for inverse dynamics. Defaults to ``False``.
+        keep_native_video: Keep the decoded frames before the resize/pad step under
+            ``native_video_key`` (uint8 ``[C,T,H,W]``). Used by the V-JEPA REPA loss,
+            whose teacher wants the native camera resolution rather than the model
+            canvas. Defaults to ``False`` (no extra tensor shipped per sample).
         format_prompt_float_seconds: When ``format_prompt_as_json`` is enabled,
             emit sub-second-precise float ``duration``/``time`` (e.g. "0.57s")
             instead of truncated whole seconds ("0s").  Useful for short
@@ -573,8 +577,13 @@ class ActionTransformPipeline:
         format_prompt_as_json: bool = False,
         enable_mode_specific_prompt: bool = False,
         format_prompt_float_seconds: bool = False,
+        keep_native_video: bool = False,
+        native_video_key: str = "video_native",
     ) -> None:
         self.caption_key: str = caption_key
+        # REPA (V-JEPA) teacher input: keep the un-resized, un-padded uint8 frames next to the model canvas.
+        self.keep_native_video: bool = keep_native_video
+        self.native_video_key: str = native_video_key
         self.video_temporal_downsample: int = video_temporal_downsample
         self.max_action_dim: int = max_action_dim
         self.action_channel_masking: bool = action_channel_masking
@@ -754,6 +763,12 @@ class ActionTransformPipeline:
         mode = data_dict.get("mode")
         assert mode is not None, "mode is required"
 
+        if self.keep_native_video:
+            # Native-resolution copy for the V-JEPA REPA teacher (``[C,T,H,W]`` uint8, e.g. 3x17x256x512 for the
+            # LIBERO concat_view). Stored BEFORE the resize/pad below so it is exactly what the dataset decoded.
+            native = data_dict.get("video")
+            assert isinstance(native, torch.Tensor), "video is required to keep a native copy"
+            data_dict[self.native_video_key] = native
         # 1. Resize + reflection-pad spatial dimensions to the closest predefined target from ``VIDEO_RES_SIZE_INFO[resolution]``.
         data_dict = self.video_resize(data_dict, resolution)
 

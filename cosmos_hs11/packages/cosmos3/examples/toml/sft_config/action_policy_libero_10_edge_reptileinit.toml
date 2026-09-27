@@ -17,7 +17,7 @@ task         = "vfm"
 experiment   = "action_policy_libero_edge"
 project      = "cosmos3_action_libero"
 group        = "edge_libero10_fewshot"
-name         = "edge_libero10_3ep_fullft_reptileinit_4gpu_bs256_seed42"
+name         = "edge_libero10_3ep_fullft_reptileinit"
 wandb_mode   = "online"
 
 [model]
@@ -31,7 +31,7 @@ rate            = 0.1
 iteration_shift = 0
 
 [model.parallelism]
-data_parallel_shard_degree     = 4      # 4-GPU run: NPROC_PER_NODE=4 sr 4 48 ...
+data_parallel_shard_degree     = 2      # 4-GPU run: NPROC_PER_NODE=4 sr 4 48 ...
 data_parallel_replicate_degree = 1
 
 [model.activation_checkpointing]
@@ -64,11 +64,11 @@ validation_iter         = 200
 max_val_iter            = 16     # x 64 windows x 4 ranks = 4096 windows ~= half of the 50-episode val set (same windows every time)
 
 [dataloader_train]
-max_samples_per_batch = 64       # per rank; x 4 ranks = global batch 256
+max_samples_per_batch = 128       # per rank; x 4 ranks = global batch 256
 episode_subset_path   = "libero_10_3ep_per_task_seed42.json"          # 3 demos/task x 10 tasks = 30 episodes
 
 [dataloader_val]
-max_samples_per_batch = 64
+max_samples_per_batch = 16
 episode_subset_path   = "libero_10_val_5ep_per_task_seed42_excl3ep.json"  # 5 held-out demos/task, disjoint from train
 
 [checkpoint]
