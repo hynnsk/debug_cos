@@ -155,12 +155,21 @@ class RepaConfig:
     )
     # Denominator stabilizer for objective="spatial_normalized" (std over patches + eps).
     spatial_norm_eps: float = 1.0e-6
+    # objective="spatial_normalized": also divide by the per-frame, per-channel spatial std (v10). False (v10.1) only
+    # subtracts the spatial mean, so channels that barely vary over a frame are not amplified to unit variance.
+    spatial_norm_scale: bool = True
+    # Apply the centering (center_targets) / spatial normalization (objective="spatial_normalized") to the student
+    # projection as well (v6 / v10). False (v6.1 / v10.1) normalizes the TEACHER target only and regresses the raw
+    # student projection onto it (data2vec / V-JEPA style): the shortcut is still removed (a constant prediction scores
+    # ~0 against a zero-mean target) and no student-side statistic can shrink towards zero and blow up the cosine
+    # gradient, which is what happened in v6 (1/||pred - mean(pred)|| at a near-constant projector output).
+    normalize_student: bool = True
     # Weight of the token-relation distillation loss (v5 recipe: 5.0 with loss_weight 0.0). 0 = monitor only.
     relation_loss_weight: float = 0.0
     # Entry-wise distance between the student and teacher relation maps: "l2" (squared) or "l1" (absolute).
     relation_distance: str = attrs.field(default="l2", validator=attrs.validators.in_({"l2", "l1"}))
-    # Center the cosine loss: subtract the (detached) batch-mean teacher target from BOTH the projected student tokens
-    # and the targets before the cosine. V-JEPA 2.1 tokens share a dominant common direction (on LIBERO a constant
+    # Center the cosine loss: subtract the (detached) batch mean from the targets and (normalize_student=True) from
+    # the projected student tokens before the cosine. V-JEPA 2.1 tokens share a dominant common direction (on LIBERO a constant
     # prediction already scores raw cos ~0.92), so the raw objective is mostly satisfied by that shortcut; centering
     # makes only the token-specific part count. ``repa_cos_sim`` stays the raw cosine, ``repa_cos_sim_centered`` the
     # centered one, whichever is trained.
@@ -172,6 +181,13 @@ class RepaConfig:
     # or a DINOv2 image encoder "dinov2_vitb14" (D=768; also vits14 / vitl14) applied per frame -- then set
     # teacher_input_size to a multiple of 14 (224 -> the same 16x16 grid) and teacher_checkpoint_path may name an HF repo/dir.
     teacher: str = "vjepa2_1_vit_base_384"
+    # V-JEPA 2.1 only: which encoder block's per-level-LayerNorm output is the target. Must be one of the encoder's
+    # hierarchical layers (ViT-B/16: 2, 5, 8, 11; ViT-L/16: 5, 11, 17, 23 -- the multi-level targets of V-JEPA 2.1's own
+    # pretraining). None = last block (ViT-B 11 / ViT-L 23), the standard feature-extraction output (v1..v11).
+    # Measured on LIBERO-10 val (2026-09-29): the shared-direction energy of the pooled 4x5x10 target is 0.93/0.89/0.83/0.84
+    # for ViT-B layers 2/5/8/11 and 0.94/0.95/0.95/0.62 for ViT-L 5/11/17/23 -> ViT-L 23 is the only V-JEPA target with a
+    # moderate constant-prediction shortcut (raw cos 0.79 vs 0.92 for ViT-B 11; DINOv2-B 0.55).
+    teacher_layer_index: int | None = None
     # Explicit checkpoint file/dir. None = $COSMOS_STORAGE/checkpoints/vjepa2_1/<release file> (download if absent).
     teacher_checkpoint_path: str | None = None
     # Square input side for the teacher. 256 = the V-JEPA 2.1 pretraining RoPE grid (16x16 patches) and LIBERO's
@@ -194,6 +210,13 @@ class RepaConfig:
     # LIBERO-10 concat_view: 17 frames -> 5 latent frames (4 predicted); 256x512 -> 192x320 canvas with a 160-px
     # content height -> 5x10 tokens after the padding crop, i.e. 5x5 per view.
     target_grid_thw: tuple[int, int, int] = (4, 5, 5)
+    # "Less pooling" (v13 / v14): teacher cells predicted per MoT token along (t, h, w). (1,1,1) = one pooled teacher
+    # cell per token (v1..v12). (1,2,2) adapts each view to 4x10x10 instead of 4x5x5 and every MoT token predicts its
+    # 2x2 spatial sub-cells with one S*D_t-wide projector output (S = 4); rows become [N*S, D_t] for every objective.
+    # Averaging ~20 teacher tokens into one cell removes most of the token-specific signal (energy left after
+    # per-frame spatial centering, V-JEPA-L 23: 0.33 at 4x5x10 -> 0.42 at 4x10x20; DINOv2-B: 0.61 -> 0.68); temporal
+    # refinement (2,1,1) adds almost nothing (0.33 -> 0.34).
+    target_subgrid_thw: tuple[int, int, int] = (1, 1, 1)
     # Student-side projector: "mlp" = REPA's Linear-SiLU-Linear-SiLU-Linear (default), "linear" = one
     # Linear(hidden_size, D_t) so h_k itself has to become an affine image of the teacher features (v4 recipe).
     projector_type: str = attrs.field(default="mlp", validator=attrs.validators.in_({"mlp", "linear"}))

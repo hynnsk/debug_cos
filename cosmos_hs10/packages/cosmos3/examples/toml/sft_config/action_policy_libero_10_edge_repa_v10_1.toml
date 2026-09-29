@@ -1,0 +1,81 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# v10.1: v10 with TARGET-ONLY, mean-only spatial normalization:
+#   SpatialCenter(y[t,p]) = y[t,p] - mean_p(y[t,p])          (per frame, per feature channel, detached)
+#   repa_loss = 1 - cosine(MLP(h[t,p]), SpatialCenter(y[t,p]))
+# Differences from v10: (1) the student projection is NOT normalized (data2vec / V-JEPA style target-only
+# normalization; no student-side statistic can shrink towards zero and blow up the cosine gradient), (2) no division by
+# the per-channel spatial std, so channels that barely vary over a frame are not amplified to unit variance (in v10 this
+# whitening turns low-variance channels into noise targets and caps the attainable cosine). Statistics never mix frames or
+# samples. All other settings match v10 / base REPA. Compare repa_cos_sim_spatial_norm with v10 (not comparable to the
+# raw repa_cos_sim of v1, which is ~0.92 for a constant prediction).
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_libero_edge_repa"
+project      = "cosmos3_action_libero"
+group        = "edge_libero10_fewshot_repa"
+name         = "hs10_repa_v10_1_target_spatial_centered_vitb_l8_avgpool_w5.0"
+wandb_mode   = "online"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+
+[model.repa]
+enabled            = true
+loss_weight        = 5.0
+objective          = "spatial_normalized"
+spatial_norm_eps   = 1.0e-6
+spatial_norm_scale = false                 # v10.1: subtract the per-frame per-channel spatial mean only (v10 = true: also / std)
+normalize_student  = false                 # v10.1: normalize the TEACHER target only; student projection stays raw (v10 = true)
+layer_index        = 8
+teacher            = "vjepa2_1_vit_base_384"
+teacher_input_size = 256
+target_adapter     = "avgpool"
+target_grid_thw    = [4, 5, 5]
+
+[model.ema]
+enabled         = true
+rate            = 0.1
+iteration_shift = 0
+
+[model.parallelism]
+data_parallel_shard_degree     = 2
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 5.0e-05
+
+[scheduler]
+cycle_lengths = [2000]
+warm_up_steps = [200]
+
+[trainer]
+max_iter                = 2000
+logging_iter            = 20
+grad_accum_iter         = 1
+run_validation          = true
+run_validation_on_start = true
+validation_iter         = 100
+max_val_iter            = 32
+
+[dataloader_train]
+max_samples_per_batch = 128
+episode_subset_path   = "libero_10_3ep_per_task_seed42.json"
+
+[dataloader_val]
+max_samples_per_batch = 128
+episode_subset_path   = "libero_10_val_5ep_per_task_seed42_excl3ep.json"
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 500

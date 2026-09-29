@@ -71,3 +71,24 @@ def test_release_checkpoint_loads_strict_and_encodes_256px_clip():
     assert torch.isfinite(tokens).all()
     # last per-layer LayerNorm applied -> roughly unit-scale features
     assert 0.1 < tokens.float().std().item() < 10.0
+
+
+def test_layer_index_selects_a_hierarchical_layer_output():
+    from cosmos_framework.model.generator.repa.vjepa_teacher import VJEPA21Teacher
+
+    torch.manual_seed(0)
+    x = torch.randint(0, 256, (1, 3, 16, 64, 64), dtype=torch.uint8)  # small input: RoPE interpolates
+    last = VJEPA21Teacher("vjepa2_1_vit_base_384", input_size=64, load_weights=False, dtype=torch.float32)
+    assert last.layer_index is None and last.encoder.out_layers is None
+    mid = VJEPA21Teacher("vjepa2_1_vit_base_384", input_size=64, load_weights=False, dtype=torch.float32, layer_index=8)
+    mid.load_state_dict(last.state_dict())  # same random weights
+    assert mid.layer_index == 8 and mid.encoder.out_layers == [8]
+    y_last, y_mid = last(x), mid(x)
+    assert y_last.shape == y_mid.shape == (1, 8, 4, 4, 768)
+    assert not torch.allclose(y_last, y_mid)  # a different block (through its own per-level LayerNorm)
+    # explicitly asking for the last block reproduces the default output
+    exp = VJEPA21Teacher("vjepa2_1_vit_base_384", input_size=64, load_weights=False, dtype=torch.float32, layer_index=11)
+    exp.load_state_dict(last.state_dict())
+    torch.testing.assert_close(exp(x), y_last)
+    with pytest.raises(ValueError, match="hierarchical layer"):
+        VJEPA21Teacher("vjepa2_1_vit_base_384", input_size=64, load_weights=False, layer_index=7)

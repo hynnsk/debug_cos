@@ -316,13 +316,21 @@ class RepaTomlConfig(BaseModel):
     spatial_norm_eps: Optional[float] = Field(
         default=None, description="Denominator epsilon for objective='spatial_normalized'."
     )
+    spatial_norm_scale: Optional[bool] = Field(
+        default=None,
+        description="objective='spatial_normalized': also divide by the per-channel spatial std (default true, v10); false = mean-centering only (v10.1).",
+    )
+    normalize_student: Optional[bool] = Field(
+        default=None,
+        description="Apply center_targets / spatial_normalized to the student projection too (default true, v6/v10); false = teacher target only (v6.1/v10.1).",
+    )
     relation_loss_weight: Optional[float] = Field(
         default=None,
         description="Weight of the VideoREPA-style token-relation loss (student vs teacher pairwise cosine-similarity maps). 0 = log only.",
     )
     center_targets: Optional[bool] = Field(
         default=None,
-        description="Subtract the batch-mean teacher target from both sides before the cosine loss (removes the shared V-JEPA direction shortcut).",
+        description="Subtract the (detached) batch mean from the teacher target (and, with normalize_student, from the student) before the cosine loss (removes the shared V-JEPA direction shortcut).",
     )
     relation_distance: Optional[str] = Field(
         default=None,
@@ -354,6 +362,14 @@ class RepaTomlConfig(BaseModel):
     target_adapter_depthwise: Optional[bool] = Field(default=None, description="Variant 3: depthwise strided conv.")
     target_grid_thw: Optional[list[int]] = Field(
         default=None, description="Variant 3 per-view target grid [T, H, W]; LIBERO-10 concat_view = [4, 5, 5]."
+    )
+    target_subgrid_thw: Optional[list[int]] = Field(
+        default=None,
+        description="Teacher cells predicted per MoT token [st, sh, sw]; [1, 1, 1] = one pooled cell (default), [1, 2, 2] = 2x2 spatial sub-cells (v13 / v14, less pooling).",
+    )
+    teacher_layer_index: Optional[int] = Field(
+        default=None,
+        description="V-JEPA 2.1 only: encoder block whose per-level-LN output is the target (ViT-B 2/5/8/11, ViT-L 5/11/17/23); omit = last block.",
     )
     projector_type: Optional[str] = Field(
         default=None,

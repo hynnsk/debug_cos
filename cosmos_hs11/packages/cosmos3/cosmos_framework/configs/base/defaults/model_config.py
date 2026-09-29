@@ -146,6 +146,10 @@ class RepaConfig:
     enabled: bool = False
     # Weight of the (unweighted, in [0, 2]) cosine loss ``1 - cos`` in the total loss.
     loss_weight: float = 0.5
+    # Linear warmup of ``loss_weight`` for the cosine term: the effective weight is ``loss_weight * min(1, iteration / N)``
+    # (0 at iteration 0), so a fresh REPA head does not dominate the first updates of a meta-initialized model
+    # (cosmos_hs11 v3 recipe: 200). 0 = constant weight (default). The relation term is never ramped.
+    loss_weight_warmup_steps: int = 0
     # Which token-level signal is aligned by the cosine term:
     #   token                -- the original absolute projected feature;
     #   temporal_difference  -- same-patch P(h[t+1]) - P(h[t]) transitions;

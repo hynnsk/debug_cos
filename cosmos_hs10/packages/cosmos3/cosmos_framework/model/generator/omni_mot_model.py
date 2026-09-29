@@ -525,6 +525,7 @@ class OmniMoTModel(ImaginaireModel):
             repa_teacher_grid_thw=self._repa_teacher_grid_thw(),
             repa_target_grid_thw=tuple(int(v) for v in repa_cfg.target_grid_thw),
             repa_num_views=int(repa_cfg.num_views),
+            repa_target_subgrid_thw=tuple(int(v) for v in repa_cfg.target_subgrid_thw),
         )
 
     @property
@@ -568,12 +569,15 @@ class OmniMoTModel(ImaginaireModel):
             device=DEVICE,
             chunk_size=int(repa_cfg.teacher_batch_size),
             load_weights=DEVICE == Device.CUDA,  # cpu/meta builds are checkpoint-conversion / smoke paths
+            layer_index=repa_cfg.teacher_layer_index,
         )
         object.__setattr__(self, "repa_teacher", teacher)
         log.info(
             f"REPA enabled: teacher={teacher.spec.name} (D={teacher.embed_dim}, grid={teacher.grid_thw}, "
-            f"input {teacher.input_size}px), MoT block {repa_cfg.layer_index}, projector={repa_cfg.projector_type}, "
-            f"target_adapter={repa_cfg.target_adapter}, loss_weight={repa_cfg.loss_weight}, "
+            f"input {teacher.input_size}px, layer={'last' if repa_cfg.teacher_layer_index is None else repa_cfg.teacher_layer_index}), "
+            f"MoT block {repa_cfg.layer_index}, projector={repa_cfg.projector_type}, "
+            f"target_adapter={repa_cfg.target_adapter}, target_subgrid_thw={tuple(repa_cfg.target_subgrid_thw)}, "
+            f"loss_weight={repa_cfg.loss_weight}, "
             f"relation_loss_weight={repa_cfg.relation_loss_weight} ({repa_cfg.relation_distance})"
         )
 
@@ -2028,12 +2032,17 @@ class OmniMoTModel(ImaginaireModel):
                         out_net["repa_num_tokens_per_sample"],
                         out_net["repa_frame_indexes_per_sample"],
                         eps=float(repa_cfg.spatial_norm_eps),
+                        normalize_student=bool(repa_cfg.normalize_student),
+                        scale=bool(repa_cfg.spatial_norm_scale),
                     )
                     losses_dict["repa_cos_sim_spatial_norm"] = objective_cos
                 elif objective == "token" and repa_cfg.center_targets:
-                    # Centered objective: the shared (batch-mean) teacher direction is removed from both sides, so only
-                    # the token-specific structure is trained. ``repa_cos_sim`` still logs the raw cosine.
-                    repa_loss, repa_cos_centered = repa_centered_cosine_loss(repa_pred, repa_target)
+                    # Centered objective: the shared (batch-mean) teacher direction is removed from the target (v6.1)
+                    # or from both sides (v6, normalize_student=true), so only the token-specific structure is
+                    # trained. ``repa_cos_sim`` still logs the raw cosine, ``repa_cos_sim_centered`` the trained one.
+                    repa_loss, repa_cos_centered = repa_centered_cosine_loss(
+                        repa_pred, repa_target, center_student=bool(repa_cfg.normalize_student)
+                    )
                 elif objective == "token":
                     repa_loss, repa_cos = repa_cosine_loss(repa_pred, repa_target)
                     # Shortcut detector (no gradient): cosine after removing the batch-mean teacher direction. On LIBERO
@@ -2050,12 +2059,15 @@ class OmniMoTModel(ImaginaireModel):
                     repa_cos_centered = centered_cosine_similarity(repa_pred, repa_target)
                 losses_dict["repa_cos_sim"] = repa_cos
                 losses_dict["repa_cos_sim_centered"] = repa_cos_centered
-                repa_rel_loss = repa_relation_loss(
-                    repa_pred,
-                    repa_target,
-                    out_net["repa_num_tokens_per_sample"],
-                    distance=repa_cfg.relation_distance,
-                )
+                # Weight 0 = monitor only: evaluate without building an autograd graph over the per-sample n_i x n_i
+                # relation maps (n_i = 200 x S rows with target_subgrid_thw; the value logged is identical).
+                with torch.set_grad_enabled(float(repa_cfg.relation_loss_weight) != 0.0):
+                    repa_rel_loss = repa_relation_loss(
+                        repa_pred,
+                        repa_target,
+                        out_net["repa_num_tokens_per_sample"],
+                        distance=repa_cfg.relation_distance,
+                    )
             total_loss += repa_loss * repa_cfg.loss_weight + repa_rel_loss * repa_cfg.relation_loss_weight
             losses_dict["repa_loss"] = repa_loss
             losses_dict["repa_rel_loss"] = repa_rel_loss

@@ -48,9 +48,14 @@ def build_repa_teacher(
     device: torch.device | str | None,
     chunk_size: int,
     load_weights: bool = True,
+    layer_index: int | None = None,
 ) -> nn.Module:
+    """``layer_index``: V-JEPA 2.1 encoder block whose per-level-LayerNorm output is the target (one of the encoder's
+    hierarchical layers, e.g. 2/5/8/11 for ViT-B, 5/11/17/23 for ViT-L); ``None`` = the last block (default)."""
     spec = resolve_repa_teacher_spec(name)
     if spec.family == "dinov2":
+        if layer_index is not None:
+            raise ValueError("repa.teacher_layer_index is only supported for V-JEPA 2.1 teachers (DINOv2 uses its last layer)")
         return DINOv2Teacher(
             name,
             checkpoint_path=checkpoint_path,
@@ -70,4 +75,5 @@ def build_repa_teacher(
         device=device,
         chunk_size=chunk_size,
         load_weights=load_weights,
+        layer_index=layer_index,
     )

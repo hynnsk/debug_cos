@@ -99,6 +99,7 @@ Every knob lives under `[model.repa]` in the TOML (`RepaTomlConfig`, VFM only) a
 | `relation_loss_weight` | `0.0` | weight of the VideoREPA-style token-relation loss `repa_rel_loss` (see below); v5 = `5.0` with `loss_weight = 0.0`. Always computed and logged, `0` = monitor only |
 | `relation_distance` | `l2` | entry-wise distance between the two relation maps: `l2` (squared) or `l1` (absolute) |
 | `loss_weight` | `0.5` | weight of `1 - cos`. NOTE: the flow-matching terms carry `loss_scale`/`action_loss_weight` = 10, so 0.5 is relatively ~20x weaker than the REPA paper's lambda=0.5 on an unscaled denoising loss; scan e.g. 0.5 / 2 / 5. |
+| `loss_weight_warmup_steps` | `0` | linear warmup of `loss_weight` for the cosine term: effective weight `loss_weight * min(1, iteration / N)`, 0 at iteration 0 (cosmos_hs11 v3 recipe: 200). `0` = constant weight. Logged as `repa_weight` / `repa_weighted_loss` (train + val); the relation term is never ramped |
 | `objective` | `token` | `token` (base), `temporal_difference` (v8), or `spatial_normalized` (v10) |
 | `spatial_norm_eps` | `1e-6` | denominator epsilon used by `spatial_normalized` |
 | `layer_index` | `8` | blocks applied before the read (1-based). Nemotron-2B has 28. |

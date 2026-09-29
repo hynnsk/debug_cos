@@ -11,6 +11,7 @@ from cosmos_framework.model.generator.repa.adapters import (
     repa_relation_loss,
     token_relation_matrix,
 )
+from cosmos_framework.model.generator.repa.adapters import repa_spatial_normalized_cosine_loss
 from cosmos_framework.model.generator.repa.alignment import RepaAlignmentHead
 
 D_MOT, D_T = 16, 6
@@ -179,3 +180,99 @@ def test_batched_teacher_tensor_matches_list_input():
     out_batched = head(hidden, shapes, nfi, torch.stack(teacher, dim=0))
     torch.testing.assert_close(out_list["target"], out_batched["target"])
     torch.testing.assert_close(out_list["pred"], out_batched["pred"])
+
+
+@pytest.mark.parametrize("variant", ["avgpool", "avgpool_conv", "strided_conv"])
+def test_target_subgrid_predicts_sub_cells_per_token(variant):
+    """target_subgrid_thw=(1,2,2): each MoT token predicts a 2x2 block of the 4x10x10-per-view adapted teacher grid."""
+    from cosmos_framework.model.generator.repa.adapters import adaptive_pool_teacher_grid
+
+    sub = (1, 2, 2)
+    S = 4
+    head = RepaAlignmentHead(
+        hidden_size=D_MOT,
+        teacher_embed_dim=D_T,
+        projector_hidden_dim=32,
+        target_adapter=variant,
+        teacher_grid_thw=TEACHER_GRID,
+        target_grid_thw=(4, 5, 5),
+        num_views=2,
+        target_subgrid_thw=sub,
+    )
+    head.reset_parameters()
+    assert head.num_subcells == S
+    hidden, shapes, nfi, teacher = _inputs()
+    out = head(hidden, shapes, nfi, teacher)
+    n = 3 * 4 * 5 * 10
+    assert out["pred"].shape == (n * S, D_T) and out["target"].shape == (n * S, D_T)
+    assert out["num_tokens_per_sample"] == [200 * S] * 3
+    # prediction rows: projector output of token k, split into S consecutive D_T chunks (sub-cell-minor)
+    rows = torch.cat([g.index_select(0, i).reshape(-1, D_MOT) for g, i in zip(hidden.view(3, 5, 5, 10, D_MOT), nfi)])
+    torch.testing.assert_close(out["pred"], head.projector(rows).reshape(-1, D_T))
+    # target rows: adapt each view to 4x10x10, then token (t,h,w) of the canvas owns cells (t, 2h+dh, 2w'+dw) of its
+    # view where w' = w mod 5. avgpool / identity-initialized avgpool_conv equal adaptive average pooling exactly;
+    # strided_conv (kernel = 16 - 1*9 = 7, stride 1 for 16 -> 10) is a different, much wider box average, so only its
+    # layout (shape / finiteness) is checked -- use avgpool variants with a sub-grid.
+    t, h, w = 4, 5, 10
+    tgt = out["target"].view(3, t, h, w, S, D_T)
+    assert torch.isfinite(tgt).all()
+    if variant != "strided_conv":
+        pooled = [adaptive_pool_teacher_grid(tt.permute(0, 4, 1, 2, 3), (4, 10, 10)).permute(0, 2, 3, 4, 1) for tt in teacher]
+        for s_i, (ti, hi, wi) in ((0, (1, 2, 7)), (2, (3, 4, 0)), (1, (0, 0, 9))):
+            view, wl = divmod(wi, 5)
+            for dh in range(2):
+                for dw in range(2):
+                    torch.testing.assert_close(
+                        tgt[s_i, ti, hi, wi, dh * 2 + dw], pooled[s_i][view, ti, 2 * hi + dh, 2 * wl + dw], atol=1e-5, rtol=1e-4
+                    )
+    loss, _ = repa_cosine_loss(out["pred"], out["target"])
+    loss.backward()
+    assert hidden.grad is not None and torch.isfinite(hidden.grad).all()
+    assert all(p.grad is not None for p in head.projector.parameters())
+    probe = head.probe(hidden.device, hidden.dtype)
+    assert probe.requires_grad and float(probe) == 0.0
+    # the per-frame objectives still restore [frames, rows-per-frame] (50 tokens x 4 sub-cells = 200 rows per frame)
+    sn_loss, _ = repa_spatial_normalized_cosine_loss(
+        out["pred"], out["target"], out["num_tokens_per_sample"], nfi, normalize_student=False, scale=False
+    )
+    assert torch.isfinite(sn_loss)
+
+
+def test_target_subgrid_is_validated():
+    with pytest.raises(ValueError, match="exceeds the teacher grid"):
+        RepaAlignmentHead(
+            hidden_size=D_MOT, teacher_embed_dim=D_T, teacher_grid_thw=TEACHER_GRID, target_grid_thw=(4, 5, 5),
+            target_subgrid_thw=(3, 1, 1),  # 12 > 8 teacher tubelets
+        )
+    with pytest.raises(ValueError, match="three positive ints"):
+        RepaAlignmentHead(hidden_size=D_MOT, teacher_embed_dim=D_T, target_subgrid_thw=(1, 0, 1))
+
+
+def test_no_pooling_subgrid_returns_raw_teacher_tokens():
+    """Nano v10.6: teacher at 240 px (8x15x15 per view) + target_subgrid_thw=(2,3,3) -> identity adapter, every MoT
+    token owns its 2 tubelets x 3x3 raw teacher tokens in (dt, dh, dw) order."""
+    grid = (8, 15, 15)
+    head = RepaAlignmentHead(
+        hidden_size=D_MOT, teacher_embed_dim=D_T, projector_hidden_dim=32, target_adapter="avgpool",
+        teacher_grid_thw=grid, target_grid_thw=(4, 5, 5), num_views=2, target_subgrid_thw=(2, 3, 3),
+    )
+    assert head.num_subcells == 18
+    g = torch.Generator().manual_seed(4)
+    t, h, w = TOKEN_SHAPE
+    hidden = torch.randn(2 * t * h * w, D_MOT, generator=g, requires_grad=True)
+    teacher = [torch.randn(2, *grid, D_T, generator=g) for _ in range(2)]
+    nfi = [torch.arange(1, t)] * 2
+    out = head(hidden, [TOKEN_SHAPE] * 2, nfi, teacher)
+    assert out["pred"].shape == (2 * 200 * 18, D_T) and out["num_tokens_per_sample"] == [3600, 3600]
+    tgt = out["target"].view(2, 4, h, w, 2, 3, 3, D_T)
+    for s_i, ti, hi, wi in ((0, 0, 0, 0), (1, 3, 4, 9), (0, 2, 1, 6)):
+        view, wl = divmod(wi, 5)
+        for dt in range(2):
+            for dh in range(3):
+                for dw in range(3):
+                    torch.testing.assert_close(
+                        tgt[s_i, ti, hi, wi, dt, dh, dw], teacher[s_i][view, 2 * ti + dt, 3 * hi + dh, 3 * wl + dw]
+                    )
+    loss, _ = repa_cosine_loss(out["pred"], out["target"])
+    loss.backward()
+    assert torch.isfinite(hidden.grad).all()

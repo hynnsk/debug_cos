@@ -2128,9 +2128,18 @@ class OmniMoTModel(ImaginaireModel):
                     out_net["repa_num_tokens_per_sample"],
                     distance=repa_cfg.relation_distance,
                 )
-            total_loss += repa_loss * repa_cfg.loss_weight + repa_rel_loss * repa_cfg.relation_loss_weight
+            # Optional linear warmup of the cosine-term weight (``repa.loss_weight_warmup_steps`` > 0, cosmos_hs11 v3):
+            # ``loss_weight * min(1, iteration / N)`` -- 0 at iteration 0, ``loss_weight`` from iteration N on (the same
+            # ramp as the masked-JEPA branch). 0 (default) = the constant weight. ``getattr`` keeps configs pickled before
+            # the knob existed loadable. ``repa_weight`` / ``repa_weighted_loss`` are logged (train + val).
+            repa_weight = auxiliary_weight(
+                float(repa_cfg.loss_weight), int(getattr(repa_cfg, "loss_weight_warmup_steps", 0)), iteration
+            )
+            total_loss += repa_loss * repa_weight + repa_rel_loss * repa_cfg.relation_loss_weight
             losses_dict["repa_loss"] = repa_loss
             losses_dict["repa_rel_loss"] = repa_rel_loss
+            losses_dict["repa_weight"] = repa_loss.new_tensor(repa_weight)
+            losses_dict["repa_weighted_loss"] = (repa_loss * repa_weight).detach()
 
         # 1b'. cosmos_hs12 masked V-JEPA feature prediction on the auxiliary branch: L1 over masked (+ 0.25 x visible)
         # target cells, lambda ramped over masked_warmup_steps; a global sample mean across ranks of unequal aux size.

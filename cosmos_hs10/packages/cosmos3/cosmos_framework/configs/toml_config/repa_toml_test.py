@@ -25,21 +25,32 @@ def test_repa_tomls_validate_and_route_to_model_config_repa(toml_path: Path):
     tier = "nano" if "_nano_" in toml_path.stem else "edge"
     assert f"experiment=action_policy_libero_{tier}_repa" in overrides
     if tier == "nano":
-        # Nano: ViT-L teachers, block 10 of 36, shard 8 x 32, compile off (Ampere smem), see docs section 8
-        assert raw["model"]["repa"]["teacher"] in ("vjepa2_1_vit_large_384", "dinov2_vitl14")
-        assert raw["model"]["repa"]["layer_index"] == 10
-        assert raw["model"]["parallelism"]["data_parallel_shard_degree"] == 8
+        # Nano: ViT-L teachers, a block of the 36-block Qwen3-VL-8B MoT (recipe default 10; user variants scan it),
+        # shard 8 x 32, compile off (Ampere smem), see docs section 8
+        assert raw["model"]["repa"]["teacher"].startswith(("vjepa2_1_", "dinov2_"))  # user variants also scan ViT-B DINOv2
+        assert 1 <= raw["model"]["repa"]["layer_index"] <= 36
+        assert raw["model"]["parallelism"]["data_parallel_shard_degree"] in (4, 8)
         assert raw["model"]["compile"]["enabled"] is False
-        assert raw["dataloader_train"]["max_samples_per_batch"] == 32
     assert "model.config.repa.enabled=true" in overrides
     assert any(o.startswith("model.config.repa.layer_index=") for o in overrides)
     assert any(o.startswith("model.config.repa.target_adapter=") for o in overrides)
     assert "model.config.repa.target_grid_thw=[4,5,5]" in overrides
     # Optional knobs route 1:1 (present in the TOML <-> present as an override; absent -> experiment default).
     repa_raw = raw["model"]["repa"]
-    for key in ("projector_type", "relation_loss_weight", "relation_distance", "objective", "spatial_norm_eps"):
+    for key in (
+        "projector_type",
+        "relation_loss_weight",
+        "relation_distance",
+        "objective",
+        "spatial_norm_eps",
+        "spatial_norm_scale",
+        "normalize_student",
+        "center_targets",
+        "teacher_layer_index",
+    ):
         got = [o for o in overrides if o.startswith(f"model.config.repa.{key}=")]
-        assert got == ([f"model.config.repa.{key}={repa_raw[key]}"] if key in repa_raw else []), key
+        want = [f"model.config.repa.{key}={str(repa_raw[key]).lower()}"] if key in repa_raw else []
+        assert got == want, key
     # pinned recipes: v4 = linear projector, v5 = VideoREPA-style token-relation loss only (direct cos weight 0)
     if toml_path.stem.endswith("_v4"):
         assert repa_raw["projector_type"] == "linear"
@@ -60,6 +71,39 @@ def test_repa_tomls_validate_and_route_to_model_config_repa(toml_path: Path):
         assert any(o.startswith("model.config.sigreg.loss_weight=") for o in overrides)
     if toml_path.stem.endswith("_v10"):
         assert repa_raw["objective"] == "spatial_normalized"
+    # v6 / v10 normalize both sides (defaults); v6.1 / v10.1 normalize the teacher target only
+    if toml_path.stem.endswith(("_v6", "_v10")):
+        assert repa_raw.get("normalize_student", True) is True
+    if toml_path.stem.endswith("_v6_1"):
+        assert repa_raw["center_targets"] is True and repa_raw["normalize_student"] is False
+        assert "model.config.repa.normalize_student=false" in overrides
+    if toml_path.stem.endswith("_v10_1"):
+        assert repa_raw["objective"] == "spatial_normalized"
+        assert repa_raw["normalize_student"] is False and repa_raw["spatial_norm_scale"] is False
+        assert "model.config.repa.spatial_norm_scale=false" in overrides
+    # v12 = ViT-L block 23, plain token cosine; v13 = v12 + 2x2 sub-cells; v14 = v7 (DINOv2-B) + 2x2 sub-cells
+    if toml_path.stem.endswith(("_v12", "_v13")):
+        assert repa_raw["teacher"] == "vjepa2_1_vit_large_384" and repa_raw["teacher_layer_index"] == 23
+        assert repa_raw["objective"] == "token" and "spatial_norm_eps" not in repa_raw
+        assert "model.config.repa.teacher_layer_index=23" in overrides
+    if toml_path.stem.endswith(("_v13", "_v14")):
+        assert repa_raw["target_subgrid_thw"] == [1, 2, 2]
+        assert "model.config.repa.target_subgrid_thw=[1,2,2]" in overrides
+    elif toml_path.stem.endswith(("nano_repa_v10.6", "nano_repa_v7.11")):
+        # Nano v10.6 / v7.11 = the Edge v13 / v14 "less pooling" (2x2 spatial sub-cells per MoT token)
+        assert repa_raw["target_subgrid_thw"] == [1, 2, 2]
+        assert "model.config.repa.target_subgrid_thw=[1,2,2]" in overrides
+    else:
+        assert "target_subgrid_thw" not in repa_raw
+    if toml_path.stem.endswith(("nano_repa_v10.5", "nano_repa_v10.6")):
+        assert repa_raw["objective"] == "token" and "spatial_norm_eps" not in repa_raw
+        assert repa_raw["teacher"] == "vjepa2_1_vit_large_384" and repa_raw["teacher_layer_index"] == 23
+        assert repa_raw["teacher_input_size"] == 256
+    if toml_path.stem.endswith("nano_repa_v7.11"):
+        assert repa_raw["teacher"] == "dinov2_vitb14" and repa_raw["teacher_input_size"] == 224
+        assert repa_raw["objective"] == "token" and "teacher_layer_index" not in repa_raw
+    if toml_path.stem.endswith("_v14"):
+        assert repa_raw["teacher"] == "dinov2_vitb14" and "teacher_layer_index" not in repa_raw
 
 
 def test_repa_projector_type_is_validated_by_the_model_config():
@@ -77,6 +121,10 @@ def test_repa_projector_type_is_validated_by_the_model_config():
     assert RepaConfig(objective="spatial_normalized").objective == "spatial_normalized"
     with pytest.raises(ValueError):
         RepaConfig(objective="difference")
+    # v6 / v10 behaviour is the default; v6.1 / v10.1 flip these
+    assert RepaConfig().normalize_student is True and RepaConfig().spatial_norm_scale is True
+    assert RepaConfig().teacher_layer_index is None and tuple(RepaConfig().target_subgrid_thw) == (1, 1, 1)
+    assert RepaConfig(normalize_student=False, spatial_norm_scale=False).normalize_student is False
     sig = SigRegConfig()
     assert (sig.layer_index, sig.loss_weight, sig.input, sig.normalize_by_count) == (8, 1.0, "repa_projection", True)
     assert SigRegConfig(input="residual_tokens").input == "residual_tokens"

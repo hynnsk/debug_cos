@@ -101,8 +101,12 @@ Every knob lives under `[model.repa]` in the TOML (`RepaTomlConfig`, VFM only) a
 | `loss_weight` | `0.5` | weight of `1 - cos`. NOTE: the flow-matching terms carry `loss_scale`/`action_loss_weight` = 10, so 0.5 is relatively ~20x weaker than the REPA paper's lambda=0.5 on an unscaled denoising loss; scan e.g. 0.5 / 2 / 5. |
 | `objective` | `token` | `token` (base), `temporal_difference` (v8), or `spatial_normalized` (v10) |
 | `spatial_norm_eps` | `1e-6` | denominator epsilon used by `spatial_normalized` |
+| `spatial_norm_scale` | `true` | `spatial_normalized`: also divide by the per-frame per-channel spatial std (v10); `false` = subtract the spatial mean only (v10.1) |
+| `center_targets` | `false` | `token` objective: subtract the (detached) batch-mean teacher target before the cosine (v6 / v6.1) |
+| `normalize_student` | `true` | apply the centering / spatial normalization to the student projection too (v6 / v10); `false` = teacher target only, raw student (v6.1 / v10.1, section 9) |
 | `layer_index` | `8` | blocks applied before the read (1-based). Nemotron-2B has 28. |
 | `teacher` | `vjepa2_1_vit_base_384` | or `vjepa2_1_vit_large_384` (aliases `vitb` / `vitl`) |
+| `teacher_layer_index` | `None` | V-JEPA only: encoder block whose per-level-LN output is the target (ViT-B 2/5/8/11, ViT-L 5/11/17/23); `None` = last block (section 10) |
 | `teacher_checkpoint_path` | `None` | file or dir; default `$COSMOS_STORAGE/checkpoints/vjepa2_1/<release file>`; downloaded if absent |
 | `teacher_input_size` | `256` | square side per view |
 | `teacher_num_frames` | `16` | = `chunk_length` |
@@ -111,6 +115,7 @@ Every knob lives under `[model.repa]` in the TOML (`RepaTomlConfig`, VFM only) a
 | `target_adapter_kernel_size` | `3` | variant 2 |
 | `target_adapter_depthwise` | `true` | variant 3 |
 | `target_grid_thw` | `[4, 5, 5]` | per-view token grid; needed to build variant 3, validated for all |
+| `target_subgrid_thw` | `[1, 1, 1]` | teacher cells predicted per MoT token along (t, h, w); `[1, 2, 2]` = 2x2 spatial sub-cells, projector emits `4 x D_t` (v13 / v14, section 10) |
 | `projector_type` | `mlp` | student-side projector: `mlp` = REPA `Linear-SiLU-Linear-SiLU-Linear`; `linear` = one `Linear(2048, D_t)` (v4 recipe: `h_k` itself has to become an affine image of the teacher features) |
 | `projector_hidden_dim` | `2048` | MLP hidden width; ignored for `linear` |
 | `num_views` | `2` | views concatenated along the canvas width |
@@ -218,3 +223,96 @@ NPROC_PER_NODE=8 sr 8 48 bash examples/launch_sft_action_policy_libero_10_nano_r
 Cost: the teacher sees 32 x 2 = 64 clips per rank per step (Edge: 256), so ViT-L costs about what ViT-B did on Edge.
 Memory: hs08 measured 33.4 GiB allocated / 41 GiB reserved per GPU for the Nano few-shot recipe without REPA; the
 REPA head adds ~13 M params (4096 -> 2048 -> 2048 -> 1024) and the fp32 ViT-L teacher ~1.2 GB, so expect ~36 GiB.
+
+## 9. Target-only normalization (v6.1 / v10.1)
+
+v6 (`center_targets`) and v10 (`objective = "spatial_normalized"`) both normalized **both sides** of the cosine: the
+student projection and the teacher target each had their own mean (v6: batch mean over all aligned tokens; v10: per-frame,
+per-channel spatial mean) removed, and v10 additionally divided both by the per-channel spatial std. `normalize_student =
+false` and `spatial_norm_scale = false` give the target-only variants:
+
+| recipe | student side | teacher side | loss |
+| --- | --- | --- | --- |
+| v6 | `p - mean_batch(p)` | `y - mean_batch(y)` | `1 - cos(pc, yc)` |
+| **v6.1** | `p` (raw) | `y - mean_batch(y)` | `1 - cos(p, yc)` |
+| v10 | `(p - mean_p(p)) / std_p(p)` per frame/channel | same on `y` | `1 - cos(pn, yn)` |
+| **v10.1** | `p` (raw) | `y - mean_p(y)` per frame/channel | `1 - cos(p, yc)` |
+
+Why target-only: the purpose of the normalization is to remove the dominant shared direction of the V-JEPA targets (~85%
+of the token energy on LIBERO, raw cos ~0.92 for a constant prediction) so the shortcut cannot satisfy the loss. That is
+complete once the *target* has zero mean: a constant student vector then scores ~0. Normalizing the student as well only
+adds an invariance the 3-layer projector (with biases) does not need, and it introduces a `1/||p - mean(p)||` factor
+that is unbounded while the projector output is still near-constant, which is the grad-norm ~100 blow-up seen in v6.
+data2vec and V-JEPA itself normalize the teacher targets only. Dropping the per-channel std division (v10.1) keeps the
+teacher's channel weighting: whitening every channel to unit spatial variance turns channels that barely vary within a
+frame into noise targets and caps the attainable cosine (v10 plateaued at `repa_cos_sim_spatial_norm` ~0.18).
+
+Logging is unchanged: `repa_cos_sim` is always the raw cosine, `repa_cos_sim_centered` the (both-sides, diagnostic)
+centered cosine, `repa_cos_sim_spatial_norm` the cosine actually trained by v10 / v10.1. What to watch: grad norm should
+stay single-digit from the start (v6 did not), and the trained cosine should climb above the v6 / v10 curves.
+
+```bash
+bash examples/launch_sft_action_policy_libero_10_edge_repa_v6_1.sh    # MASTER_PORT 50022
+bash examples/launch_sft_action_policy_libero_10_edge_repa_v10_1.sh   # MASTER_PORT 50023
+```
+
+## 10. Teacher layer, less pooling and the shared-direction measurements (v12 / v13 / v14)
+
+`scripts`: `~/project/_scratch/hs10_vjepa_layer_energy.py` (run with `sr 1 48 bash ..._energy.sh`) measures, on 64
+held-out LIBERO-10 windows, how much of the teacher-token energy lies in one common direction (`Emean =
+||mean||^2 / E||y||^2`), the raw cosine a constant prediction gets (`cos_const`) and the energy left after per-frame
+spatial centering (`Eleft`, what the v10.1 objective can train on). Numbers on the REPA target grid (raw per-view
+grid in parentheses), 2026-09-29:
+
+| teacher / layer | grid | Emean | cos_const | Eleft |
+| --- | --- | --- | --- | --- |
+| V-JEPA 2.1 ViT-B/16, block 2 / 5 / 8 / 11 | 4x5x10 | 0.93 / 0.89 / 0.83 / 0.84 (raw 0.83 / 0.75 / 0.60 / 0.65) | 0.97 / 0.94 / 0.91 / 0.92 | 0.06 / 0.10 / 0.15 / 0.14 |
+| V-JEPA 2.1 ViT-L/16, block 5 / 11 / 17 | 4x5x10 | 0.94 / 0.95 / 0.95 | 0.97 | 0.05 |
+| **V-JEPA 2.1 ViT-L/16, block 23 (last)** | 4x5x10 | **0.62** (raw 0.36) | 0.79 | 0.33 |
+| V-JEPA 2.1 ViT-L/16, block 23 | 4x10x20 (`[1,2,2]`) | 0.53 | 0.74 | 0.42 |
+| V-JEPA 2.1 ViT-L/16, block 23 | 8x5x10 (`[2,1,1]`) | 0.61 | 0.78 | 0.34 |
+| DINOv2 ViT-B/14 last | 4x5x10 | 0.30 (raw 0.16) | 0.55 | 0.61 |
+| DINOv2 ViT-B/14 last | 4x10x20 (`[1,2,2]`) | 0.25 | 0.50 | 0.68 |
+| DINOv2 ViT-L/14 last | 4x5x10 | 0.33 (raw 0.17) | 0.58 | 0.59 |
+
+Take-aways: every ViT-B layer (and every ViT-L layer but the last) saturates the raw cosine, so V-JEPA 2.1's own
+multi-level concat would make things worse; block 23 of ViT-L is the only V-JEPA target with a moderate shortcut;
+per-token LayerNorm (V-JEPA's target normalization) leaves `Emean` unchanged; the 4x5x5 avgpool roughly doubles the
+shared share (raw 0.36 -> 0.62) and spatial 2x2 refinement recovers part of it while temporal refinement does not;
+DINOv2-L is not less "shared" than DINOv2-B. Under centered objectives a per-position mean over other clips still scores
+~0.6 for every teacher (LIBERO scenes are alike), so a centered cosine of 0.6 is the layout shortcut, not sample content.
+
+Recipes (`examples/toml/sft_config/`, launchers `launch_sft_action_policy_libero_10_edge_repa_v1{2,3,4}.sh`, ports
+50028 / 50029 / 50041):
+
+| recipe | teacher | objective | `target_subgrid_thw` | rows |
+| --- | --- | --- | --- | --- |
+| v12 | `vjepa2_1_vit_large_384`, `teacher_layer_index = 23`, `teacher_batch_size = 16` | `token` (plain cosine; the user's choice, no normalization) | `[1,1,1]` | 200 x 1024 per window |
+| v13 | as v12 | `token` | `[1,2,2]` | 800 x 1024 |
+| v14 | `dinov2_vitb14` (v7) | raw cosine (v7) | `[1,2,2]` | 800 x 768 |
+| Nano v10.5 | `vjepa2_1_vit_large_384`, `teacher_layer_index = 23` (Nano v10.2 topology: shard 4 x 64, MoT block 36) | `token` (plain cosine, no normalization) | `[1,1,1]` | 200 x 1024 |
+| Nano v10.6 | as v10.5 | `token` | `[1,2,2]` (as Edge v13) | 800 x 1024 |
+| Nano v7.11 | `dinov2_vitb14` (user's v7.10 topology: shard 8 x 128, MoT block 36) | `token` (v7) | `[1,2,2]` (as Edge v14) | 800 x 768 |
+
+Nano launchers: `launch_sft_action_policy_libero_10_nano_repa_v10.{5,6}.sh` (ports 50042 / 50043, `NPROC_PER_NODE=4`
+like v10.2) and `..._v7.11.sh` (50044, `NPROC_PER_NODE=8`). The teacher never concatenated V-JEPA 2.1's four
+hierarchical layers: every recipe before v12 already used the last block (ViT-B 11 / ViT-L 23); `teacher_layer_index`
+only makes the choice explicit / lets you pick another level.
+
+`[1,2,2]` halves the spatial pooling (adaptive 16 -> 10, overlapping bins of 1-2 patches per axis); the temporal
+pooling (V-JEPA 8 tubelets -> 4 latent frames, DINOv2 16 frames -> 4) stays. Removing pooling entirely needs a teacher
+grid that is an integer multiple of the MoT grid: for V-JEPA at 240 px one MoT token (51.2 native px) is exactly 3 x 3
+patches of 16 px and one latent frame exactly 2 tubelets, so `teacher_input_size = 240` + `target_subgrid_thw = [2,3,3]`
+makes the avgpool adapter the identity (18 raw teacher tokens per MoT token, rows 3600 x 1024 per window, projector
+2048 -> 18432; raw-grid target: shared-direction energy 0.36, constant-prediction cos 0.60, energy left 0.61). That
+alternative is spelled out in the v10.6 header; at 256 px `[2,3,3]` would still pool 16 -> 15 with overlapping bins.
+
+`teacher_layer_index` sets `encoder.out_layers = [k]` on the vendored V-JEPA ViT, whose forward then returns
+`norms_block[level(k)](x_k)`, exactly the per-level target of V-JEPA 2.1 pretraining; `k` must be one of the encoder's
+hierarchical layers, and the last one reproduces the default output bit-for-bit. `target_subgrid_thw = (st, sh, sw)`
+adapts the teacher to the `st x sh x sw`-finer grid (adaptive avgpool 16 -> 10 uses overlapping bins), gathers the `S`
+cells of a MoT token as consecutive rows, and widens the projector's last layer to `S * D_t`; `repa_num_tokens_per_sample`
+counts rows, so cosine / centered / spatial-normalized / temporal-difference / relation / SIGReg all work unchanged (the
+spatial statistics of `spatial_normalized` run over the `H * W * S` rows of a latent frame; the monitor-only relation
+loss is evaluated without autograd because its per-sample maps grow to `(200 S)^2`). Projector size with `S = 4`:
+`2048 x 2048 x 2 + 2048 x 4096` = 16.8 M (ViT-L) / 14.7 M (DINOv2-B) parameters. Not GPU-smoked; CPU tests + dry-runs.

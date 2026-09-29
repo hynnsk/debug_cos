@@ -7,7 +7,7 @@
 # Other overrides are the same as the original REPA launcher.
 set -euo pipefail
 case "${JEPA_VARIANT:-dense}" in
-    dense) recipe=action_policy_libero_10_edge_masked_jepa ;;
+    dense) recipe=action_policy_libero_10_edge_masked_jepa_v2 ;;
     masked_only) recipe=action_policy_libero_10_edge_masked_jepa_masked_only ;;
     linear) recipe=action_policy_libero_10_edge_masked_jepa_linear ;;
     *) echo "ERROR: JEPA_VARIANT must be dense, masked_only, or linear" >&2; exit 2 ;;

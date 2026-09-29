@@ -309,6 +309,14 @@ class RepaTomlConfig(BaseModel):
         default=None,
         description="Weight of the unweighted cosine loss (1 - cos) in the total loss. Recipe default 0.5.",
     )
+    loss_weight_warmup_steps: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Linear warmup of loss_weight for the cosine term: effective weight loss_weight * min(1, iteration / N), "
+            "0 at iteration 0. 0 = constant weight (default); cosmos_hs11 v3 = 200."
+        ),
+    )
     objective: Optional[str] = Field(
         default=None,
         description="Objective: 'token', 'temporal_difference', 'spatial_normalized', or auxiliary 'masked_prediction'.",

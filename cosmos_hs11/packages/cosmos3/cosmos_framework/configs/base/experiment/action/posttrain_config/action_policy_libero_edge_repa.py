@@ -61,6 +61,7 @@ def _action_policy_libero_edge_repa_model_config() -> dict:
     cfg["repa"] = dict(
         enabled=True,
         loss_weight=0.5,
+        loss_weight_warmup_steps=0,  # 0 = constant weight; cosmos_hs11 v3 = 200 (linear 0 -> loss_weight ramp)
         objective="token",  # "temporal_difference" (v8) | "spatial_normalized" (v10)
         spatial_norm_eps=1.0e-6,
         masked_ratio_min=0.4,  # objective="masked_prediction" (cosmos_hs12): tube-mask ratio range over target cells
@@ -268,6 +269,8 @@ action_policy_libero_edge_repa = LazyDict(
                         "repa_loss",
                         "repa_cos_sim",
                         "repa_rel_loss",
+                        "repa_weight",
+                        "repa_weighted_loss",
                         "repa_cos_sim_centered",
                         "repa_cos_sim_transition",
                         "repa_cos_sim_spatial_norm",

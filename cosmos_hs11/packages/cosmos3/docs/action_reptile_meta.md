@@ -198,6 +198,7 @@ cosmos_hs09_2 merge; experiment `action_policy_libero_edge_repa` (+ `repa_` in k
 | variant | TOML / launcher | loss added to 10*fm_vision + 10*fm_action |
 | --- | --- | --- |
 | DINOv2 REPA (hs10 v7) | `action_policy_libero_10_edge_reptileinit_repa_dinov2.toml`, `launch_sft_action_policy_libero_10_edge_reptileinit_repa_dinov2.sh` (port 50024) | `5.0 * (1 - cos(MLP(h_8), avgpool(DINOv2-ViT-B/14(frames 1..16))))` on the predicted video tokens |
+| DINOv2 REPA, ramped weight (v3) | `action_policy_libero_10_edge_reptileinit_repa_dinov2_v3.toml`, `launch_sft_action_policy_libero_10_edge_reptileinit_repa_dinov2_v3.sh` (port 50028) | the same term with `5.0 * min(1, step / 200)` instead of `5.0` (`[model.repa] loss_weight_warmup_steps = 200`, logged as `repa_weight`): 0 at iteration 0, so the fresh REPA head does not dominate the first updates of the Reptile init (measured: with the constant weight it was ~50% of the loss in the first ~100 iterations vs ~28% in fresh-init hs10 v7; identical from iteration 200 on) |
 | masked JEPA (hs12 dense) | `action_policy_libero_10_edge_reptileinit_masked_jepa.toml`, `launch_sft_action_policy_libero_10_edge_reptileinit_masked_jepa.sh` (port 50025) | `0.5 * ramp(step/200) * (mean_masked|p-y| + 0.25 mean_visible|p-y|)`, p = MLP(h_8) of a pixel-masked re-encoded clip, y = frozen V-JEPA 2.1 ViT-B tokens |
 
 ```bash

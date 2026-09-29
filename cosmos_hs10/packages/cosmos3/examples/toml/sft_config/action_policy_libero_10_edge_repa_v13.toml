@@ -1,0 +1,77 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# v13: v12 (V-JEPA 2.1 ViT-L/16 block 23, plain token cosine) + LESS POOLING: target_subgrid_thw = [1, 2, 2]
+# adapts each view to 4x10x10 teacher cells instead of 4x5x5 and every MoT token predicts its 2x2 spatial sub-cells with
+# one 4*1024-wide projector output (rows [N*4, 1024]; repa_num_tokens_per_sample counts rows). Measured on LIBERO-10 val:
+# shared-direction energy of the target 0.62 -> 0.53, constant-prediction raw cos 0.79 -> 0.74, energy left after
+# spatial centering 0.33 -> 0.42 (raw 8x16x16 grid: 0.61). Temporal refinement ([2,1,1]) was measured to add almost
+# nothing (0.33 -> 0.34) and is not used. Rows of a latent frame = 50 tokens x 4 sub-cells = 200.
+[job]
+task         = "vfm"
+experiment   = "action_policy_libero_edge_repa"
+project      = "cosmos3_action_libero"
+group        = "edge_libero10_fewshot_repa"
+name         = "hs10_repa_v13_token_vjepa_vitl_blk23_subgrid122_l8_w5.0"
+wandb_mode   = "online"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+
+[model.repa]
+enabled            = true
+loss_weight        = 5.0
+objective          = "token"                   # plain cosine on the absolute tokens (no spatial normalization)
+layer_index        = 8
+teacher            = "vjepa2_1_vit_large_384"   # v12: V-JEPA 2.1 ViT-L/16 (D=1024) instead of ViT-B/16
+teacher_layer_index = 23                      # v12: encoder block 23 = last block of ViT-L (its per-level LN output)
+teacher_batch_size = 16                       # ViT-L: smaller teacher chunks (memory; 2-GPU recipe sits near 44 GiB)
+teacher_input_size = 256
+target_adapter     = "avgpool"
+target_grid_thw    = [4, 5, 5]
+target_subgrid_thw = [1, 2, 2]                # v13: 2x2 spatial teacher sub-cells per MoT token (4x10x10 per view)
+
+[model.ema]
+enabled         = true
+rate            = 0.1
+iteration_shift = 0
+
+[model.parallelism]
+data_parallel_shard_degree     = 2
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 5.0e-05
+
+[scheduler]
+cycle_lengths = [2000]
+warm_up_steps = [200]
+
+[trainer]
+max_iter                = 2000
+logging_iter            = 20
+grad_accum_iter         = 1
+run_validation          = true
+run_validation_on_start = true
+validation_iter         = 100
+max_val_iter            = 32
+
+[dataloader_train]
+max_samples_per_batch = 128
+episode_subset_path   = "libero_10_3ep_per_task_seed42.json"
+
+[dataloader_val]
+max_samples_per_batch = 128
+episode_subset_path   = "libero_10_val_5ep_per_task_seed42_excl3ep.json"
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 500

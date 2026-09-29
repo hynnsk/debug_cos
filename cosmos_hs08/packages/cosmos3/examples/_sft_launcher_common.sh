@@ -92,7 +92,7 @@ fi
 # SLURM allocation so `srun --gres=gpu:N <wrapper>` uses all N GPUs without the caller
 # having to restate N. A stale exported value silently leaves GPUs idle (a 2 on a
 # 4-GPU allocation halves the global batch and never fails), so say so loudly instead.
-NPROC_PER_NODE="${NPROC_PER_NODE:-${SLURM_GPUS_ON_NODE:-4}}"
+NPROC_PER_NODE="${NPROC_PER_NODE:-${SLURM_GPUS_ON_NODE:-2}}"
 if [[ -n "${SLURM_GPUS_ON_NODE:-}" && "$NPROC_PER_NODE" != "$SLURM_GPUS_ON_NODE" ]]; then
     echo ">>> WARNING: NPROC_PER_NODE=$NPROC_PER_NODE but SLURM allocated $SLURM_GPUS_ON_NODE GPU(s) on $(hostname -s). Unset NPROC_PER_NODE to use the whole allocation." >&2
 fi

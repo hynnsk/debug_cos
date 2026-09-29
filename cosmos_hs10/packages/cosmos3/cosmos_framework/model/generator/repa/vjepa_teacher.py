@@ -191,6 +191,7 @@ class VJEPA21Teacher(nn.Module):
         chunk_size: int = 32,
         load_weights: bool = True,
         allow_download: bool = True,
+        layer_index: int | None = None,
     ) -> None:
         super().__init__()
         if input_size % patch_size != 0:
@@ -213,6 +214,18 @@ class VJEPA21Teacher(nn.Module):
             patch_size=self.patch_size,
             tubelet_size=self.tubelet_size,
         )
+        # Which block's output is returned. V-JEPA 2.1 keeps one LayerNorm per *hierarchical* layer (ViT-B: blocks
+        # 2/5/8/11, ViT-L: 5/11/17/23, the multi-level targets of its own pretraining); only those can be read out.
+        # ``None`` = the last block (``norms_block[-1]``), i.e. the standard feature-extraction output.
+        hierarchical = [int(i) for i in self.encoder.hierarchical_layers]
+        self.layer_index: int | None = None if layer_index is None else int(layer_index)
+        if self.layer_index is not None:
+            if self.layer_index not in hierarchical:
+                raise ValueError(
+                    f"teacher_layer_index={self.layer_index} is not a hierarchical layer of {self.spec.name}; "
+                    f"choose one of {hierarchical} (last = {hierarchical[-1]})"
+                )
+            self.encoder.out_layers = [self.layer_index]  # forward returns [norms_block[k](x_layer)]
         if load_weights:
             self.checkpoint_path = resolve_checkpoint_path(self.spec, checkpoint_path, allow_download=allow_download)
             state_dict = load_encoder_state_dict(self.checkpoint_path)
@@ -281,6 +294,9 @@ class VJEPA21Teacher(nn.Module):
                     tokens = self.encoder(chunk)  # [b, T_t*H_p*W_p, D]
             else:
                 tokens = self.encoder(chunk)
+            if isinstance(tokens, (list, tuple)):  # out_layers set (layer_index): one entry per requested layer
+                assert len(tokens) == 1
+                tokens = tokens[0]
             outs.append(tokens.to(self.dtype if clips.is_cuda else tokens.dtype))
         tokens = torch.cat(outs, dim=0)
         if tokens.shape[1] != tt * hp * wp:

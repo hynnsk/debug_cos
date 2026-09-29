@@ -44,6 +44,7 @@ def test_two_recipes_exist() -> None:
     stems = {p.stem for p in _REPA_TOMLS}
     assert {
         "action_policy_libero_10_edge_reptileinit_repa_dinov2",
+        "action_policy_libero_10_edge_reptileinit_repa_dinov2_v3",
         "action_policy_libero_10_edge_reptileinit_masked_jepa",
     } <= stems
 
@@ -68,6 +69,7 @@ def test_repa_reptileinit_tomls_validate_and_route(toml_path: Path) -> None:
         "objective",
         "center_targets",
         "teacher_batch_size",
+        "loss_weight_warmup_steps",
         *_MASKED_KEYS,
     ):
         got = [o for o in overrides if o.startswith(f"model.config.repa.{key}=")]
@@ -84,6 +86,13 @@ def test_repa_reptileinit_tomls_validate_and_route(toml_path: Path) -> None:
         )
         assert (repa_raw["loss_weight"], repa_raw["layer_index"]) == (5.0, 8)
         assert repa_raw.get("objective", "token") == "token"
+    if toml_path.stem.endswith("_repa_dinov2_v3"):
+        # v3 = the dinov2 recipe with the cosine-term weight ramped linearly 0 -> 5.0 over the first 200 iterations
+        assert (repa_raw["teacher"], repa_raw["loss_weight"], repa_raw["layer_index"]) == ("dinov2_vitb14", 5.0, 8)
+        assert repa_raw["loss_weight_warmup_steps"] == 200
+        assert "model.config.repa.loss_weight_warmup_steps=200" in overrides
+    else:
+        assert repa_raw.get("loss_weight_warmup_steps", 0) == 0  # every other recipe keeps the constant weight
     if toml_path.stem.endswith("_masked_jepa"):
         assert repa_raw["objective"] == "masked_prediction"
         assert (repa_raw["teacher"], repa_raw["teacher_input_size"], repa_raw["target_adapter"]) == (
@@ -120,10 +129,19 @@ def test_repa_and_sigreg_model_configs_validate() -> None:
         16,
     )
     assert RepaConfig(projector_type="linear").projector_type == "linear"
+    assert RepaConfig().loss_weight_warmup_steps == 0  # constant weight unless a recipe opts in (v3)
     with pytest.raises(ValueError):
         RepaConfig(projector_type="conv")
     sig = SigRegConfig()  # the hs10 2026-09-22 SIGReg (input / normalize_by_count) is the version carried here
     assert (sig.layer_index, sig.loss_weight, sig.input, sig.normalize_by_count) == (8, 1.0, "repa_projection", True)
+
+
+def test_repa_loss_weight_ramp() -> None:
+    """v3: the cosine-term weight follows the masked-JEPA ramp (0 at iteration 0); warmup 0 keeps the constant weight."""
+    from cosmos_framework.model.generator.repa.masked_prediction import auxiliary_weight
+
+    assert [auxiliary_weight(5.0, 200, it) for it in (0, 50, 100, 200, 1999)] == [0.0, 1.25, 2.5, 5.0, 5.0]
+    assert auxiliary_weight(5.0, 0, 0) == 5.0 and auxiliary_weight(5.0, 0, 10**6) == 5.0
 
 
 def test_vlm_task_skips_repa_block() -> None:

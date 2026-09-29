@@ -295,3 +295,120 @@ def test_centered_cosine_loss_ignores_shared_direction_and_has_grad():
     perfect = 2.5 * dev + 3.0
     loss, cos = repa_centered_cosine_loss(perfect, target)
     assert loss.item() < 1e-4 and cos.item() > 0.999
+
+
+def test_target_only_centered_cosine_loss_v6_1():
+    """v6.1: only the teacher is centered; the raw student projection is regressed onto the centered target."""
+    from cosmos_framework.model.generator.repa.adapters import repa_centered_cosine_loss
+
+    g = torch.Generator().manual_seed(2)
+    n = 256
+    shared = torch.randn(1, 16, generator=g) * 10
+    dev = torch.randn(n, 16, generator=g)
+    dev_c = dev - dev.mean(dim=0, keepdim=True)  # what the centered target actually is
+    target = shared + dev
+    # Constant prediction (the shortcut) scores ~0 against the zero-mean target, like v6 ...
+    const = shared.expand(n, 16).clone().requires_grad_(True)
+    loss, cos = repa_centered_cosine_loss(const, target, center_student=False)
+    assert abs(cos.item()) < 5e-2 and abs(loss.item() - 1.0) < 5e-2
+    # ... but its gradient is bounded by 1/||pred|| (pred is NOT centered), not by 1/||pred - mean(pred)|| ~ 1/0.
+    loss.backward()
+    assert torch.isfinite(const.grad).all() and const.grad.norm() < 1.0
+    near_const = (shared + 1e-4 * torch.randn(n, 16, generator=g)).requires_grad_(True)
+    both_loss, _ = repa_centered_cosine_loss(near_const, target, center_student=True)
+    both_loss.backward()
+    grad_both = near_const.grad.norm().item()
+    near_const.grad = None
+    tgt_loss, _ = repa_centered_cosine_loss(near_const, target, center_student=False)
+    tgt_loss.backward()
+    assert near_const.grad.norm().item() < 1e-2 * grad_both  # v6 blow-up vs v6.1 bounded gradient
+    # The target-only loss is minimized by predicting the centered deviations (any positive scale, NO offset).
+    loss, cos = repa_centered_cosine_loss(2.5 * dev_c, target, center_student=False)
+    assert loss.item() < 1e-5 and cos.item() > 0.9999
+    loss_offset, _ = repa_centered_cosine_loss(2.5 * dev_c + 3.0, target, center_student=False)
+    assert loss_offset.item() > loss.item() + 1e-3  # unlike v6, a constant offset of the student is not free
+    both_offset, _ = repa_centered_cosine_loss(2.5 * dev_c + 3.0, target, center_student=True)
+    assert both_offset.item() < 1e-5
+    # The teacher centering is detached: no gradient reaches the target.
+    t = target.clone().requires_grad_(True)
+    l, _ = repa_centered_cosine_loss(dev_c.clone().requires_grad_(True), t, center_student=False)
+    l.backward()
+    assert t.grad is None or t.grad.abs().sum() == 0
+
+
+def test_target_only_spatial_centered_loss_v10_1():
+    """v10.1: per-frame per-channel spatial MEAN removed from the teacher only; no std division, raw student."""
+    g = torch.Generator().manual_seed(6)
+    frames, patches, dim = 4, 50, 6
+    dev = torch.randn(frames, patches, dim, generator=g)
+    dev_c = dev - dev.mean(dim=1, keepdim=True)  # what the spatially centered target actually is
+    frame_shift = 10.0 * torch.randn(frames, 1, dim, generator=g)  # per-frame shared direction
+    target = dev + frame_shift
+    counts, fidx = [frames * patches], [torch.arange(1, frames + 1)]
+    kw = dict(normalize_student=False, scale=False)
+    # Predicting the per-frame centered deviations (any positive scale) is perfect ...
+    pred = (3.0 * dev_c).flatten(0, 1).requires_grad_(True)
+    loss, cos = repa_spatial_normalized_cosine_loss(pred, target.flatten(0, 1), counts, fidx, **kw)
+    torch.testing.assert_close(loss, torch.tensor(0.0), atol=2e-6, rtol=0)
+    loss.backward()
+    assert torch.isfinite(pred.grad).all()
+    # ... a per-frame constant prediction (the shortcut) scores ~0 and stays finite ...
+    const = frame_shift.expand(frames, patches, dim).flatten(0, 1).clone().requires_grad_(True)
+    loss_c, cos_c = repa_spatial_normalized_cosine_loss(const, target.flatten(0, 1), counts, fidx, **kw)
+    assert abs(cos_c.item()) < 0.1
+    loss_c.backward()
+    assert torch.isfinite(const.grad).all()
+    # ... and, unlike v10, the student is not normalized (an offset on the student is not free) and the channel
+    # weighting of the target is preserved (scaling one target channel changes the loss; with the v10 whitening it
+    # would not).
+    loss_off, _ = repa_spatial_normalized_cosine_loss(
+        (3.0 * dev_c + frame_shift).flatten(0, 1), target.flatten(0, 1), counts, fidx, **kw
+    )
+    assert loss_off.item() > 1e-3
+    scaled = target.clone()
+    scaled[..., 0] *= 5.0
+    student = dev.flatten(0, 1)
+    l_raw, _ = repa_spatial_normalized_cosine_loss(student, target.flatten(0, 1), counts, fidx, **kw)
+    l_sc, _ = repa_spatial_normalized_cosine_loss(student, scaled.flatten(0, 1), counts, fidx, **kw)
+    assert abs(l_raw.item() - l_sc.item()) > 1e-3
+    l_raw_w, _ = repa_spatial_normalized_cosine_loss(student, target.flatten(0, 1), counts, fidx)
+    l_sc_w, _ = repa_spatial_normalized_cosine_loss(student, scaled.flatten(0, 1), counts, fidx)
+    torch.testing.assert_close(l_raw_w, l_sc_w, atol=1e-5, rtol=0)  # v10 whitening is invariant to per-channel scale
+    # Teacher statistics are detached.
+    t = target.flatten(0, 1).clone().requires_grad_(True)
+    l, _ = repa_spatial_normalized_cosine_loss(dev_c.flatten(0, 1).clone().requires_grad_(True), t, counts, fidx, **kw)
+    l.backward()
+    assert t.grad is None or t.grad.abs().sum() == 0
+
+
+def test_concat_views_along_width_subgrid_layout():
+    from cosmos_framework.model.generator.repa.adapters import concat_views_along_width, concat_views_along_width_subgrid
+
+    g = torch.Generator().manual_seed(3)
+    b, v, d, t, h, wv = 2, 2, 3, 4, 5, 5
+    # subgrid (1,1,1) == plain layout with a trailing S=1 axis
+    y = torch.randn(b * v, d, t, h, wv, generator=g)
+    torch.testing.assert_close(
+        concat_views_along_width_subgrid(y, v, (1, 1, 1)).squeeze(-2), concat_views_along_width(y, v)
+    )
+    # (1,2,2): cell (t, 2h+dh, 2w+dw) of view vi lands at token (t, h, vi*wv + w), sub-cell dh*2+dw
+    st, sh, sw = 1, 2, 2
+    yy = torch.randn(b * v, d, t * st, h * sh, wv * sw, generator=g)
+    out = concat_views_along_width_subgrid(yy, v, (st, sh, sw))
+    assert out.shape == (b, t, h, v * wv, st * sh * sw, d)
+    for bi, vi, tt, hh, ww, dh, dw in [(0, 0, 1, 2, 3, 0, 1), (1, 1, 3, 4, 0, 1, 1), (1, 0, 0, 0, 4, 1, 0)]:
+        torch.testing.assert_close(
+            out[bi, tt, hh, vi * wv + ww, dh * sw + dw], yy[bi * v + vi, :, tt, hh * sh + dh, ww * sw + dw]
+        )
+    with pytest.raises(ValueError):
+        concat_views_along_width_subgrid(yy, v, (1, 3, 2))
+
+
+def test_relation_loss_per_sample_fallback_matches_batched(monkeypatch):
+    import cosmos_framework.model.generator.repa.adapters as ad
+
+    pred, target, counts = _relation_inputs(counts=(9, 9, 9), d=5, seed=7)
+    batched = ad.repa_relation_loss(pred, target, counts)
+    monkeypatch.setattr(ad, "RELATION_BATCHED_MAX_ENTRIES", 10)  # force the per-sample path
+    looped = ad.repa_relation_loss(pred, target, counts)
+    torch.testing.assert_close(batched, looped)

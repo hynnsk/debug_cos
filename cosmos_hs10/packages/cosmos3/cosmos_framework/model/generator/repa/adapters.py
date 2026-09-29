@@ -366,10 +366,16 @@ def repa_temporal_difference_cosine_loss(
     return repa_cosine_loss(pred_delta, target_delta, eps=eps)
 
 
-def _spatial_norm(x: torch.Tensor, eps: float) -> torch.Tensor:
-    """Normalize each ``[P,D]`` frame independently over its spatial-patch axis."""
+def _spatial_norm(x: torch.Tensor, eps: float, scale: bool = True) -> torch.Tensor:
+    """Normalize each ``[P,D]`` frame independently over its spatial-patch axis.
+
+    ``scale=False`` only subtracts the per-frame, per-channel spatial mean (v10.1): no division by the per-channel
+    spatial std, so channels that barely vary over the frame are not amplified to unit variance.
+    """
     x32 = x.float()
     mean = x32.mean(dim=1, keepdim=True)
+    if not scale:
+        return x32 - mean
     std = x32.std(dim=1, correction=0, keepdim=True)
     return (x32 - mean) / (std + eps)
 
@@ -380,11 +386,16 @@ def repa_spatial_normalized_cosine_loss(
     num_tokens_per_sample: Sequence[int],
     frame_indexes_per_sample: Sequence[torch.Tensor],
     eps: float = 1e-6,
+    normalize_student: bool = True,
+    scale: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Per-frame spatially normalize student and teacher tokens, then apply token-wise cosine loss.
+    """Per-frame spatially normalize the teacher (and, by default, the student) tokens, then token-wise cosine loss.
 
     For every feature channel independently, ``SpatialNorm(x[t,p]) = (x[t,p] - mean_p(x[t,p])) /
-    (std_p(x[t,p]) + eps)``. Statistics never cross frames or samples.
+    (std_p(x[t,p]) + eps)``; with ``scale=False`` only the mean is removed. Statistics never cross frames or samples.
+    ``normalize_student=False`` (v10.1, data2vec / V-JEPA style target-only normalization) regresses the raw student
+    projection onto the normalized target: the student cannot satisfy a zero-mean target with a constant vector, and
+    no student-side statistic can shrink towards zero and blow up the cosine gradient.
     """
     if pred.shape != target.shape:
         raise ValueError(f"pred {tuple(pred.shape)} and target {tuple(target.shape)} must have the same shape")
@@ -393,12 +404,19 @@ def repa_spatial_normalized_cosine_loss(
     if not pred_frames:
         zero = 0.0 * pred.sum()
         return zero, zero.detach()
-    pred_norm = torch.cat([_spatial_norm(frames, eps).flatten(0, 1) for frames, _ in pred_frames], dim=0)
-    target_norm = torch.cat([_spatial_norm(frames, eps).flatten(0, 1) for frames, _ in target_frames], dim=0)
+    if normalize_student:
+        pred_norm = torch.cat([_spatial_norm(frames, eps, scale).flatten(0, 1) for frames, _ in pred_frames], dim=0)
+    else:
+        pred_norm = torch.cat([frames.float().flatten(0, 1) for frames, _ in pred_frames], dim=0)
+    target_norm = torch.cat(
+        [_spatial_norm(frames, eps, scale).flatten(0, 1).detach() for frames, _ in target_frames], dim=0
+    )
     return repa_cosine_loss(pred_norm, target_norm, eps=eps)
 
 
 RELATION_DISTANCES = ("l2", "l1")
+# Largest batched relation map (b x n x n entries, float32) before repa_relation_loss falls back to a per-sample loop.
+RELATION_BATCHED_MAX_ENTRIES = 2**27  # 512 MB per matrix
 
 
 def token_relation_matrix(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
@@ -439,8 +457,10 @@ def repa_relation_loss(
     def _penalty(diff: torch.Tensor) -> torch.Tensor:
         return diff.square() if distance == "l2" else diff.abs()
 
-    if len(set(counts)) == 1:
-        # Uniform grids (the LIBERO case): one batched matmul per side.
+    if len(set(counts)) == 1 and len(counts) * counts[0] ** 2 <= RELATION_BATCHED_MAX_ENTRIES:
+        # Uniform grids (the LIBERO case): one batched matmul per side. With a target sub-grid the per-sample maps grow
+        # to (200 S)^2 (S=18: 13 M entries each), so beyond RELATION_BATCHED_MAX_ENTRIES the per-sample loop below is
+        # used instead (same value, ~50 MB transient per sample instead of several GB for the whole batch).
         b, n = len(counts), counts[0]
         diff = token_relation_matrix(pred.view(b, n, -1), eps) - token_relation_matrix(target.view(b, n, -1), eps)
         return _penalty(diff).sum() / (b * n * n)
@@ -453,21 +473,25 @@ def repa_relation_loss(
 
 
 def repa_centered_cosine_loss(
-    pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-6
+    pred: torch.Tensor, target: torch.Tensor, eps: float = 1e-6, center_student: bool = True
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """``1 - cos`` between mean-centered student and teacher tokens.
+    """``1 - cos`` between the student tokens and the mean-centered teacher tokens.
 
-    Each side has its own (detached) batch mean over all aligned tokens subtracted before the cosine, so a constant
-    or per-position-mean prediction scores exactly ~0 and the projector is trained on the token-specific structure
-    of the teacher features instead of their dominant shared direction (on LIBERO ~85% of the V-JEPA 2.1 token
-    energy; a constant prediction already reads raw cos ~0.92). Centering each side by its own mean makes the loss
-    invariant to a constant offset of the projector output. Same contract as :func:`repa_cosine_loss`.
+    The teacher side has its (detached) batch mean over all aligned tokens subtracted before the cosine, so a constant
+    or per-position-mean prediction scores ~0 and the projector is trained on the token-specific structure of the
+    teacher features instead of their dominant shared direction (on LIBERO ~85% of the V-JEPA 2.1 token energy; a
+    constant prediction already reads raw cos ~0.92).
+
+    ``center_student=True`` (v6) also subtracts the student's own batch mean, which makes the loss invariant to a
+    constant offset of the projector output but divides by ``||pred - mean(pred)||``: a near-constant projector
+    output (the state at init) gets an unbounded gradient (v6 grad norm ~100). ``center_student=False`` (v6.1) keeps
+    the raw student projection, as data2vec / V-JEPA normalize targets only. Same contract as :func:`repa_cosine_loss`.
     """
     if pred.shape != target.shape:
         raise ValueError(f"pred {tuple(pred.shape)} and target {tuple(target.shape)} must have the same shape")
     p32, t32 = pred.float(), target.float()
-    pc = p32 - p32.mean(dim=0, keepdim=True).detach()
-    tc = t32 - t32.mean(dim=0, keepdim=True).detach()
+    pc = p32 - p32.mean(dim=0, keepdim=True).detach() if center_student else p32
+    tc = (t32 - t32.mean(dim=0, keepdim=True)).detach()
     cos = F.cosine_similarity(pc, tc, dim=-1, eps=eps)  # [N]
     cos_mean = cos.mean()
     return 1.0 - cos_mean, cos_mean.detach()
@@ -493,6 +517,25 @@ def concat_views_along_width(y: torch.Tensor, num_views: int) -> torch.Tensor:
     b = bv // num_views
     y = y.view(b, num_views, d, t, h, wv).permute(0, 3, 4, 1, 5, 2)  # [B,T,H,V,Wv,D]
     return y.reshape(b, t, h, num_views * wv, d)
+
+
+def concat_views_along_width_subgrid(y: torch.Tensor, num_views: int, subgrid: Grid3) -> torch.Tensor:
+    """``[B*V,D,T*st,H*sh,Wv*sw]`` (view-major batch) -> ``[B,T,H,V*Wv,S,D]`` with ``S = st*sh*sw``.
+
+    Sub-grid version of :func:`concat_views_along_width`: the adapter produced ``subgrid`` teacher cells per MoT token
+    along (t, h, w); they are gathered as a trailing ``S`` axis in ``(dt, dh, dw)`` order so that flattening
+    ``[..., S, D] -> [N*S, D]`` keeps rows token-major / sub-cell-minor. ``subgrid=(1,1,1)`` reproduces the plain
+    layout with ``S = 1``.
+    """
+    bv, d, tt, hh, ww = y.shape
+    st, sh, sw = (int(v) for v in subgrid)
+    if min(st, sh, sw) < 1 or tt % st or hh % sh or ww % sw:
+        raise ValueError(f"Adapted grid {(tt, hh, ww)} is not a multiple of target_subgrid_thw={(st, sh, sw)}")
+    if bv % num_views != 0:
+        raise ValueError(f"Batch of {bv} view clips is not divisible by num_views={num_views}")
+    b, t, h, wv = bv // num_views, tt // st, hh // sh, ww // sw
+    y = y.view(b, num_views, d, t, st, h, sh, wv, sw).permute(0, 3, 5, 1, 7, 4, 6, 8, 2)  # [B,T,H,V,Wv,st,sh,sw,D]
+    return y.reshape(b, t, h, num_views * wv, st * sh * sw, d)
 
 
 def split_flat_tokens(flat: torch.Tensor, token_shapes: Sequence[Sequence[int]]) -> list[torch.Tensor]:
