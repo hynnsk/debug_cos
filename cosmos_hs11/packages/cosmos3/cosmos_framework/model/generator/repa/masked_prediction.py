@@ -26,6 +26,8 @@ def validate_masked_prediction_config(cfg) -> None:
         )
     if not cfg.teacher.startswith("vjepa2_1_"):
         raise ValueError("masked_prediction requires a V-JEPA 2.1 teacher")
+    if tuple(int(v) for v in getattr(cfg, "target_subgrid_thw", (1, 1, 1))) != (1, 1, 1):
+        raise ValueError("masked_prediction requires target_subgrid_thw=[1,1,1] (its pixel mask is defined per MoT token)")
     if not 0 < cfg.masked_ratio_min <= cfg.masked_ratio_max < 1:
         raise ValueError("Require 0 < masked_ratio_min <= masked_ratio_max < 1")
     if cfg.masked_max_samples < 1 or cfg.masked_warmup_steps < 0:

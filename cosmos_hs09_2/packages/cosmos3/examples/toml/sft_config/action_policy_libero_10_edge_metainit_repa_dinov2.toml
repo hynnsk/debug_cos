@@ -33,7 +33,7 @@ task         = "vfm"
 experiment   = "action_policy_libero_edge_repa"
 project      = "cosmos3_action_libero"
 group        = "edge_libero10_fewshot"
-name         = "edge_libero10_3ep_fullft_metainit_repa_dinov2b_l8_avgpool_w5.0"
+name         = "edge_libero10_3ep_fullft_metainit_repa_dinov2b_l24_avgpool_w5.0"
 wandb_mode   = "online"
 
 [model]
@@ -50,7 +50,7 @@ lora_freeze_base    = false    # full fine-tune: the injector must not freeze mo
 [model.repa]
 enabled            = true
 loss_weight        = 5.0                   # unweighted 1 - cos in [0, 2]; the fm terms are x10-scaled (see hs10 docs)
-layer_index        = 8                     # output of MoT block 8 (of 28); next candidate 14
+layer_index        = 24                     # output of MoT block 8 (of 28); next candidate 14
 teacher            = "dinov2_vitb14"       # facebook/dinov2-base (D=768), per frame; V-JEPA 2.1 = "vjepa2_1_vit_base_384"
 teacher_input_size = 224                   # 16x16 patches of 14 px (REPA reference setting)
 target_adapter     = "avgpool"             # variant 1 (parameter-free) | "avgpool_conv" (2) | "strided_conv" (3)

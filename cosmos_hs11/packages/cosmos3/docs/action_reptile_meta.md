@@ -150,6 +150,14 @@ NPROC_PER_NODE=4 sr 4 48 examples/launch_sft_action_policy_libero_10_edge_metain
 | export more groups into the .pt | `theta_mode = "lora"` exports LoRA + time_embedder; in full mode they live in the DCP |
 | run shorter | change `[trainer] max_iter` (eps schedule is tied to it) |
 
+**Full-data post-training on the Reptile init** (`action_policy_libero_10_edge_reptileinit_data_all.toml`, launcher
+`..._reptileinit_data_all.sh`, port 50049): identical to the 3-demo recipe except (1) `[dataloader_train].episode_subset_path
+= "libero_10_all_episodes.json"` = all 379 episodes listed as a fixed subset (omitting the key would let the dataset carve
+out its own seeded 1 % val split and train on 375), and (2) validation off (`run_validation=false`, no `[dataloader_val]`):
+nothing is held out, so judge by rollout success on checkpoints picked by iteration. Same 2000-iteration schedule
+(~5 epochs instead of ~67); lengthen `trainer.max_iter` together with `scheduler.cycle_lengths` if wanted, in the
+fresh-init baseline too.
+
 ## 7b. VRAM and wall-clock (full mode)
 
 Per-GPU memory is dominated by the FSDP shards of persistent state, all fp32 (`fsdp_master_dtype=float32`):
@@ -217,6 +225,10 @@ of host/GPU memory; 4 x 64 windows fits the 44 GiB cards, the 2-GPU x 128 layout
 `jepa_visible_loss` and `jepa_centered_cos`. The meta trainer's inner loop does not support either objective (it calls
 `training_step_from_inputs` without the raw batch), so these are post-training-only losses.
 
+**v5 (2026-09-29)** = v2 + less pooling: `[model.repa].target_subgrid_thw = [1, 2, 2]` (each MoT token predicts a 2x2
+block of the 4x10x10-per-view DINOv2 grid; see docs/action_policy_libero_repa_vjepa.md section 9). Launcher
+`examples/launch_sft_action_policy_libero_10_edge_reptileinit_repa_dinov2_v5.sh` (port 50048).
+
 ## 9. Cosmos3-Nano
 
 The same trainer and knobs run on the Nano tier (Qwen3-VL-8B MoT: hidden 4096, 36 blocks, 15.75B params, generation
@@ -253,6 +265,16 @@ NPROC_PER_NODE=8 sr 8 48 examples/launch_sft_action_policy_libero_10_nano_reptil
 The few-shot Nano post-training experiment (`action_policy_libero_nano.py`) was taken from cosmos_hs08 (adds the fixed
 episode subset, `dataloader_val` and the val callback; all off by default, so the original full-data
 `action_policy_libero_10_nano.toml` is unchanged).
+
+**Nano post-training + DINOv2 REPA (2026-09-30)**: `action_policy_libero_10_nano_reptileinit_v2.toml` (launcher
+`..._nano_reptileinit_v2.sh`, port 50050) = the plain Nano Reptile-init recipe + `[model.repa]` with the frozen DINOv2
+ViT-L/14 teacher (`dinov2_vitl14`, 224 px, D=1024) on the LAST MoT block (`layer_index = 36`), plain token cosine, weight
+5.0, projector 4096-2048-2048-1024. It needs experiment `action_policy_libero_nano_repa` (ported from cosmos_hs10: adds
+`repa_` to `keys_to_select` / `keys_to_skip_loading` and ships the native frames for the teacher); the Reptile warm start
+is unchanged (`[checkpoint]` fields). `repa_` is also in the TOML's `keys_to_skip_loading` because the Nano Reptile DCP
+has no `repa_head`. The user's v2 / v3 / v4 = the same recipe at loss_weight 1.0 / 5.0 / 10.0. **Nano v5**
+(`action_policy_libero_10_nano_reptileinit_v5.toml`, launcher `..._nano_reptileinit_v5.sh`, port 50051) = v2 +
+`target_subgrid_thw = [1, 2, 2]` (less pooling, the Nano twin of the Edge v5 recipe; projector output 4 x 1024).
 
 ### 9b. Scaling the inner loop on big GPUs (H200): which knob buys what
 

@@ -266,3 +266,26 @@ NPROC_PER_NODE=2 sr 2 48 examples/launch_sft_action_policy_libero_10_edge_metain
 * Single-node launches set `NCCL_IB_DISABLE=1` (node `bob` has a broken RoCE stack).
 * Launching from a non-interactive shell (e.g. a plain `srun bash script.sh`) needs the conda env on
   `PATH` (`export PATH=$HOME/anaconda3/envs/cosmos3-pt/bin:$PATH`); `sr` from an activated shell is fine.
+
+## 8. Cosmos3-Nano tier (`action_fewshot_meta_lora_nano`, 8 x H200)
+
+`examples/toml/sft_config/action_fewshot_meta_lora_nano.toml` + `examples/launch_meta_action_fewshot_lora_nano.sh`
+(port 50052, `NPROC_PER_NODE` default 8) run the same FOMAML LoRA meta-training on Cosmos3-Nano (Qwen3-VL-8B MoT, 36
+blocks, hidden 4096, 15.75 B params). Experiment `action_fewshot_meta_lora_nano` = the Edge meta experiment on
+`NANO_MODEL_CONFIG` with the Nano LIBERO-recipe deltas (`loss_scale` 10 / `image_loss_scale` None, `load_weights_from_pretrained`
+False, `encode_exact_durations` [17, 61, 73], 45056 packed tokens), LoRA targets extended with the Qwen3 SwiGLU
+`mlp_moe_gen.gate_proj`, and `action_pos_embed` (a Nano-DCP-only key) added to `keys_to_skip_loading`. The model is a
+replicated bf16 copy without FSDP (31.5 GB per rank), so the recipe needs H200-class memory; a 48 GB card only fits
+`action_fewshot_meta_lora_nano_smoke.toml` (1 GPU, 3 iterations, 4-window batches).
+
+Sizing for a downstream Nano LoRA post-training of 8 GPUs x 128 windows (2048/step) for 2000 steps at lr 1e-4:
+FOMAML cannot mirror a 2000-step adaptation, so the inner loop is made as downstream-like as memory allows --
+`inner_lr = 1e-4` (the downstream lr; Adam moves each coordinate ~lr per step, so adaptation magnitude = steps x lr),
+`inner_steps = 10` (Edge: 5), support `k_shot 8 x windows_per_demo 8 = 64` windows in one packed batch per inner step,
+query `q_query 4 x 8 = 32` windows; `windows_per_demo 16` + `max_samples_per_batch 128` is the 128-window option (~2x
+time). 8 ranks = 8 meta-episodes per outer step (the 4-GPU Edge run had 4). Estimated ~2.3 min/iter on H200 (Edge/A40:
+0.135 s per window fwd+bwd, 0.43 s/window VAE encode; Nano ~4.6x params, H200 ~3.5x A40) -> 1000 iters ~38 h, 2000 ~77 h;
+the outer LR anneals to `meta_lr_min_ratio` at `max_iter`, so set 1000 or 2000 rather than stopping early. The downstream
+Nano LoRA recipe must use the same rank / alpha / `lora_target_modules` (with `lora_freeze_base = false`) and load the
+meta init via `checkpoint.meta_action_init_path` + `meta_action_init_include_lora/_time_embedder`; no such Nano TOML exists
+in this repo yet. Tests: `cosmos_framework/scripts/train_action_meta_nano_test.py`.

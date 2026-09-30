@@ -29,7 +29,7 @@ import torch.nn as nn
 from cosmos_framework.model.generator.repa.adapters import (
     build_projector,
     build_target_adapter,
-    concat_views_along_width,
+    concat_views_along_width_subgrid,
     split_flat_tokens,
 )
 
@@ -71,6 +71,7 @@ class RepaAlignmentHead(nn.Module):
         teacher_grid_thw: Grid3 = (8, 16, 16),
         target_grid_thw: Grid3 = (4, 5, 5),
         num_views: int = 2,
+        target_subgrid_thw: Grid3 = (1, 1, 1),
     ) -> None:
         super().__init__()
         self.hidden_size = int(hidden_size)
@@ -78,18 +79,37 @@ class RepaAlignmentHead(nn.Module):
         self.num_views = int(num_views)
         self.teacher_grid_thw = tuple(int(v) for v in teacher_grid_thw)
         self.target_grid_thw = tuple(int(v) for v in target_grid_thw)
+        # "Less pooling" (cosmos_hs10 v13/v14, hs11 v5): teacher cells predicted per MoT token along (t, h, w). The
+        # teacher is adapted to the (target_grid * subgrid) grid, the S = st*sh*sw cells of a token become consecutive
+        # rows ([N*S, D_t]) and the projector emits all of them at once (S * D_t wide).
+        self.target_subgrid_thw = tuple(int(v) for v in target_subgrid_thw)
+        if len(self.target_subgrid_thw) != 3 or min(self.target_subgrid_thw) < 1:
+            raise ValueError(f"target_subgrid_thw must be three positive ints, got {target_subgrid_thw}")
+        for name, tg, sg in zip("thw", self.teacher_grid_thw, self._refine(self.target_grid_thw)):
+            if sg > tg:
+                raise ValueError(
+                    f"target_grid_thw x target_subgrid_thw = {self._refine(self.target_grid_thw)} exceeds the teacher grid "
+                    f"{self.teacher_grid_thw} along {name}; a sub-cell cannot be finer than one teacher token."
+                )
+        self.num_subcells = self.target_subgrid_thw[0] * self.target_subgrid_thw[1] * self.target_subgrid_thw[2]
         self.target_adapter_name = target_adapter
         self.projector_type = projector_type
         # "mlp": REPA's Linear-SiLU-Linear-SiLU-Linear (hidden ``projector_hidden_dim``); "linear": one Linear.
-        self.projector = build_projector(projector_type, self.hidden_size, int(projector_hidden_dim), self.teacher_embed_dim)
+        self.projector = build_projector(
+            projector_type, self.hidden_size, int(projector_hidden_dim), self.num_subcells * self.teacher_embed_dim
+        )
         self.target_adapter = build_target_adapter(
             target_adapter,
             self.teacher_embed_dim,
             kernel_size=adapter_kernel_size,
             in_grid=self.teacher_grid_thw,  # type: ignore[arg-type]
-            out_grid=self.target_grid_thw,  # type: ignore[arg-type]
+            out_grid=self._refine(self.target_grid_thw),  # type: ignore[arg-type]
             depthwise=adapter_depthwise,
         )
+
+    def _refine(self, grid: Grid3) -> Grid3:
+        """Per-view MoT grid -> per-view adapted teacher grid (``grid * target_subgrid_thw``)."""
+        return tuple(int(g) * int(s) for g, s in zip(grid, self.target_subgrid_thw))  # type: ignore[return-value]
 
     def reset_parameters(self) -> None:
         self.projector.reset_parameters()
@@ -102,14 +122,15 @@ class RepaAlignmentHead(nn.Module):
         z = torch.zeros(1, self.hidden_size, device=device, dtype=dtype)
         p = self.projector(z).sum()
         t = torch.zeros(1, self.teacher_embed_dim, *self.teacher_grid_thw, device=device, dtype=dtype)
-        a = self.target_adapter(t, self.target_grid_thw).sum()
+        a = self.target_adapter(t, self._refine(self.target_grid_thw)).sum()
         return 0.0 * (p + a)
 
     def adapt_targets(self, teacher_tokens: torch.Tensor, out_grid: Grid3) -> torch.Tensor:
-        """``[B*V, T_t, H_p, W_p, D_t]`` -> ``[B, T, H, V*Wv, D_t]`` with ``out_grid = (T, H, Wv)`` per view."""
+        """``[B*V, T_t, H_p, W_p, D_t]`` -> ``[B, T, H, V*Wv, S, D_t]`` with ``out_grid = (T, H, Wv)`` the per-view MoT
+        grid and ``S = prod(target_subgrid_thw)`` teacher sub-cells per MoT token (``S = 1`` by default)."""
         x = teacher_tokens.permute(0, 4, 1, 2, 3)  # [B*V, D_t, T_t, H_p, W_p]
-        y = self.target_adapter(x, out_grid)  # [B*V, D_t, T, H, Wv]
-        return concat_views_along_width(y, self.num_views)  # [B, T, H, V*Wv, D_t]
+        y = self.target_adapter(x, self._refine(out_grid))  # [B*V, D_t, T*st, H*sh, Wv*sw]
+        return concat_views_along_width_subgrid(y, self.num_views, self.target_subgrid_thw)  # [B,T,H,V*Wv,S,D_t]
 
     # ------------------------------------------------------------------------------------------
     def _prepare_noisy_indexes(
@@ -166,7 +187,7 @@ class RepaAlignmentHead(nn.Module):
                 stacked = teacher_tokens.flatten(0, 1)  # [B*V, T_t, H_p, W_p, D_t] (view-major)
             else:
                 stacked = torch.cat(list(teacher_tokens), dim=0)  # [B*V, T_t, H_p, W_p, D_t]
-            adapted_all = self.adapt_targets(stacked, out_grid)  # [B, T-1, H, W, D_t]
+            adapted_all = self.adapt_targets(stacked, out_grid)  # [B, T-1, H, W, S, D_t]
 
         targets: list[torch.Tensor] = []
         counts: list[int] = []
@@ -176,13 +197,14 @@ class RepaAlignmentHead(nn.Module):
                 counts.append(0)
                 continue
             if adapted_all is not None:
-                target_grid = adapted_all[i]  # [T-1, H, W, D_t]
+                target_grid = adapted_all[i]  # [T-1, H, W, S, D_t]
             else:
                 tt = teacher_tokens[i]
                 if tt.ndim != 5:
                     raise ValueError(f"teacher_tokens[{i}] must be [V,T_t,H_p,W_p,D_t], got {tuple(tt.shape)}")
                 target_grid = self.adapt_targets(tt, self._per_view_grid(t_len, h_tok, w_tok))[0]
-            targets.append(target_grid.index_select(0, nfi - 1).reshape(-1, target_grid.shape[-1]))  # [n_i, D_t]
+            # rows: frame-major, then h, w, then the S sub-cells of that token -> [n_i * S, D_t]
+            targets.append(target_grid.index_select(0, nfi - 1).reshape(-1, target_grid.shape[-1]))
             counts.append(int(targets[-1].shape[0]))
         if not targets:
             return None
@@ -205,7 +227,8 @@ class RepaAlignmentHead(nn.Module):
         ]
         if not preds:
             return None
-        return self.projector(torch.cat(preds, dim=0))  # [N, D_t]
+        out = self.projector(torch.cat(preds, dim=0))  # [N, S*D_t]
+        return out.reshape(-1, self.teacher_embed_dim)  # [N*S, D_t] (sub-cell-minor, same row order as the targets)
 
     def forward(
         self,

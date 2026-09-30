@@ -546,6 +546,7 @@ class OmniMoTModel(ImaginaireModel):
             repa_teacher_grid_thw=self._repa_teacher_grid_thw(),
             repa_target_grid_thw=tuple(int(v) for v in repa_cfg.target_grid_thw),
             repa_num_views=int(repa_cfg.num_views),
+            repa_target_subgrid_thw=tuple(int(v) for v in repa_cfg.target_subgrid_thw),
         )
 
     @property
@@ -2122,12 +2123,15 @@ class OmniMoTModel(ImaginaireModel):
                     repa_cos_centered = centered_cosine_similarity(repa_pred, repa_target)
                 losses_dict["repa_cos_sim"] = repa_cos
                 losses_dict["repa_cos_sim_centered"] = repa_cos_centered
-                repa_rel_loss = repa_relation_loss(
-                    repa_pred,
-                    repa_target,
-                    out_net["repa_num_tokens_per_sample"],
-                    distance=repa_cfg.relation_distance,
-                )
+                # Weight 0 = monitor only: evaluate without building an autograd graph over the per-sample n_i x n_i
+                # relation maps (n_i = 200 x S rows with target_subgrid_thw; the value logged is identical).
+                with torch.set_grad_enabled(float(repa_cfg.relation_loss_weight) != 0.0):
+                    repa_rel_loss = repa_relation_loss(
+                        repa_pred,
+                        repa_target,
+                        out_net["repa_num_tokens_per_sample"],
+                        distance=repa_cfg.relation_distance,
+                    )
             # Optional linear warmup of the cosine-term weight (``repa.loss_weight_warmup_steps`` > 0, cosmos_hs11 v3):
             # ``loss_weight * min(1, iteration / N)`` -- 0 at iteration 0, ``loss_weight`` from iteration N on (the same
             # ramp as the masked-JEPA branch). 0 (default) = the constant weight. ``getattr`` keeps configs pickled before

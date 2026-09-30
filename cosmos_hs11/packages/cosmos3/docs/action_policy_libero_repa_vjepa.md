@@ -219,3 +219,18 @@ NPROC_PER_NODE=8 sr 8 48 bash examples/launch_sft_action_policy_libero_10_nano_r
 Cost: the teacher sees 32 x 2 = 64 clips per rank per step (Edge: 256), so ViT-L costs about what ViT-B did on Edge.
 Memory: hs08 measured 33.4 GiB allocated / 41 GiB reserved per GPU for the Nano few-shot recipe without REPA; the
 REPA head adds ~13 M params (4096 -> 2048 -> 2048 -> 1024) and the fp32 ViT-L teacher ~1.2 GB, so expect ~36 GiB.
+
+## 9. Less pooling: `target_subgrid_thw` (hs11 v5, ported from cosmos_hs10 v13/v14)
+
+`[model.repa].target_subgrid_thw = [st, sh, sw]` (default `[1, 1, 1]`) sets how many teacher cells each MoT token
+predicts along (t, h, w). With `[1, 2, 2]` the teacher grid of a view is adapted to 4x10x10 instead of 4x5x5 (adaptive
+avgpool 16 -> 10, overlapping bins of 1-2 patches per axis; the 16 DINOv2 frames are still averaged in fours), the 4
+sub-cells of a token are consecutive rows ([N*4, D_t], token-major / sub-cell-minor in (dt, dh, dw) order) and the
+projector's last layer is widened to `4 * D_t`; `repa_num_tokens_per_sample` counts rows, so cosine / centered /
+spatial-normalized / temporal-difference / relation / SIGReg are unchanged (the monitor-only relation loss is evaluated
+without autograd and falls back to a per-sample loop for large maps). Not supported with `objective =
+"masked_prediction"`. Why: on LIBERO-10 val, pooling 16x16 -> 5x5 removes most of the token-specific signal
+(DINOv2-B: shared-direction energy 0.30 -> 0.25 and energy left after spatial centering 0.61 -> 0.68 when going to
+4x10x10; V-JEPA-L block 23: 0.62 -> 0.53 / 0.33 -> 0.42), while temporal refinement changes nothing (0.33 -> 0.34).
+Recipe: `action_policy_libero_10_edge_reptileinit_repa_dinov2_v5.toml` = v2 + `[1, 2, 2]` (launcher `..._v5.sh`, port
+50048). CPU-tested (alignment / adapter / TOML tests) and dry-run; not GPU-smoked.

@@ -1,0 +1,58 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+# 1-GPU smoke of action_fewshot_meta_lora_nano (3 iterations, tiny episodes, 2 YAM repos, wandb off). The replicated
+# bf16 Nano (31.5 GB) + a 4-window batch fits a 48 GB card; NEVER run this recipe on more than one GPU for a smoke.
+#   TOML_FILE=examples/toml/sft_config/action_fewshot_meta_lora_nano_smoke.toml NPROC_PER_NODE=1 sr 1 48 \
+#     examples/launch_meta_action_fewshot_lora_nano.sh
+
+[job]
+task         = "vfm"
+experiment   = "action_fewshot_meta_lora_nano"
+project      = "cosmos3_action_meta"
+group        = "smoke"
+name         = "nano_meta_lora_smoke"
+wandb_mode   = "disabled"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+lora_enabled        = true
+lora_rank           = 32
+lora_alpha          = 64
+lora_target_modules = "q_proj_moe_gen,k_proj_moe_gen,v_proj_moe_gen,o_proj_moe_gen,mlp_moe_gen.gate_proj,mlp_moe_gen.up_proj,mlp_moe_gen.down_proj"
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.compile]
+enabled = false
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[trainer]
+max_iter     = 3
+logging_iter = 1
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 1
+
+[custom.meta]
+k_shot                = 2
+q_query               = 2
+windows_per_demo      = 2
+max_samples_per_batch = 4
+num_workers           = 2
+include_lora          = true
+include_time_embedder = true
+inner_steps           = 2
+inner_lr              = 3.0e-4
+inner_optimizer       = "adam"    # same inner optimizer / code path as the real recipe
+meta_lr_warmup_iters  = 1
+eval_zero_shot_every  = 1
+seed                  = 42
+
+[custom.meta.dataset_kwargs.molmoact2_yam]
+max_repos = 2

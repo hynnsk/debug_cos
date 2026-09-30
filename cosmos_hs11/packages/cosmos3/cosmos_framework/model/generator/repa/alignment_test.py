@@ -179,3 +179,50 @@ def test_batched_teacher_tensor_matches_list_input():
     out_batched = head(hidden, shapes, nfi, torch.stack(teacher, dim=0))
     torch.testing.assert_close(out_list["target"], out_batched["target"])
     torch.testing.assert_close(out_list["pred"], out_batched["pred"])
+
+
+@pytest.mark.parametrize("variant", ["avgpool", "avgpool_conv"])
+def test_target_subgrid_predicts_sub_cells_per_token(variant):
+    """target_subgrid_thw=(1,2,2) (hs11 v5): each MoT token predicts a 2x2 block of the 4x10x10-per-view teacher grid."""
+    from cosmos_framework.model.generator.repa.adapters import adaptive_pool_teacher_grid
+
+    S = 4
+    head = RepaAlignmentHead(
+        hidden_size=D_MOT, teacher_embed_dim=D_T, projector_hidden_dim=32, target_adapter=variant,
+        teacher_grid_thw=TEACHER_GRID, target_grid_thw=(4, 5, 5), num_views=2, target_subgrid_thw=(1, 2, 2),
+    )
+    head.reset_parameters()
+    assert head.num_subcells == S
+    hidden, shapes, nfi, teacher = _inputs()
+    out = head(hidden, shapes, nfi, teacher)
+    n = 3 * 4 * 5 * 10
+    assert out["pred"].shape == (n * S, D_T) and out["target"].shape == (n * S, D_T)
+    assert out["num_tokens_per_sample"] == [200 * S] * 3
+    rows = torch.cat([g.index_select(0, i).reshape(-1, D_MOT) for g, i in zip(hidden.view(3, 5, 5, 10, D_MOT), nfi)])
+    torch.testing.assert_close(out["pred"], head.projector(rows).reshape(-1, D_T))
+    t, h, w = 4, 5, 10
+    tgt = out["target"].view(3, t, h, w, S, D_T)
+    pooled = [adaptive_pool_teacher_grid(tt.permute(0, 4, 1, 2, 3), (4, 10, 10)).permute(0, 2, 3, 4, 1) for tt in teacher]
+    for s_i, (ti, hi, wi) in ((0, (1, 2, 7)), (2, (3, 4, 0)), (1, (0, 0, 9))):
+        view, wl = divmod(wi, 5)
+        for dh in range(2):
+            for dw in range(2):
+                torch.testing.assert_close(
+                    tgt[s_i, ti, hi, wi, dh * 2 + dw], pooled[s_i][view, ti, 2 * hi + dh, 2 * wl + dw], atol=1e-5, rtol=1e-4
+                )
+    loss, _ = repa_cosine_loss(out["pred"], out["target"])
+    loss.backward()
+    assert hidden.grad is not None and torch.isfinite(hidden.grad).all()
+    assert all(p.grad is not None for p in head.projector.parameters())
+    probe = head.probe(hidden.device, hidden.dtype)
+    assert probe.requires_grad and float(probe) == 0.0
+
+
+def test_target_subgrid_is_validated():
+    with pytest.raises(ValueError, match="exceeds the teacher grid"):
+        RepaAlignmentHead(
+            hidden_size=D_MOT, teacher_embed_dim=D_T, teacher_grid_thw=TEACHER_GRID, target_grid_thw=(4, 5, 5),
+            target_subgrid_thw=(3, 1, 1),
+        )
+    with pytest.raises(ValueError, match="three positive ints"):
+        RepaAlignmentHead(hidden_size=D_MOT, teacher_embed_dim=D_T, target_subgrid_thw=(1, 0, 1))

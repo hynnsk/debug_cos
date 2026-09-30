@@ -369,6 +369,10 @@ class RepaTomlConfig(BaseModel):
     target_grid_thw: Optional[list[int]] = Field(
         default=None, description="Variant 3 per-view target grid [T, H, W]; LIBERO-10 concat_view = [4, 5, 5]."
     )
+    target_subgrid_thw: Optional[list[int]] = Field(
+        default=None,
+        description="Teacher cells predicted per MoT token [st, sh, sw]; [1, 1, 1] = one pooled cell (default), [1, 2, 2] = 2x2 spatial sub-cells (v5, less pooling).",
+    )
     projector_type: Optional[str] = Field(
         default=None,
         description="Student-side projector: 'mlp' (REPA 3-layer SiLU MLP, default) or 'linear' (one Linear).",

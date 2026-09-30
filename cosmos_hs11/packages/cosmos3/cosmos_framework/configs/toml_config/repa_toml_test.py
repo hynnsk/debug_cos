@@ -45,6 +45,7 @@ def test_two_recipes_exist() -> None:
     assert {
         "action_policy_libero_10_edge_reptileinit_repa_dinov2",
         "action_policy_libero_10_edge_reptileinit_repa_dinov2_v3",
+        "action_policy_libero_10_edge_reptileinit_repa_dinov2_v5",
         "action_policy_libero_10_edge_reptileinit_masked_jepa",
     } <= stems
 
@@ -91,8 +92,15 @@ def test_repa_reptileinit_tomls_validate_and_route(toml_path: Path) -> None:
         assert (repa_raw["teacher"], repa_raw["loss_weight"], repa_raw["layer_index"]) == ("dinov2_vitb14", 5.0, 8)
         assert repa_raw["loss_weight_warmup_steps"] == 200
         assert "model.config.repa.loss_weight_warmup_steps=200" in overrides
+    elif not toml_path.stem.endswith("_repa_dinov2_v4"):  # v4 (user variant) also ramps; the others keep the constant weight
+        assert repa_raw.get("loss_weight_warmup_steps", 0) == 0
+    if toml_path.stem.endswith("_repa_dinov2_v5"):
+        # v5 = v2 (DINOv2-B, block 24, w 5.0) + less pooling: 2x2 teacher sub-cells per MoT token
+        assert (repa_raw["teacher"], repa_raw["layer_index"], repa_raw["loss_weight"]) == ("dinov2_vitb14", 24, 5.0)
+        assert repa_raw["target_subgrid_thw"] == [1, 2, 2]
+        assert "model.config.repa.target_subgrid_thw=[1,2,2]" in overrides
     else:
-        assert repa_raw.get("loss_weight_warmup_steps", 0) == 0  # every other recipe keeps the constant weight
+        assert "target_subgrid_thw" not in repa_raw
     if toml_path.stem.endswith("_masked_jepa"):
         assert repa_raw["objective"] == "masked_prediction"
         assert (repa_raw["teacher"], repa_raw["teacher_input_size"], repa_raw["target_adapter"]) == (
@@ -130,6 +138,12 @@ def test_repa_and_sigreg_model_configs_validate() -> None:
     )
     assert RepaConfig(projector_type="linear").projector_type == "linear"
     assert RepaConfig().loss_weight_warmup_steps == 0  # constant weight unless a recipe opts in (v3)
+    assert tuple(RepaConfig().target_subgrid_thw) == (1, 1, 1)
+    from cosmos_framework.model.generator.repa.masked_prediction import validate_masked_prediction_config
+
+    with pytest.raises(ValueError, match="target_subgrid_thw"):
+        validate_masked_prediction_config(RepaConfig(objective="masked_prediction", target_subgrid_thw=(1, 2, 2)))
+    validate_masked_prediction_config(RepaConfig(objective="masked_prediction"))  # default sub-grid is fine
     with pytest.raises(ValueError):
         RepaConfig(projector_type="conv")
     sig = SigRegConfig()  # the hs10 2026-09-22 SIGReg (input / normalize_by_count) is the version carried here
@@ -152,3 +166,48 @@ def test_vlm_task_skips_repa_block() -> None:
 def test_unknown_repa_key_is_rejected() -> None:
     with pytest.raises(Exception):
         SFTExperimentConfig.model_validate({"model": {"repa": {"weight": 0.5}}})
+
+
+_NANO_REPTILE_TOMLS = sorted(_TOML_DIR.glob("action_policy_libero_10_nano_reptileinit*.toml"))
+
+
+@pytest.mark.parametrize("toml_path", _NANO_REPTILE_TOMLS, ids=[p.stem for p in _NANO_REPTILE_TOMLS])
+def test_nano_reptileinit_tomls_validate_and_route(toml_path: Path) -> None:
+    """Nano Reptile-init recipes: plain -> action_policy_libero_nano; v2 -> action_policy_libero_nano_repa + DINOv2-L on block 36."""
+    raw = tomllib.load(open(toml_path, "rb"))
+    SFTExperimentConfig.model_validate(raw)
+    overrides = build_hydra_overrides(raw)
+    ckpt = raw["checkpoint"]
+    assert ckpt["load_path"] == "${oc.env:REPTILE_CKPT_PATH}" and ckpt["meta_action_init_domain_id"] == 5
+    assert {"net_ema.", "action2llm", "llm2action", "action_modality_embed", "action_pos_embed"} <= set(ckpt["keys_to_skip_loading"])
+    assert raw["model"]["compile"]["enabled"] is False  # Ampere smem limit (see docs)
+    if "repa" in raw["model"]:
+        repa_raw = raw["model"]["repa"]
+        assert "experiment=action_policy_libero_nano_repa" in overrides
+        assert "repa_" in ckpt["keys_to_skip_loading"]
+        assert (repa_raw["teacher"], repa_raw["teacher_input_size"], repa_raw["layer_index"]) == ("dinov2_vitl14", 224, 36)
+        assert repa_raw["loss_weight"] > 0 and repa_raw.get("objective", "token") == "token"  # v2/v3/v4 = weight sweep
+        assert "model.config.repa.layer_index=36" in overrides and "model.config.repa.teacher=dinov2_vitl14" in overrides
+        if toml_path.stem.endswith("_v5"):  # v5 = v2 + less pooling (2x2 teacher sub-cells per MoT token)
+            assert repa_raw["target_subgrid_thw"] == [1, 2, 2]
+            assert "model.config.repa.target_subgrid_thw=[1,2,2]" in overrides
+        else:
+            assert "target_subgrid_thw" not in repa_raw
+    else:
+        assert "experiment=action_policy_libero_nano" in overrides
+        assert not any(o.startswith("model.config.repa") for o in overrides)
+
+
+def test_nano_repa_experiment_is_registered() -> None:
+    import cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_libero_nano_repa as m
+
+    cfg = m.action_policy_libero_nano_repa
+    assert "repa_" in cfg["optimizer"]["keys_to_select"] and "repa_" in cfg["checkpoint"]["keys_to_skip_loading"]
+    repa = cfg["model"]["config"]["repa"]
+    assert repa["enabled"] is True and repa["teacher"] == "vjepa2_1_vit_large_384" and repa["layer_index"] == 10
+    # every default key must exist on the hs11 RepaConfig (which the TOML overrides land on)
+    from cosmos_framework.configs.base.defaults.model_config import RepaConfig
+    import attrs
+
+    assert set(repa) <= {f.name for f in attrs.fields(RepaConfig)}, set(repa) - {f.name for f in attrs.fields(RepaConfig)}
+    RepaConfig(**repa)

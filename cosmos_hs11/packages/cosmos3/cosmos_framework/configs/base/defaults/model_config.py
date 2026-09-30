@@ -207,6 +207,14 @@ class RepaConfig:
     # LIBERO-10 concat_view: 17 frames -> 5 latent frames (4 predicted); 256x512 -> 192x320 canvas with a 160-px
     # content height -> 5x10 tokens after the padding crop, i.e. 5x5 per view.
     target_grid_thw: tuple[int, int, int] = (4, 5, 5)
+    # "Less pooling" (cosmos_hs10 v13/v14, hs11 v5): teacher cells predicted per MoT token along (t, h, w). (1,1,1) = one
+    # pooled teacher cell per token. (1,2,2) adapts each view to 4x10x10 instead of 4x5x5 and every MoT token predicts
+    # its 2x2 spatial sub-cells with one S*D_t-wide projector output (S = 4); rows become [N*S, D_t] for every objective.
+    # Measured on LIBERO-10 val (hs10, 2026-09-29): averaging ~20 teacher tokens into one cell removes most of the
+    # token-specific signal (energy left after per-frame spatial centering, DINOv2-B: 0.61 at 4x5x10 -> 0.68 at 4x10x20;
+    # shared-direction energy 0.30 -> 0.25); temporal refinement adds almost nothing. Not supported with
+    # objective="masked_prediction" (its pixel mask is per MoT token).
+    target_subgrid_thw: tuple[int, int, int] = (1, 1, 1)
     # Student-side projector: "mlp" = REPA's Linear-SiLU-Linear-SiLU-Linear (default), "linear" = one
     # Linear(hidden_size, D_t) so h_k itself has to become an affine image of the teacher features (v4 recipe).
     projector_type: str = attrs.field(default="mlp", validator=attrs.validators.in_({"mlp", "linear"}))

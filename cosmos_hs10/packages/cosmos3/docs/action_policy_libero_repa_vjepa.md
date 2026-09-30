@@ -283,7 +283,7 @@ DINOv2-L is not less "shared" than DINOv2-B. Under centered objectives a per-pos
 ~0.6 for every teacher (LIBERO scenes are alike), so a centered cosine of 0.6 is the layout shortcut, not sample content.
 
 Recipes (`examples/toml/sft_config/`, launchers `launch_sft_action_policy_libero_10_edge_repa_v1{2,3,4}.sh`, ports
-50028 / 50029 / 50041):
+50046 / 50047 / 50041):
 
 | recipe | teacher | objective | `target_subgrid_thw` | rows |
 | --- | --- | --- | --- | --- |

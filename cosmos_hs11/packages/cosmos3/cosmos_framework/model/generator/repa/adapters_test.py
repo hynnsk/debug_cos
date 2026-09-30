@@ -295,3 +295,33 @@ def test_centered_cosine_loss_ignores_shared_direction_and_has_grad():
     perfect = 2.5 * dev + 3.0
     loss, cos = repa_centered_cosine_loss(perfect, target)
     assert loss.item() < 1e-4 and cos.item() > 0.999
+
+
+def test_concat_views_along_width_subgrid_layout():
+    from cosmos_framework.model.generator.repa.adapters import concat_views_along_width, concat_views_along_width_subgrid
+
+    g = torch.Generator().manual_seed(3)
+    b, v, d, t, h, wv = 2, 2, 3, 4, 5, 5
+    y = torch.randn(b * v, d, t, h, wv, generator=g)
+    torch.testing.assert_close(
+        concat_views_along_width_subgrid(y, v, (1, 1, 1)).squeeze(-2), concat_views_along_width(y, v)
+    )
+    st, sh, sw = 1, 2, 2
+    yy = torch.randn(b * v, d, t * st, h * sh, wv * sw, generator=g)
+    out = concat_views_along_width_subgrid(yy, v, (st, sh, sw))
+    assert out.shape == (b, t, h, v * wv, st * sh * sw, d)
+    for bi, vi, tt, hh, ww, dh, dw in [(0, 0, 1, 2, 3, 0, 1), (1, 1, 3, 4, 0, 1, 1), (1, 0, 0, 0, 4, 1, 0)]:
+        torch.testing.assert_close(
+            out[bi, tt, hh, vi * wv + ww, dh * sw + dw], yy[bi * v + vi, :, tt, hh * sh + dh, ww * sw + dw]
+        )
+    with pytest.raises(ValueError):
+        concat_views_along_width_subgrid(yy, v, (1, 3, 2))
+
+
+def test_relation_loss_per_sample_fallback_matches_batched(monkeypatch):
+    import cosmos_framework.model.generator.repa.adapters as ad
+
+    pred, target, counts = _relation_inputs(counts=(9, 9, 9), d=5, seed=7)
+    batched = ad.repa_relation_loss(pred, target, counts)
+    monkeypatch.setattr(ad, "RELATION_BATCHED_MAX_ENTRIES", 10)  # force the per-sample path
+    torch.testing.assert_close(batched, ad.repa_relation_loss(pred, target, counts))
