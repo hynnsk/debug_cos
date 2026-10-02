@@ -234,3 +234,19 @@ without autograd and falls back to a per-sample loop for large maps). Not suppor
 4x10x10; V-JEPA-L block 23: 0.62 -> 0.53 / 0.33 -> 0.42), while temporal refinement changes nothing (0.33 -> 0.34).
 Recipe: `action_policy_libero_10_edge_reptileinit_repa_dinov2_v5.toml` = v2 + `[1, 2, 2]` (launcher `..._v5.sh`, port
 50048). CPU-tested (alignment / adapter / TOML tests) and dry-run; not GPU-smoked.
+
+## 10. Noise-level gate: `sigma_min` / `sigma_max` (hs11 v6 / v7)
+
+`[model.repa].sigma_min` / `sigma_max` (defaults 0 / 1) restrict the distillation to the samples whose flow-matching
+noise level `sigma = timestep / num_train_timesteps` (0 = clean latent, 1 = pure noise; one continuous value per clip)
+lies in the window. Per step the REPA rows of the other samples are dropped before the objective (cosine or any other
+`objective`, and the relation term); the loss is the mean over the kept samples, so its scale is independent of the
+kept fraction (`repa_sigma_frac`, logged train + val). With no sample inside the window the terms are multiplied by 0.
+`repa_cos_sim` / `repa_cos_sim_centered` are always computed over all samples so the curves stay comparable. Rationale:
+the denoising path resolves low-frequency structure at high sigma and high-frequency detail at low sigma, so gating
+asks in which regime the semantic DINOv2 target helps. Recipes on the Reptile init: `..._reptileinit_repa_dinov2_v6.toml`
+(`sigma_max = 0.5`, low-noise half, launcher `_v6.sh`, port 50055) and `_v7.toml` (`sigma_min = 0.5`, high-noise half,
+`_v7.sh`, port 50056), everything else = v2. Caveat: the training sigma distribution (`waver`, shift 3 at 256 px) is
+skewed to high noise, so `sigma <= 0.5` keeps well under half of the samples; read `repa_sigma_frac` before comparing.
+Implementation: `adapters.repa_sample_sigmas` / `select_repa_samples`, used in `OmniMoTModel._compute_losses`;
+the gate requires one clip per sample (raises otherwise). Not GPU-smoked; CPU tests + dry-runs.

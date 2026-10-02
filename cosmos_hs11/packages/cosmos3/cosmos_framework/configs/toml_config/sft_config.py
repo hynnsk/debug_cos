@@ -309,6 +309,14 @@ class RepaTomlConfig(BaseModel):
         default=None,
         description="Weight of the unweighted cosine loss (1 - cos) in the total loss. Recipe default 0.5.",
     )
+    sigma_min: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0,
+        description="Apply the REPA terms only to samples with vision noise level sigma >= sigma_min (0 = clean). Default 0.",
+    )
+    sigma_max: Optional[float] = Field(
+        default=None, ge=0.0, le=1.0,
+        description="Apply the REPA terms only to samples with vision noise level sigma <= sigma_max (1 = pure noise). Default 1.",
+    )
     loss_weight_warmup_steps: Optional[int] = Field(
         default=None,
         ge=0,

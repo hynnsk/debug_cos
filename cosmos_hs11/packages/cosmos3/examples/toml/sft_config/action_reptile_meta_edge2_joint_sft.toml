@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# cosmos_hs11 -- ABLATION CONTROL for action_reptile_meta_edge2.toml: ORDINARY multi-task SFT on the SAME 5 source
+# embodiments, same data pipeline, same trainable set, same optimizer -- no meta-learning.
+#
+#     MT checkpoint -> ordinary source SFT (this TOML) -> low-shot LIBERO (action_policy_libero_10_edge_sftinit.toml)
+#  vs MT checkpoint -> Reptile (edge2)                 -> low-shot LIBERO (action_policy_libero_10_edge_reptileinit.toml)
+#
+# How it is "just gradient descent": the Reptile trainer is run with inner_steps = 1, meta_lr (eps) = 1.0 fixed, and
+# the inner Adam state KEPT across iterations (inner_reset_optimizer = false, no per-episode LR ramp). Then every
+# iteration is one FusedAdam step on 256 windows from theta and theta <- theta_tilde exactly, i.e. plain Adam training
+# at the downstream LR (5e-5, wd 0.05, clip 1.0, constant LR) on a stream of source batches -- the Reptile paper's
+# k = 1 case == joint training. Nothing else changes: experiment, theta = full-FT trainable set (moe_gen, time_embedder,
+# vae2llm, llm2vae, k_norm_und_for_gen, heads), episode sampler (embodiment drawn UNIFORMLY from the 5 datasets each
+# iteration; 16 random demonstrations x 16 random windows = 256 windows; all heads routed to scratch row 31), FSDP
+# shard 2 x 128 windows/rank = global batch 256, 1000 iterations, DCP + meta_action_init .pt export. The downstream
+# recipe therefore consumes it exactly like a Reptile checkpoint (REPTILE_CKPT_PATH / META_ACTION_INIT_PATH).
+# Each 256-window batch comes from ONE embodiment (balanced across embodiments over iterations, ~200 each); mixing the
+# five datasets inside one batch would need the standard trainer and would lose the shared head row 31.
+#
+# Compute vs data: edge2 takes 10 Adam steps per iteration on each 256-window episode (1000 iters = 10,000 steps over
+# 1000 episodes); this control takes 1 step per iteration (1000 steps over the SAME 1000 episodes = data-matched,
+# 10x fewer gradient steps, ~10x less GPU time). For a step/compute-matched control set trainer.max_iter = 10000
+# (10x the data, same number of Adam steps). Both arms are worth reporting; the data-matched one is this file.
+# Diagnostics: with k = 1 the "adapted" query loss is the loss after one Adam step; query_loss_zero_shot is the
+# source-task loss at theta (every 5 iterations, no effect on training).
+# Launch (2 GPUs): NPROC_PER_NODE=2 sr 2 48 examples/launch_source_sft_edge2_joint.sh
+# Output: <IMAGINAIRE_OUTPUT_ROOT>/cosmos3_action_meta/reptile_meta_ablation/<name>/checkpoints/iter_XXXXXXXXX (DCP)
+#         + meta_action_init[_iter_XXXXXX].pt (shared heads, scratch row 31 -> LIBERO row 5 downstream).
+# Env: ROBOT_FEWSHOT_ROOT, BASE_CHECKPOINT_PATH, WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT. See docs/action_reptile_meta.md.
+
+[job]
+task         = "vfm"
+experiment   = "action_reptile_meta_edge"
+project      = "cosmos3_action_meta"
+group        = "reptile_meta_ablation"
+name         = "edge_source_sft_joint_k16w16_bs256_1k_seed42"
+wandb_mode   = "online"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+lora_enabled = false          # full-parameter mode
+
+[model.parallelism]
+data_parallel_shard_degree     = 2    # 4-GPU run: NPROC_PER_NODE=4 sr 4 48 ...
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+# ---- INNER optimizer = the downstream full-FT optimizer (FusedAdam) ----------------------------------------------
+[optimizer]
+lr             = 5.0e-05      # downstream full-FT LR; the inner loop must resemble the post-training it prepares for
+weight_decay   = 0.05
+keys_to_select = ["moe_gen", "time_embedder", "vae2llm", "llm2vae", "k_norm_und_for_gen", "action2llm", "llm2action", "action_modality_embed"]
+
+[optimizer.lr_multipliers]
+action2llm            = 1.0   # heads are meta-learned across episodes, not fresh per episode -> no 5x boost
+llm2action            = 1.0
+action_modality_embed = 1.0
+
+[trainer]
+max_iter     = 1000           # meta-iterations. eps anneals to meta_lr * meta_lr_min_ratio AT max_iter -> change this, do not stop early
+logging_iter = 10
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 250               # DCP snapshot of theta (~24 GB each: 13.5 GB weights + Adam moments) + meta_action_init_iter_XXXXXX.pt
+keys_to_skip_loading = ["net_ema.", "action2llm", "llm2action", "action_modality_embed"]
+
+# ---- Reptile knobs (docs/action_reptile_meta.md) --------------------------------------------------------------------
+[custom.meta]
+theta_mode                  = "full"
+# episodic sampler: K support demos x w windows shared by all ranks (sharded), Q query demos for diagnostics only
+k_shot                = 16
+q_query               = 8
+windows_per_demo      = 16        # 8 x 16 = 128 support windows -> 32 per rank = one inner step = one pass over the support set
+max_samples_per_batch = 128        # per-rank windows per inner step
+disjoint_tasks        = false
+num_workers           = 8
+loader_timeout_s      = 1800
+seed                  = 42
+# inner loop: k standard optimizer steps from theta (~20 passes over the K demos, a miniature of the 3-demo post-training)
+inner_steps           = 1         # CONTROL: one Adam step per iteration (Reptile k = 1 == joint training)
+inner_warmup_steps    = 0         # CONTROL: no per-episode LR ramp (with k = 1 a ramp would scale the LR permanently)# linear LR ramp; Adam restarts from an empty state every episode
+inner_grad_clip       = 1.0
+inner_reset_optimizer = false     # CONTROL: keep the Adam moments across iterations = ordinary continuous training
+# outer loop: theta <- theta + eps * (theta_tilde - theta); eps 0.5 -> 0.05 linearly over max_iter
+meta_optimizer        = "sgd"
+meta_lr               = 1.0       # CONTROL: eps = 1 -> theta <- theta_tilde exactly (no interpolation)
+meta_lr_min_ratio     = 1.0       # CONTROL: eps stays 1.0 (no anneal)
+meta_lr_warmup_iters  = 0
+meta_batch_embodiments = 1        # >1 averages the displacement of several embodiments per meta step (x cost)
+loss_mode             = "total"   # the recipe's objective (10 x vision + 10 x action, EDGE_MODEL_CONFIG loss_scale / action_loss_weight) -- mimics post-training
+scratch_domain_id     = 31
+eval_query_every      = 5         # zero-shot vs adapted query loss (diagnostics; 2 extra forward passes)

@@ -325,3 +325,29 @@ def test_relation_loss_per_sample_fallback_matches_batched(monkeypatch):
     batched = ad.repa_relation_loss(pred, target, counts)
     monkeypatch.setattr(ad, "RELATION_BATCHED_MAX_ENTRIES", 10)  # force the per-sample path
     torch.testing.assert_close(batched, ad.repa_relation_loss(pred, target, counts))
+
+
+def test_repa_sample_sigmas_and_select_repa_samples():
+    from cosmos_framework.model.generator.repa.adapters import repa_sample_sigmas, select_repa_samples
+
+    # timesteps = sigma * 1000, one clip per sample, every latent frame shares the value
+    sig = torch.tensor([0.1, 0.6, 0.5, 0.9])
+    ts = (sig * 1000.0)[:, None].expand(4, 4)
+    torch.testing.assert_close(repa_sample_sigmas(ts, 4, 1000), sig)
+    with pytest.raises(ValueError, match="one vision item per REPA sample"):
+        repa_sample_sigmas(ts, 3, 1000)
+    counts = [3, 2, 4, 1]
+    pred = torch.arange(10.0).unsqueeze(-1).repeat(1, 2)
+    target = -pred
+    frames = [torch.tensor([1, 2, 3]), torch.tensor([1, 2]), torch.tensor([1, 2, 3, 4]), torch.tensor([4])]
+    keep = sig <= 0.5  # samples 0 and 2
+    p, tg, c, f = select_repa_samples(pred, target, counts, frames, keep)
+    assert c == [3, 4] and [x.tolist() for x in f] == [[1, 2, 3], [1, 2, 3, 4]]
+    torch.testing.assert_close(p[:, 0], torch.tensor([0.0, 1.0, 2.0, 5.0, 6.0, 7.0, 8.0]))
+    torch.testing.assert_close(tg, -p)
+    p0, t0, c0, f0 = select_repa_samples(pred, target, counts, frames, sig > 1.0)
+    assert p0.shape == (0, 2) and t0.shape == (0, 2) and c0 == [] and f0 == []
+    pa, _, ca, _ = select_repa_samples(pred, target, counts, frames, sig >= 0.0)
+    assert ca == counts and torch.equal(pa, pred)
+    with pytest.raises(ValueError):
+        select_repa_samples(pred, target, counts, frames, keep[:3])

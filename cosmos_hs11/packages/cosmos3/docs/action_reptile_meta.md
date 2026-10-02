@@ -92,6 +92,15 @@ Cost lever: `inner_steps` (linear), `windows_per_demo` (encode + inner), `eval_q
 
 ## 5. Controls and what to compare
 
+* **Ordinary source-SFT control of the edge2 run** (`action_reptile_meta_edge2_joint_sft.toml`, launcher
+  `launch_source_sft_edge2_joint.sh`, port 50054, 2 GPUs): the same ablation idea applied to the edge2 recipe -- identical
+  sampler (16 demos x 16 windows = 256 per iteration, embodiment uniform per iteration, shared head row 31), theta,
+  optimizer, shard 2 x 128, 1000 iterations; only `inner_steps=1, inner_warmup_steps=0, inner_reset_optimizer=false,
+  meta_lr=1.0, meta_lr_min_ratio=1.0`, so each iteration is one FusedAdam step and `theta <- theta_tilde` (Reptile k=1 ==
+  joint training). Data-matched to edge2 (same 1000 episodes) but 10x fewer Adam steps; `trainer.max_iter=10000` gives the
+  step-matched variant. Downstream: `action_policy_libero_10_edge_sftinit.toml` (= the reptileinit recipe with a distinct
+  name; REPTILE_CKPT_PATH / META_ACTION_INIT_PATH point at the control run). Compares "trunk+heads pretrained on the 5
+  sources by plain SFT" against "by Reptile" under the identical LIBERO recipe, isolating the meta-learning rule.
 * **Joint multi-task control** (`action_reptile_meta_edge_joint.toml`): `inner_steps=1, meta_lr=1.0,
   meta_lr_min_ratio=1.0, inner_reset_optimizer=false` -- with k=1 and eps=1 Reptile IS sequential multi-task
   training on the same data stream. Its checkpoint is "robot pretraining without meta-learning"; the meta
@@ -265,6 +274,10 @@ NPROC_PER_NODE=8 sr 8 48 examples/launch_sft_action_policy_libero_10_nano_reptil
 The few-shot Nano post-training experiment (`action_policy_libero_nano.py`) was taken from cosmos_hs08 (adds the fixed
 episode subset, `dataloader_val` and the val callback; all off by default, so the original full-data
 `action_policy_libero_10_nano.toml` is unchanged).
+
+**v6 / v7 (2026-10-02)** = v2 + noise-level gate: the DINOv2 term is applied only to samples with `sigma <= 0.5` (v6,
+low-noise / high-frequency half) or `sigma >= 0.5` (v7, high-noise / low-frequency half); `[model.repa].sigma_max` /
+`sigma_min`, launchers `..._repa_dinov2_v{6,7}.sh` (ports 50055 / 50056). See docs/action_policy_libero_repa_vjepa.md section 10.
 
 **Nano post-training + DINOv2 REPA (2026-09-30)**: `action_policy_libero_10_nano_reptileinit_v2.toml` (launcher
 `..._nano_reptileinit_v2.sh`, port 50050) = the plain Nano Reptile-init recipe + `[model.repa]` with the frozen DINOv2

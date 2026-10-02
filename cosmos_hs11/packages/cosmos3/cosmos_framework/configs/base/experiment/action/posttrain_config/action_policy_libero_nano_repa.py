@@ -69,6 +69,8 @@ def _action_policy_libero_nano_repa_model_config() -> dict:
         enabled=True,
         loss_weight=5.0,
         loss_weight_warmup_steps=0,  # hs11 v3-style linear ramp of the cosine weight; 0 = constant
+        sigma_min=0.0,  # noise-level gate (hs11 v6/v7): REPA only for samples with sigma in [sigma_min, sigma_max]
+        sigma_max=1.0,
         objective="token",  # "temporal_difference" (v8) | "spatial_normalized" (v10) | "masked_prediction" (hs12)
         # masked_prediction knobs (unused unless objective="masked_prediction")
         masked_ratio_min=0.4,
@@ -287,6 +289,7 @@ action_policy_libero_nano_repa = LazyDict(
                         "repa_loss",
                         "repa_weight",
                         "repa_weighted_loss",
+                        "repa_sigma_frac",
                         "repa_cos_sim",
                         "repa_rel_loss",
                         "repa_cos_sim_centered",

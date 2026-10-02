@@ -34,8 +34,9 @@ def _reptileinit_asserts(raw: dict, overrides: list[str]) -> None:
     assert ckpt["meta_action_init_include_lora"] is False and ckpt["meta_action_init_include_time_embedder"] is False
     assert raw["model"]["lora_enabled"] is False
     assert {"net_ema.", "action2llm", "llm2action", "action_modality_embed"} <= set(ckpt["keys_to_skip_loading"])
+    # heads are meta-initialized: 1.0 in the main recipes; the user's *_v2 arm re-tests the fresh-head 5x boost
     assert all(
-        raw["optimizer"]["lr_multipliers"][k] == 1.0 for k in ("action2llm", "llm2action", "action_modality_embed")
+        raw["optimizer"]["lr_multipliers"][k] in (1.0, 5.0) for k in ("action2llm", "llm2action", "action_modality_embed")
     )
     assert "checkpoint.meta_action_init_domain_id=5" in overrides
 
@@ -71,6 +72,8 @@ def test_repa_reptileinit_tomls_validate_and_route(toml_path: Path) -> None:
         "center_targets",
         "teacher_batch_size",
         "loss_weight_warmup_steps",
+        "sigma_min",
+        "sigma_max",
         *_MASKED_KEYS,
     ):
         got = [o for o in overrides if o.startswith(f"model.config.repa.{key}=")]
@@ -94,6 +97,21 @@ def test_repa_reptileinit_tomls_validate_and_route(toml_path: Path) -> None:
         assert "model.config.repa.loss_weight_warmup_steps=200" in overrides
     elif not toml_path.stem.endswith("_repa_dinov2_v4"):  # v4 (user variant) also ramps; the others keep the constant weight
         assert repa_raw.get("loss_weight_warmup_steps", 0) == 0
+    # v6 / v7 = v2 + noise-level gate (sigma <= 0.5 / sigma >= 0.5); nothing else may change
+    if toml_path.stem.endswith(("_repa_dinov2_v6", "_repa_dinov2_v7")):
+        v2 = tomllib.load(open(_TOML_DIR / "action_policy_libero_10_edge_reptileinit_repa_dinov2_v2.toml", "rb"))
+        gate = {"sigma_max": 0.5} if toml_path.stem.endswith("_v6") else {"sigma_min": 0.5}
+        assert {k: v for k, v in repa_raw.items() if k not in gate} == v2["model"]["repa"]
+        assert all(repa_raw[k] == v for k, v in gate.items())
+        for section in ("model", "optimizer", "trainer", "checkpoint", "dataloader_train", "dataloader_val"):
+            if section == "model":
+                assert {k: v for k, v in raw[section].items() if k != "repa"} == {k: v for k, v in v2[section].items() if k != "repa"}
+            else:
+                assert raw[section] == v2[section], section
+        key, val = next(iter(gate.items()))
+        assert f"model.config.repa.{key}={val}" in overrides
+    else:
+        assert "sigma_min" not in repa_raw and "sigma_max" not in repa_raw
     if toml_path.stem.endswith("_repa_dinov2_v5"):
         # v5 = v2 (DINOv2-B, block 24, w 5.0) + less pooling: 2x2 teacher sub-cells per MoT token
         assert (repa_raw["teacher"], repa_raw["layer_index"], repa_raw["loss_weight"]) == ("dinov2_vitb14", 24, 5.0)
@@ -139,6 +157,10 @@ def test_repa_and_sigreg_model_configs_validate() -> None:
     assert RepaConfig(projector_type="linear").projector_type == "linear"
     assert RepaConfig().loss_weight_warmup_steps == 0  # constant weight unless a recipe opts in (v3)
     assert tuple(RepaConfig().target_subgrid_thw) == (1, 1, 1)
+    assert (RepaConfig().sigma_min, RepaConfig().sigma_max) == (0.0, 1.0)
+    assert RepaConfig(sigma_max=0.5).sigma_max == 0.5 and RepaConfig(sigma_min=0.5).sigma_min == 0.5
+    with pytest.raises(ValueError):
+        RepaConfig(sigma_max=1.5)
     from cosmos_framework.model.generator.repa.masked_prediction import validate_masked_prediction_config
 
     with pytest.raises(ValueError, match="target_subgrid_thw"):

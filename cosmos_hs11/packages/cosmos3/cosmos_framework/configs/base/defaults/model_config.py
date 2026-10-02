@@ -150,6 +150,15 @@ class RepaConfig:
     # (0 at iteration 0), so a fresh REPA head does not dominate the first updates of a meta-initialized model
     # (cosmos_hs11 v3 recipe: 200). 0 = constant weight (default). The relation term is never ramped.
     loss_weight_warmup_steps: int = 0
+    # Noise-level gate (cosmos_hs11 v6/v7): the distillation terms (cosine + relation) are applied only to the samples
+    # whose vision noise level sigma = timestep / num_train_timesteps lies in [sigma_min, sigma_max] (0 = clean latent,
+    # 1 = pure noise; the whole clip shares one sigma). Low sigma = the late, high-frequency part of the denoising path,
+    # high sigma = the early, low-frequency part. Defaults (0, 1) = every sample, bit-identical to the old behaviour.
+    # The logged repa_cos_sim / repa_cos_sim_centered always cover ALL samples; repa_sigma_frac logs the kept fraction.
+    # NOTE: the training sigma distribution (waver, shift 3 at 256 px) is skewed towards high noise, so sigma_max = 0.5
+    # keeps well under half of the samples per step; check repa_sigma_frac.
+    sigma_min: float = attrs.field(default=0.0, validator=[attrs.validators.ge(0.0), attrs.validators.le(1.0)])
+    sigma_max: float = attrs.field(default=1.0, validator=[attrs.validators.ge(0.0), attrs.validators.le(1.0)])
     # Which token-level signal is aligned by the cosine term:
     #   token                -- the original absolute projected feature;
     #   temporal_difference  -- same-patch P(h[t+1]) - P(h[t]) transitions;

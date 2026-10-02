@@ -68,7 +68,9 @@ from cosmos_framework.model.generator.repa.adapters import (
     repa_centered_cosine_loss,
     repa_cosine_loss,
     repa_relation_loss,
+    repa_sample_sigmas,
     repa_spatial_normalized_cosine_loss,
+    select_repa_samples,
     repa_temporal_difference_cosine_loss,
 )
 from cosmos_framework.model.generator.repa.alignment import RepaTeacherTokens
@@ -2085,21 +2087,45 @@ class OmniMoTModel(ImaginaireModel):
                 repa_rel_loss = repa_loss
             else:
                 repa_target = out_net["repa_target"]
+                repa_counts = list(repa_counts)
+                repa_frames = repa_frames
+                repa_pred_all, repa_target_all = repa_pred, repa_target  # every aligned row (for the logged cosines)
+                repa_gate = 1.0
+                # cosmos_hs11 v6/v7: noise-level gate -- distill only the samples whose vision sigma (= timestep /
+                # num_train_timesteps, 0 clean .. 1 pure noise) lies in [sigma_min, sigma_max]. The objective below then
+                # runs on the selected samples' rows; with no sample in the window the full rows are used for the logs
+                # and the terms are multiplied by 0 (parameters stay in the graph).
+                sigma_lo = float(getattr(repa_cfg, "sigma_min", 0.0))
+                sigma_hi = float(getattr(repa_cfg, "sigma_max", 1.0))
+                if sigma_lo > 0.0 or sigma_hi < 1.0:
+                    if sigma_lo > sigma_hi:
+                        raise ValueError(f"repa.sigma_min={sigma_lo} > repa.sigma_max={sigma_hi}")
+                    sample_sigma = repa_sample_sigmas(
+                        timesteps, len(repa_counts), self.config.rectified_flow_inference_config.num_train_timesteps
+                    )
+                    keep = (sample_sigma >= sigma_lo) & (sample_sigma <= sigma_hi)
+                    losses_dict["repa_sigma_frac"] = keep.float().mean()
+                    if bool(keep.any()):
+                        repa_pred, repa_target, repa_counts, repa_frames = select_repa_samples(
+                            repa_pred, repa_target, repa_counts, repa_frames, keep
+                        )
+                    else:
+                        repa_gate = 0.0
                 objective = str(repa_cfg.objective)
                 if objective == "temporal_difference":
                     repa_loss, objective_cos = repa_temporal_difference_cosine_loss(
                         repa_pred,
                         repa_target,
-                        out_net["repa_num_tokens_per_sample"],
-                        out_net["repa_frame_indexes_per_sample"],
+                        repa_counts,
+                        repa_frames,
                     )
                     losses_dict["repa_cos_sim_transition"] = objective_cos
                 elif objective == "spatial_normalized":
                     repa_loss, objective_cos = repa_spatial_normalized_cosine_loss(
                         repa_pred,
                         repa_target,
-                        out_net["repa_num_tokens_per_sample"],
-                        out_net["repa_frame_indexes_per_sample"],
+                        repa_counts,
+                        repa_frames,
                         eps=float(repa_cfg.spatial_norm_eps),
                     )
                     losses_dict["repa_cos_sim_spatial_norm"] = objective_cos
@@ -2115,12 +2141,10 @@ class OmniMoTModel(ImaginaireModel):
                 else:
                     raise ValueError(f"Unknown REPA objective {objective!r}")
 
-                # The raw absolute-token cosine remains comparable across every variant. Specialized objective
-                # cosines above say what v8/v10 actually optimize.
-                if objective != "token" or repa_cfg.center_targets:
-                    _, repa_cos = repa_cosine_loss(repa_pred.detach(), repa_target)
-                if objective != "token":
-                    repa_cos_centered = centered_cosine_similarity(repa_pred, repa_target)
+                # The logged cosines always cover ALL aligned rows (also the samples outside a sigma window), so they
+                # stay comparable across recipes; the specialized objective cosines above say what the loss optimized.
+                _, repa_cos = repa_cosine_loss(repa_pred_all.detach(), repa_target_all)
+                repa_cos_centered = centered_cosine_similarity(repa_pred_all, repa_target_all)
                 losses_dict["repa_cos_sim"] = repa_cos
                 losses_dict["repa_cos_sim_centered"] = repa_cos_centered
                 # Weight 0 = monitor only: evaluate without building an autograd graph over the per-sample n_i x n_i
@@ -2129,9 +2153,12 @@ class OmniMoTModel(ImaginaireModel):
                     repa_rel_loss = repa_relation_loss(
                         repa_pred,
                         repa_target,
-                        out_net["repa_num_tokens_per_sample"],
+                        repa_counts,
                         distance=repa_cfg.relation_distance,
                     )
+                if repa_gate != 1.0:  # no sample inside [sigma_min, sigma_max] this step
+                    repa_loss = repa_loss * repa_gate
+                    repa_rel_loss = repa_rel_loss * repa_gate
             # Optional linear warmup of the cosine-term weight (``repa.loss_weight_warmup_steps`` > 0, cosmos_hs11 v3):
             # ``loss_weight * min(1, iteration / N)`` -- 0 at iteration 0, ``loss_weight`` from iteration N on (the same
             # ramp as the masked-JEPA branch). 0 (default) = the constant weight. ``getattr`` keeps configs pickled before

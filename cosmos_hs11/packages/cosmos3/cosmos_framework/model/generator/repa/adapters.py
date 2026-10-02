@@ -498,6 +498,51 @@ def concat_views_along_width(y: torch.Tensor, num_views: int) -> torch.Tensor:
     return y.reshape(b, t, h, num_views * wv, d)
 
 
+def repa_sample_sigmas(timesteps: torch.Tensor, num_samples: int, max_timestep: float) -> torch.Tensor:
+    """Per-REPA-sample noise level ``sigma`` in [0, 1] from the vision timesteps of the training step.
+
+    ``timesteps`` is ``[B_items, T]`` (or ``[B_items, 1]``), ``= sigma * max_timestep`` with one value per clip (all
+    latent frames share it outside diffusion forcing); the per-item mean over frames is used. The REPA rows are
+    sample-major in the same order as the vision items, which requires one clip per sample (LIBERO concat_view).
+    """
+    t = timesteps.detach().float().reshape(timesteps.shape[0], -1)
+    if t.shape[0] != int(num_samples):
+        raise ValueError(
+            f"REPA sigma gating needs one vision item per REPA sample: got {t.shape[0]} timestep rows for "
+            f"{num_samples} REPA samples (multi-clip batches are not supported)."
+        )
+    return (t.mean(dim=1) / float(max_timestep)).clamp_(0.0, 1.0)
+
+
+def select_repa_samples(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    num_tokens_per_sample: Sequence[int],
+    frame_indexes_per_sample: Sequence[torch.Tensor],
+    keep: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, list[int], list[torch.Tensor]]:
+    """Keep only the rows of the samples flagged in ``keep`` (bool ``[B]``); returns the sub-packed rows, counts and
+    frame indexes in the original sample order (so every REPA objective can be applied to the subset unchanged)."""
+    counts = [int(c) for c in num_tokens_per_sample]
+    if len(counts) != len(frame_indexes_per_sample) or len(counts) != int(keep.numel()):
+        raise ValueError(
+            f"select_repa_samples: {len(counts)} counts, {len(frame_indexes_per_sample)} frame-index sets, {int(keep.numel())} flags"
+        )
+    if sum(counts) != pred.shape[0] or pred.shape != target.shape:
+        raise ValueError("select_repa_samples: counts do not match the packed rows")
+    flags = [bool(k) for k in keep.detach().cpu().tolist()]
+    p_chunks, t_chunks = torch.split(pred, counts), torch.split(target, counts)
+    kept = [i for i, f in enumerate(flags) if f]
+    if not kept:
+        return pred[:0], target[:0], [], []
+    return (
+        torch.cat([p_chunks[i] for i in kept], dim=0),
+        torch.cat([t_chunks[i] for i in kept], dim=0),
+        [counts[i] for i in kept],
+        [frame_indexes_per_sample[i] for i in kept],
+    )
+
+
 def concat_views_along_width_subgrid(y: torch.Tensor, num_views: int, subgrid: Grid3) -> torch.Tensor:
     """``[B*V,D,T*st,H*sh,Wv*sw]`` (view-major batch) -> ``[B,T,H,V*Wv,S,D]`` with ``S = st*sh*sw``.
 
