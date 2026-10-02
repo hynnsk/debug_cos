@@ -1,16 +1,16 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
-# cosmos_hs11 v6 = v2 + NOISE-LEVEL GATE: distill only the LOW-noise half (sigma <= 0.5).
-# The flow-matching noise level sigma of a sample (0 = clean latent, 1 = pure noise; one value per clip, continuous) is
-# compared with [sigma_min, sigma_max] = [0.0, 0.5] and the DINOv2 cosine (and relation) term is applied ONLY to the
-# samples inside the window; the other samples of the step contribute no REPA gradient (their fm losses are unchanged).
-# Low sigma is the end of the denoising path (noise -> coarse layout is done; fine, high-frequency detail is being resolved).
-# repa_sigma_frac logs the kept fraction per step. NOTE: the training sigma distribution (waver, shift 3 at 256 px) is
-# skewed towards high noise, so the two halves of sigma do NOT hold equal numbers of samples -- compare v6 and v7 with
-# that fraction in mind (the loss is a mean over the kept samples, so its scale does not change with the fraction).
-# repa_cos_sim / repa_cos_sim_centered are still logged over ALL samples, so the curves stay comparable with v2.
-# Everything else = v2 (Reptile init, DINOv2 ViT-B/14 @224, MoT block 24, avgpool 4x5x5, loss weight 5.0, no ramp).
+# cosmos_hs11 v13 = v2 with the TOKEN cosine replaced by VideoREPA's Token Relation Distillation (TRD):
+#   R_t = normalize(DINOv2 tokens) normalize(DINOv2 tokens)^T,  R_s = normalize(MLP(h_24)) normalize(MLP(h_24))^T
+#   loss = mean( relu( |R_s - R_t| - 0.1 ) )                 (relation_distance = "l1", relation_margin = 0.1, weight 5.0)
+# Both maps are formed per window over ALL of its tokens -- 4 latent frames x 5x10 canvas = 200 tokens, i.e. spatial
+# pairs within a frame AND temporal pairs across the frames in one 200x200 map, exactly VideoREPA's
+# `token_relation_distillation` (its "only_spatial"/"only_temporal" variants just mask the diagonal / off-diagonal
+# blocks). The two camera views are treated as one wide frame (5x10 canvas), as agreed. The margin makes it a soft
+# constraint: a pair whose similarities differ by <= 0.1 contributes nothing. The token cosine is only logged
+# (loss_weight 0; repa_cos_sim / repa_cos_sim_centered stay comparable with v2), repa_rel_loss is the trained term.
+# Teacher grid as in v2 (DINOv2-B @224 pooled to 4x5x5 per view, MoT block 24); only the loss changes.
 #
 # cosmos_hs11 -- REPTILE INIT -> FULL fine-tune + DINOv2 REPA distillation (cosmos_hs10 v7 loss on the Reptile init).
 # = action_policy_libero_10_edge_reptileinit.toml + [model.repa] + "repa_" in keys_to_skip_loading (+ experiment/name):
@@ -41,7 +41,7 @@ task         = "vfm"
 experiment   = "action_policy_libero_edge_repa"
 project      = "cosmos3_action_libero"
 group        = "edge_libero10_fewshot"
-name         = "edge_libero10_3ep_fullft_reptileinit_dinov2b_l24_w5.0_sigma_0_0.5"
+name         = "edge_libero10_3ep_fullft_reptileinit_repa_dinov2b_l12_avgpool_w5.0_trd_l1_m0.1_w5.0"
 wandb_mode   = "offline"
 
 [model]
@@ -52,13 +52,15 @@ lora_enabled = false            # full mode: theta lives in the DCP weights them
 # ---- cosmos_hs10 v7: DINOv2 ViT-B/14 REPA distillation (hs10 default setting: block 8, avgpool, MLP projector, w 5.0)
 [model.repa]
 enabled            = true
-loss_weight        = 5.0                   # unweighted 1 - cos in [0, 2]; the fm terms are x10-scaled (see hs10 docs)
-layer_index        = 24                     # output of MoT block 8 (of 28); next candidate 14
+loss_weight        = 0.0                   # TRD recipes: the token cosine is OFF (logged only); the relation term below is the loss
+relation_loss_weight = 5.0                 # VideoREPA TRD weight (v2 used 5.0 for the token cosine)
+relation_distance  = "l1"                  # VideoREPA: absolute difference of the two similarity maps
+relation_margin    = 0.1                   # VideoREPA margin: |R_student - R_teacher| <= 0.1 is not penalized (soft constraint)
+layer_index        = 12                     # output of MoT block 8 (of 28); next candidate 14
 teacher            = "dinov2_vitb14"       # facebook/dinov2-base (D=768), per frame; V-JEPA 2.1 = "vjepa2_1_vit_base_384"
 teacher_input_size = 224                   # 16x16 patches of 14 px (REPA reference setting)
 target_adapter     = "avgpool"             # variant 1 (parameter-free) | "avgpool_conv" (2) | "strided_conv" (3)
 target_grid_thw    = [4, 5, 5]             # per-view MoT token grid (validated at runtime)
-sigma_max          = 0.5                   # v6: REPA only for sigma <= 0.5 (low noise, late / high-frequency denoising)
 
 [model.ema]
 enabled         = true

@@ -19,7 +19,7 @@ decoding, no cosmos imports, no torchcodec).
 
 ```bash
 bash utils/dinov2_pca_viz/run.sh                     # CPU: ~1-2 min for all 10 tasks (login node is fine)
-sr 1 48 utils/dinov2_pca_viz/run.sh                  # GPU node: seconds
+sr 1 24 utils/dinov2_pca_viz/run.sh                  # GPU node: seconds
 bash utils/dinov2_pca_viz/run.sh --help              # all options
 ```
 

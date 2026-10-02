@@ -96,6 +96,7 @@ class Cosmos3VFMNetworkConfig(PretrainedConfig):
         repa_target_grid_thw=(4, 5, 5),
         repa_num_views: int = 2,
         repa_target_subgrid_thw=(1, 1, 1),
+        repa_student_upsampler: str = "none",
         # SIGReg capture (no learnable head; only selects an intermediate visual-token residual stream).
         sigreg_enabled: bool = False,
         sigreg_layer_index: int = 8,
@@ -176,6 +177,7 @@ class Cosmos3VFMNetworkConfig(PretrainedConfig):
         self.repa_target_grid_thw = tuple(int(v) for v in repa_target_grid_thw)
         self.repa_num_views = int(repa_num_views)
         self.repa_target_subgrid_thw = tuple(int(v) for v in repa_target_subgrid_thw)  # teacher cells per MoT token
+        self.repa_student_upsampler = str(repa_student_upsampler)  # "none" | "trilinear" (full teacher grid, hs11 v12)
         if self.repa_enabled:
             assert self.vision_gen, "REPA aligns video tokens and therefore requires vision_gen=True"
 
@@ -321,6 +323,7 @@ class Cosmos3VFMNetwork(PreTrainedModel):
                 target_grid_thw=tuple(config.repa_target_grid_thw),
                 num_views=config.repa_num_views,
                 target_subgrid_thw=tuple(getattr(config, "repa_target_subgrid_thw", (1, 1, 1))),
+                student_upsampler=str(getattr(config, "repa_student_upsampler", "none")),
             )
 
         self.sigreg_enabled = bool(getattr(config, "sigreg_enabled", False))

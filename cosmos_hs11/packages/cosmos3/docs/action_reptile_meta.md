@@ -279,6 +279,14 @@ episode subset, `dataloader_val` and the val callback; all off by default, so th
 low-noise / high-frequency half) or `sigma >= 0.5` (v7, high-noise / low-frequency half); `[model.repa].sigma_max` /
 `sigma_min`, launchers `..._repa_dinov2_v{6,7}.sh` (ports 50055 / 50056). See docs/action_policy_libero_repa_vjepa.md section 10.
 
+**v10 / v11 / v12 (2026-10-02)** = v2 with the DINOv2 teacher at (near) native size: v10 `target_subgrid_thw=[4,3,3]` @224 px,
+v11 the same @210 px (exact, no pooling), v12 `student_upsampler="trilinear"` (student grid upsampled to the full 224 px
+grid). Micro-batch 64x2 / 64x2 / 32x4 for memory. See docs/action_policy_libero_repa_vjepa.md section 11.
+
+**v13 / v14 / v15 (2026-10-02)** = v2 / v10 / v12 with VideoREPA token-relation distillation instead of the token cosine
+(`loss_weight 0`, `relation_loss_weight 5.0`, l1, `relation_margin 0.1`; full spatial+temporal similarity map per window).
+Launchers `..._repa_dinov2_v1{3,4,5}.sh` (ports 50060-50062). See docs/action_policy_libero_repa_vjepa.md section 12.
+
 **Nano post-training + DINOv2 REPA (2026-09-30)**: `action_policy_libero_10_nano_reptileinit_v2.toml` (launcher
 `..._nano_reptileinit_v2.sh`, port 50050) = the plain Nano Reptile-init recipe + `[model.repa]` with the frozen DINOv2
 ViT-L/14 teacher (`dinov2_vitl14`, 224 px, D=1024) on the LAST MoT block (`layer_index = 36`), plain token cosine, weight

@@ -1,16 +1,17 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
-# cosmos_hs11 v6 = v2 + NOISE-LEVEL GATE: distill only the LOW-noise half (sigma <= 0.5).
-# The flow-matching noise level sigma of a sample (0 = clean latent, 1 = pure noise; one value per clip, continuous) is
-# compared with [sigma_min, sigma_max] = [0.0, 0.5] and the DINOv2 cosine (and relation) term is applied ONLY to the
-# samples inside the window; the other samples of the step contribute no REPA gradient (their fm losses are unchanged).
-# Low sigma is the end of the denoising path (noise -> coarse layout is done; fine, high-frequency detail is being resolved).
-# repa_sigma_frac logs the kept fraction per step. NOTE: the training sigma distribution (waver, shift 3 at 256 px) is
-# skewed towards high noise, so the two halves of sigma do NOT hold equal numbers of samples -- compare v6 and v7 with
-# that fraction in mind (the loss is a mean over the kept samples, so its scale does not change with the fraction).
-# repa_cos_sim / repa_cos_sim_centered are still logged over ALL samples, so the curves stay comparable with v2.
-# Everything else = v2 (Reptile init, DINOv2 ViT-B/14 @224, MoT block 24, avgpool 4x5x5, loss weight 5.0, no ramp).
+# cosmos_hs11 v10 = v2 + SUB-CELL PREDICTION at the teacher's native size, 224 px teacher (option A):
+# instead of pooling the DINOv2 tokens down to the MoT grid (16 frames x 16x16 -> 4 x 5x5 per view), every MoT token
+# predicts a block of `target_subgrid_thw = [4, 3, 3]` = 36 teacher cells with one 36 x 768-wide projector output
+# (projector 2048 -> 2048 -> 2048 -> 27648, ~57 M params): temporally the 4 DINOv2 frames of its latent frame (exact),
+# spatially a 3x3 block of a 15x15 grid. At 224 px the teacher grid is 16x16, so the adapter still pools 16 -> 15
+# (adaptive avgpool, overlapping 2-patch bins = a mild blur); v11 removes even that with a 210 px teacher. REPA rows per
+# window 7200 (36 x v2). Measured on LIBERO-10 val: shared-direction energy of the raw DINOv2-B grid 0.16 vs 0.30 pooled,
+# constant-prediction cos 0.40 vs 0.55, energy left after spatial centering 0.79 vs 0.61 -> much more to learn.
+# Memory: the fp32 cosine over 64 x 7200 x 768 rows adds ~7 GB per rank, so the per-rank micro-batch is 64 with
+# grad_accum_iter 2 (= the 2-GPU alternative noted in v2; global 256 per optimizer step, same as v2). On H200-class
+# GPUs set max_samples_per_batch = 128 / grad_accum_iter = 1 again. Everything else = v2.
 #
 # cosmos_hs11 -- REPTILE INIT -> FULL fine-tune + DINOv2 REPA distillation (cosmos_hs10 v7 loss on the Reptile init).
 # = action_policy_libero_10_edge_reptileinit.toml + [model.repa] + "repa_" in keys_to_skip_loading (+ experiment/name):
@@ -41,7 +42,7 @@ task         = "vfm"
 experiment   = "action_policy_libero_edge_repa"
 project      = "cosmos3_action_libero"
 group        = "edge_libero10_fewshot"
-name         = "edge_libero10_3ep_fullft_reptileinit_dinov2b_l24_w5.0_sigma_0_0.5"
+name         = "edge_libero10_3ep_fullft_reptileinit_repa_dinov2b_l24_avgpool_w5.0_subcell433_224px"
 wandb_mode   = "offline"
 
 [model]
@@ -58,7 +59,7 @@ teacher            = "dinov2_vitb14"       # facebook/dinov2-base (D=768), per f
 teacher_input_size = 224                   # 16x16 patches of 14 px (REPA reference setting)
 target_adapter     = "avgpool"             # variant 1 (parameter-free) | "avgpool_conv" (2) | "strided_conv" (3)
 target_grid_thw    = [4, 5, 5]             # per-view MoT token grid (validated at runtime)
-sigma_max          = 0.5                   # v6: REPA only for sigma <= 0.5 (low noise, late / high-frequency denoising)
+target_subgrid_thw = [4, 3, 3]             # v10: 4 frames x 3x3 teacher cells per MoT token (teacher grid 16x16x16 -> 16x15x15, mild 16->15 pooling)
 
 [model.ema]
 enabled         = true
@@ -91,7 +92,7 @@ warm_up_steps = [200]
 [trainer]
 max_iter        = 2000
 logging_iter    = 20
-grad_accum_iter = 1              # global 256 = 64 windows/rank x 4 ranks (2-GPU alternative: shard 2, bs 64, accum 2)
+grad_accum_iter = 1              # v10: 64 windows/rank x 2 ranks x 2 = global 256 per optimizer step (REPA rows are 36-41x v2; see header)
 # held-out validation
 run_validation          = true
 run_validation_on_start = true   # iteration 0 = the Reptile-initialized model before any update
@@ -99,7 +100,7 @@ validation_iter         = 200
 max_val_iter            = 16     # x 64 windows x 4 ranks = 4096 windows ~= half of the 50-episode val set (same windows every time)
 
 [dataloader_train]
-max_samples_per_batch = 128       # per rank; x 4 ranks = global batch 256
+max_samples_per_batch = 128        # v10: per rank per micro-batch; x 2 ranks x grad_accum_iter 2 = global 256
 episode_subset_path   = "libero_10_3ep_per_task_seed42.json"          # 3 demos/task x 10 tasks = 30 episodes
 
 [dataloader_val]

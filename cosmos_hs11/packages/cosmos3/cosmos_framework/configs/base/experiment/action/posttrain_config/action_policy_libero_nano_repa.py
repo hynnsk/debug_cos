@@ -82,6 +82,7 @@ def _action_policy_libero_nano_repa_model_config() -> dict:
         spatial_norm_eps=1.0e-6,
         relation_loss_weight=0.0,  # VideoREPA-style token-relation term; 0 = monitor only
         relation_distance="l2",
+        relation_margin=0.0,  # VideoREPA TRD margin; 0 = plain distance
         layer_index=10,  # output of MoT block 10 (of 36) ~= the Edge depth 8 of 28; the TOML may change it
         teacher="vjepa2_1_vit_large_384",  # ViT-L/16 (D=1024) for the Nano student; "dinov2_vitl14" = DINOv2 ViT-L/14
         teacher_checkpoint_path=None,  # $COSMOS_STORAGE/checkpoints/vjepa2_1/<release file> | HF cache for DINOv2
@@ -93,6 +94,7 @@ def _action_policy_libero_nano_repa_model_config() -> dict:
         target_adapter_depthwise=True,
         target_grid_thw=(4, 5, 5),  # per-view MoT token grid: 4 predicted latent frames x 5 x 5 (160-px content)
         target_subgrid_thw=(1, 1, 1),  # teacher cells per MoT token; (1, 2, 2) = less pooling (hs11 v5 / hs10 v13-v14)
+        student_upsampler="none",  # "trilinear" = upsample the student to the full teacher grid (hs11 v12)
         projector_type="mlp",  # REPA MLP (4096 -> 2048 -> 2048 -> D_t); "linear" = single Linear(4096, D_t)
         projector_hidden_dim=2048,
         num_views=2,  # third-person | wrist, concatenated along width

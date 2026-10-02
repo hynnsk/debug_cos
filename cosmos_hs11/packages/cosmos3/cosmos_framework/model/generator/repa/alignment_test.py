@@ -226,3 +226,56 @@ def test_target_subgrid_is_validated():
         )
     with pytest.raises(ValueError, match="three positive ints"):
         RepaAlignmentHead(hidden_size=D_MOT, teacher_embed_dim=D_T, target_subgrid_thw=(1, 0, 1))
+
+
+def test_student_upsampler_full_teacher_grid_rows_and_order():
+    """hs11 v12: teacher kept at the full grid, student upsampled per view (trilinear + identity conv) then projected."""
+    import torch.nn.functional as F
+    from cosmos_framework.model.generator.repa.adapters import concat_views_along_width
+
+    grid = (8, 6, 6)  # teacher: 8 frames (= 2 per latent frame), 6x6 patches per view (non-integer 5 -> 6)
+    head = RepaAlignmentHead(
+        hidden_size=D_MOT, teacher_embed_dim=D_T, projector_hidden_dim=32, projector_type="linear", target_adapter="avgpool",
+        teacher_grid_thw=grid, target_grid_thw=(4, 5, 5), num_views=2, student_upsampler="trilinear",
+    )
+    head.reset_parameters()
+    assert head.full_teacher_grid and head.num_subcells == 1 and head.projector.fc.out_features == D_T
+    g = torch.Generator().manual_seed(8)
+    t, h, w = TOKEN_SHAPE
+    hidden = torch.randn(2 * t * h * w, D_MOT, generator=g, requires_grad=True)
+    teacher = [torch.randn(2, *grid, D_T, generator=g) for _ in range(2)]
+    nfi = [torch.arange(1, t), torch.tensor([2, 4])]
+    out = head(hidden, [TOKEN_SHAPE] * 2, nfi, teacher)
+    rows_full = 8 * 6 * 12  # all 4 latent frames -> 8 teacher frames x 6 x (2 views x 6)
+    rows_half = 4 * 6 * 12  # latent frames 2 and 4 -> teacher frames 2,3 and 6,7
+    assert out["num_tokens_per_sample"] == [rows_full, rows_half]
+    assert out["pred"].shape == (rows_full + rows_half, D_T) and out["target"].shape == out["pred"].shape
+    # target rows = the UNPOOLED teacher grid, views side by side, frames (2,3,6,7) for sample 1
+    tgt1 = out["target"][rows_full:].view(4, 6, 12, D_T)
+    exp_frames = torch.tensor([2, 3, 6, 7])
+    torch.testing.assert_close(tgt1[:, :, :6], teacher[1][0].index_select(0, exp_frames))
+    torch.testing.assert_close(tgt1[:, :, 6:], teacher[1][1].index_select(0, exp_frames))
+    # prediction rows = linear projector of the trilinearly upsampled per-view MoT grid (identity conv at init)
+    grid0 = hidden.view(2, t, h, w, D_MOT)[0, 1:]  # [4, 5, 10, D]
+    views = grid0.view(4, h, 2, 5, D_MOT).permute(2, 4, 0, 1, 3)  # [V, D, 4, 5, 5]
+    up = F.interpolate(views, size=grid, mode="trilinear", align_corners=False)
+    exp = head.projector(concat_views_along_width(up, 2).reshape(-1, D_MOT))
+    torch.testing.assert_close(out["pred"][:rows_full], exp, atol=1e-5, rtol=1e-4)
+    loss, _ = repa_cosine_loss(out["pred"], out["target"])
+    loss.backward()
+    assert hidden.grad is not None and torch.isfinite(hidden.grad).all()
+    assert all(p.grad is not None for p in head.projector.parameters())
+    assert all(p.grad is not None for p in head.student_upsampler.parameters())
+    probe = head.probe(hidden.device, hidden.dtype)
+    assert probe.requires_grad and float(probe) == 0.0
+
+
+def test_student_upsampler_is_validated():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        RepaAlignmentHead(hidden_size=D_MOT, teacher_embed_dim=D_T, target_subgrid_thw=(1, 2, 2), student_upsampler="trilinear")
+    with pytest.raises(ValueError, match="avgpool"):
+        RepaAlignmentHead(hidden_size=D_MOT, teacher_embed_dim=D_T, target_adapter="strided_conv", student_upsampler="trilinear")
+    with pytest.raises(ValueError, match="multiple"):
+        RepaAlignmentHead(hidden_size=D_MOT, teacher_embed_dim=D_T, teacher_grid_thw=(6, 16, 16), student_upsampler="trilinear")
+    with pytest.raises(ValueError, match="student_upsampler must be"):
+        RepaAlignmentHead(hidden_size=D_MOT, teacher_embed_dim=D_T, student_upsampler="bicubic")

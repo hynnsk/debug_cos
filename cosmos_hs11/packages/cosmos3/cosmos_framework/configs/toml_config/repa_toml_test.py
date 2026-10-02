@@ -36,8 +36,8 @@ def _reptileinit_asserts(raw: dict, overrides: list[str]) -> None:
     assert {"net_ema.", "action2llm", "llm2action", "action_modality_embed"} <= set(ckpt["keys_to_skip_loading"])
     # heads are meta-initialized: 1.0 in the main recipes; the user's *_v2 arm re-tests the fresh-head 5x boost
     assert all(
-        raw["optimizer"]["lr_multipliers"][k] in (1.0, 5.0) for k in ("action2llm", "llm2action", "action_modality_embed")
-    )
+        raw["optimizer"]["lr_multipliers"][k] > 0 for k in ("action2llm", "llm2action", "action_modality_embed")
+    )  # 1.0 in the main recipes; the user's *_v2 / *_v3 arms scan the head boost
     assert "checkpoint.meta_action_init_domain_id=5" in overrides
 
 
@@ -97,6 +97,46 @@ def test_repa_reptileinit_tomls_validate_and_route(toml_path: Path) -> None:
         assert "model.config.repa.loss_weight_warmup_steps=200" in overrides
     elif not toml_path.stem.endswith("_repa_dinov2_v4"):  # v4 (user variant) also ramps; the others keep the constant weight
         assert repa_raw.get("loss_weight_warmup_steps", 0) == 0
+    # v13 / v14 / v15 = v2 / v10 / v12 with the token cosine replaced by VideoREPA TRD (l1, margin 0.1, weight 5.0)
+    if toml_path.stem.endswith(("_repa_dinov2_v13", "_repa_dinov2_v14", "_repa_dinov2_v15")):
+        base_stem = {"3": "v2", "4": "v10", "5": "v12"}[toml_path.stem[-1]]
+        base = tomllib.load(open(_TOML_DIR / f"action_policy_libero_10_edge_reptileinit_repa_dinov2_{base_stem}.toml", "rb"))
+        trd = {"loss_weight": 0.0, "relation_loss_weight": 5.0, "relation_distance": "l1", "relation_margin": 0.1}
+        assert {k: repa_raw[k] for k in trd} == trd
+        assert {k: v for k, v in repa_raw.items() if k not in trd} == {k: v for k, v in base["model"]["repa"].items() if k not in trd}
+        for section in ("optimizer", "trainer", "dataloader_train", "dataloader_val"):
+            assert raw[section] == base[section], section
+        assert {k: v for k, v in raw["checkpoint"].items() if k != "save_iter"} == {k: v for k, v in base["checkpoint"].items() if k != "save_iter"}
+        assert {k: v for k, v in raw["model"].items() if k != "repa"} == {k: v for k, v in base["model"].items() if k != "repa"}
+        assert "model.config.repa.relation_margin=0.1" in overrides and "model.config.repa.relation_loss_weight=5.0" in overrides
+    else:
+        assert "relation_margin" not in repa_raw
+    # v10 / v11 = v2 + 4x3x3 sub-cells (224 px / 210 px); v12 = v2 + student trilinear upsampler (full 224 px grid).
+    # Only the teacher-size knob and the 64x2 / 32x4 micro-batching (global 256 kept) may differ from v2.
+    v2 = tomllib.load(open(_TOML_DIR / "action_policy_libero_10_edge_reptileinit_repa_dinov2_v2.toml", "rb"))
+    if toml_path.stem.endswith(("_repa_dinov2_v10", "_repa_dinov2_v11", "_repa_dinov2_v12", "_repa_dinov2_v14", "_repa_dinov2_v15")):
+        if toml_path.stem.endswith(("_v12", "_v15")):
+            extra = {"student_upsampler": "trilinear"}
+            assert repa_raw["teacher_input_size"] == 224 and "target_subgrid_thw" not in repa_raw
+            assert "model.config.repa.student_upsampler=trilinear" in overrides
+        else:
+            extra = {"target_subgrid_thw": [4, 3, 3]}
+            assert repa_raw["teacher_input_size"] == (210 if toml_path.stem.endswith("_v11") else 224)
+            assert "model.config.repa.target_subgrid_thw=[4,3,3]" in overrides and "student_upsampler" not in repa_raw
+        if toml_path.stem.endswith(("_v14", "_v15")):  # TRD on top of the native-size student (v13 block checks the values)
+            extra = {**extra, "loss_weight": 0.0, "relation_loss_weight": 5.0, "relation_distance": "l1", "relation_margin": 0.1}
+        base_repa = {k: v for k, v in v2["model"]["repa"].items()}
+        got = {k: v for k, v in repa_raw.items() if k not in extra and k != "teacher_input_size"}
+        assert got == {k: v for k, v in base_repa.items() if k != "teacher_input_size" and k not in extra}
+        # micro-batch x accum x shard must still give the v2 global batch of 256 (the user tunes bs / accum / save_iter)
+        bs_, accum_ = raw["dataloader_train"]["max_samples_per_batch"], raw["trainer"]["grad_accum_iter"]
+        assert bs_ * accum_ * raw["model"]["parallelism"]["data_parallel_shard_degree"] == 256, (bs_, accum_)
+        for section in ("optimizer", "dataloader_val"):
+            assert raw[section] == v2[section], section
+        assert {k: v for k, v in raw["checkpoint"].items() if k != "save_iter"} == {k: v for k, v in v2["checkpoint"].items() if k != "save_iter"}
+        assert {k: v for k, v in raw["trainer"].items() if k != "grad_accum_iter"} == {k: v for k, v in v2["trainer"].items() if k != "grad_accum_iter"}
+    else:
+        assert "student_upsampler" not in repa_raw
     # v6 / v7 = v2 + noise-level gate (sigma <= 0.5 / sigma >= 0.5); nothing else may change
     if toml_path.stem.endswith(("_repa_dinov2_v6", "_repa_dinov2_v7")):
         v2 = tomllib.load(open(_TOML_DIR / "action_policy_libero_10_edge_reptileinit_repa_dinov2_v2.toml", "rb"))
@@ -106,18 +146,20 @@ def test_repa_reptileinit_tomls_validate_and_route(toml_path: Path) -> None:
         for section in ("model", "optimizer", "trainer", "checkpoint", "dataloader_train", "dataloader_val"):
             if section == "model":
                 assert {k: v for k, v in raw[section].items() if k != "repa"} == {k: v for k, v in v2[section].items() if k != "repa"}
+            elif section == "checkpoint":  # the user tunes save_iter per run
+                assert {k: v for k, v in raw[section].items() if k != "save_iter"} == {k: v for k, v in v2[section].items() if k != "save_iter"}
             else:
                 assert raw[section] == v2[section], section
         key, val = next(iter(gate.items()))
         assert f"model.config.repa.{key}={val}" in overrides
-    else:
-        assert "sigma_min" not in repa_raw and "sigma_max" not in repa_raw
+    elif toml_path.stem.endswith(("_repa_dinov2", "_repa_dinov2_v2", "_repa_dinov2_v3", "_repa_dinov2_v4", "_repa_dinov2_v5")):
+        assert "sigma_min" not in repa_raw and "sigma_max" not in repa_raw  # user variants (v8, v9, ...) may gate too
     if toml_path.stem.endswith("_repa_dinov2_v5"):
         # v5 = v2 (DINOv2-B, block 24, w 5.0) + less pooling: 2x2 teacher sub-cells per MoT token
         assert (repa_raw["teacher"], repa_raw["layer_index"], repa_raw["loss_weight"]) == ("dinov2_vitb14", 24, 5.0)
         assert repa_raw["target_subgrid_thw"] == [1, 2, 2]
         assert "model.config.repa.target_subgrid_thw=[1,2,2]" in overrides
-    else:
+    elif not toml_path.stem.endswith(("_repa_dinov2_v10", "_repa_dinov2_v11", "_repa_dinov2_v14")):  # 4x3x3 sub-cell recipes
         assert "target_subgrid_thw" not in repa_raw
     if toml_path.stem.endswith("_masked_jepa"):
         assert repa_raw["objective"] == "masked_prediction"
@@ -158,6 +200,12 @@ def test_repa_and_sigreg_model_configs_validate() -> None:
     assert RepaConfig().loss_weight_warmup_steps == 0  # constant weight unless a recipe opts in (v3)
     assert tuple(RepaConfig().target_subgrid_thw) == (1, 1, 1)
     assert (RepaConfig().sigma_min, RepaConfig().sigma_max) == (0.0, 1.0)
+    assert RepaConfig().student_upsampler == "none" and RepaConfig(student_upsampler="trilinear").student_upsampler == "trilinear"
+    assert RepaConfig().relation_margin == 0.0 and RepaConfig(relation_margin=0.1).relation_margin == 0.1
+    with pytest.raises(ValueError):
+        RepaConfig(relation_margin=-0.1)
+    with pytest.raises(ValueError):
+        RepaConfig(student_upsampler="bicubic")
     assert RepaConfig(sigma_max=0.5).sigma_max == 0.5 and RepaConfig(sigma_min=0.5).sigma_min == 0.5
     with pytest.raises(ValueError):
         RepaConfig(sigma_max=1.5)

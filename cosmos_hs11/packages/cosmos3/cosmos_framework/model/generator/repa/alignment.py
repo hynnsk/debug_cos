@@ -26,9 +26,13 @@ from collections.abc import Sequence
 import torch
 import torch.nn as nn
 
+import torch.utils.checkpoint
+
 from cosmos_framework.model.generator.repa.adapters import (
+    StudentTrilinearUpsampler,
     build_projector,
     build_target_adapter,
+    concat_views_along_width,
     concat_views_along_width_subgrid,
     split_flat_tokens,
 )
@@ -72,6 +76,7 @@ class RepaAlignmentHead(nn.Module):
         target_grid_thw: Grid3 = (4, 5, 5),
         num_views: int = 2,
         target_subgrid_thw: Grid3 = (1, 1, 1),
+        student_upsampler: str = "none",
     ) -> None:
         super().__init__()
         self.hidden_size = int(hidden_size)
@@ -79,6 +84,24 @@ class RepaAlignmentHead(nn.Module):
         self.num_views = int(num_views)
         self.teacher_grid_thw = tuple(int(v) for v in teacher_grid_thw)
         self.target_grid_thw = tuple(int(v) for v in target_grid_thw)
+        # cosmos_hs11 v12 ("interpolation + conv"): keep the teacher at its FULL grid (no pooling) and upsample the
+        # student's MoT token grid of every view to it (trilinear + identity-initialized depthwise 3x3x3 conv) before
+        # the per-position MLP. Works for non-integer ratios (5 -> 16 at 224 px). Mutually exclusive with sub-cells.
+        self.student_upsampler_name = str(student_upsampler)
+        if self.student_upsampler_name not in ("none", "trilinear"):
+            raise ValueError(f"student_upsampler must be 'none' or 'trilinear', got {student_upsampler!r}")
+        self.full_teacher_grid = self.student_upsampler_name != "none"
+        if self.full_teacher_grid:
+            if tuple(int(v) for v in target_subgrid_thw) != (1, 1, 1):
+                raise ValueError("student_upsampler and target_subgrid_thw are mutually exclusive (set the sub-grid to [1,1,1])")
+            if target_adapter != "avgpool":
+                raise ValueError("student_upsampler needs target_adapter='avgpool' (the adapter is the identity at the full teacher grid)")
+            if self.teacher_grid_thw[0] % self.target_grid_thw[0] != 0:
+                raise ValueError(
+                    f"student_upsampler needs the teacher temporal grid {self.teacher_grid_thw[0]} to be a multiple of the "
+                    f"predicted latent frames {self.target_grid_thw[0]}"
+                )
+        self.student_upsampler = StudentTrilinearUpsampler(self.hidden_size) if self.full_teacher_grid else None
         # "Less pooling" (cosmos_hs10 v13/v14, hs11 v5): teacher cells predicted per MoT token along (t, h, w). The
         # teacher is adapted to the (target_grid * subgrid) grid, the S = st*sh*sw cells of a token become consecutive
         # rows ([N*S, D_t]) and the projector emits all of them at once (S * D_t wide).
@@ -108,12 +131,28 @@ class RepaAlignmentHead(nn.Module):
         )
 
     def _refine(self, grid: Grid3) -> Grid3:
-        """Per-view MoT grid -> per-view adapted teacher grid (``grid * target_subgrid_thw``)."""
+        """Per-view MoT grid -> per-view adapted teacher grid (``grid * target_subgrid_thw``; the FULL teacher grid with a
+        student upsampler, where the teacher is not pooled at all)."""
+        if self.full_teacher_grid:
+            return self.teacher_grid_thw  # type: ignore[return-value]
         return tuple(int(g) * int(s) for g, s in zip(grid, self.target_subgrid_thw))  # type: ignore[return-value]
+
+    def _teacher_frames(self, nfi: torch.Tensor, t_len: int) -> torch.Tensor:
+        """Full-teacher-grid mode: latent frame ``t`` (1-based, 0 = conditioning) owns teacher frames
+        ``[(t-1) r, t r)`` with ``r = T_t / (T-1)``."""
+        r = self.teacher_grid_thw[0] // (int(t_len) - 1)
+        if r * (int(t_len) - 1) != self.teacher_grid_thw[0]:
+            raise ValueError(
+                f"teacher temporal grid {self.teacher_grid_thw[0]} is not a multiple of the {int(t_len) - 1} predicted latent frames"
+            )
+        base = (nfi - 1) * r  # [F]
+        return (base[:, None] + torch.arange(r, device=nfi.device)[None, :]).reshape(-1)  # [F*r]
 
     def reset_parameters(self) -> None:
         self.projector.reset_parameters()
         self.target_adapter.reset_parameters()
+        if self.student_upsampler is not None:
+            self.student_upsampler.reset_parameters()
 
     # ------------------------------------------------------------------------------------------
     def probe(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
@@ -123,6 +162,9 @@ class RepaAlignmentHead(nn.Module):
         p = self.projector(z).sum()
         t = torch.zeros(1, self.teacher_embed_dim, *self.teacher_grid_thw, device=device, dtype=dtype)
         a = self.target_adapter(t, self._refine(self.target_grid_thw)).sum()
+        if self.student_upsampler is not None:
+            u = torch.zeros(1, self.hidden_size, 1, 1, 1, device=device, dtype=dtype)
+            a = a + self.student_upsampler(u, (1, 1, 1)).sum()
         return 0.0 * (p + a)
 
     def adapt_targets(self, teacher_tokens: torch.Tensor, out_grid: Grid3) -> torch.Tensor:
@@ -203,8 +245,10 @@ class RepaAlignmentHead(nn.Module):
                 if tt.ndim != 5:
                     raise ValueError(f"teacher_tokens[{i}] must be [V,T_t,H_p,W_p,D_t], got {tuple(tt.shape)}")
                 target_grid = self.adapt_targets(tt, self._per_view_grid(t_len, h_tok, w_tok))[0]
-            # rows: frame-major, then h, w, then the S sub-cells of that token -> [n_i * S, D_t]
-            targets.append(target_grid.index_select(0, nfi - 1).reshape(-1, target_grid.shape[-1]))
+            # rows: frame-major, then h, w, then the S sub-cells of that token -> [n_i * S, D_t]; with a student
+            # upsampler the frames are the teacher frames owned by the selected latent frames (full grid, S = 1).
+            sel = self._teacher_frames(nfi, t_len) if self.full_teacher_grid else nfi - 1
+            targets.append(target_grid.index_select(0, sel).reshape(-1, target_grid.shape[-1]))
             counts.append(int(targets[-1].shape[0]))
         if not targets:
             return None
@@ -222,6 +266,8 @@ class RepaAlignmentHead(nn.Module):
         """
         grids = split_flat_tokens(vision_hidden, token_shapes)  # list of [T,H,W,D]
         nfi_list = self._prepare_noisy_indexes(noisy_frame_indexes, vision_hidden.device)
+        if self.full_teacher_grid:
+            return self._project_upsampled(grids, nfi_list)
         preds = [
             grid.index_select(0, nfi).reshape(-1, grid.shape[-1]) for grid, nfi in zip(grids, nfi_list) if nfi.numel() > 0
         ]
@@ -229,6 +275,38 @@ class RepaAlignmentHead(nn.Module):
             return None
         out = self.projector(torch.cat(preds, dim=0))  # [N, S*D_t]
         return out.reshape(-1, self.teacher_embed_dim)  # [N*S, D_t] (sub-cell-minor, same row order as the targets)
+
+    def _student_rows_full_grid(self, sel: torch.Tensor) -> torch.Tensor:
+        """``sel``: the selected latent frames of one sample, ``[F, H, W_canvas, D]`` -> upsampled per view to the teacher
+        grid and projected: ``[F*r*H_p*(V*W_p), D_t]`` in frame-major, h, canvas-w order (= the target rows)."""
+        f, h, w, d = sel.shape
+        wv = w // self.num_views
+        r = self.teacher_grid_thw[0] // self.target_grid_thw[0]
+        views = sel.view(f, h, self.num_views, wv, d).permute(2, 4, 0, 1, 3)  # [V, D, F, H, Wv]
+        up = self.student_upsampler(views, (f * r, self.teacher_grid_thw[1], self.teacher_grid_thw[2]))  # [V,D,F*r,H_p,W_p]
+        canvas = concat_views_along_width(up, self.num_views)  # [1, F*r, H_p, V*W_p, D]
+        return self.projector(canvas.reshape(-1, d))  # [F*r*H_p*V*W_p, D_t]
+
+    def _project_upsampled(self, grids: Sequence[torch.Tensor], nfi_list: Sequence[torch.Tensor]) -> torch.Tensor | None:
+        rows = []
+        for grid, nfi in zip(grids, nfi_list):
+            if nfi.numel() == 0:
+                continue
+            t_len = int(grid.shape[0])
+            if (t_len - 1) != self.target_grid_thw[0] or tuple(grid.shape[1:3]) != (self.target_grid_thw[1], self.target_grid_thw[2] * self.num_views):
+                raise ValueError(
+                    f"student_upsampler was built for the per-view MoT grid {self.target_grid_thw} (+1 conditioning frame, "
+                    f"{self.num_views} views) but got a {tuple(grid.shape[:3])} token grid"
+                )
+            sel = grid.index_select(0, nfi)  # [F, H, W_canvas, D]
+            if torch.is_grad_enabled() and sel.requires_grad:
+                # The upsampled 2048-d maps are ~40x the token count; recompute them in backward instead of storing them.
+                rows.append(torch.utils.checkpoint.checkpoint(self._student_rows_full_grid, sel, use_reentrant=False))
+            else:
+                rows.append(self._student_rows_full_grid(sel))
+        if not rows:
+            return None
+        return torch.cat(rows, dim=0)
 
     def forward(
         self,

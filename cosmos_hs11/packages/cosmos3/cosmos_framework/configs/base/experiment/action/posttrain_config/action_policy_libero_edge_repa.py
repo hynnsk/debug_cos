@@ -63,6 +63,8 @@ def _action_policy_libero_edge_repa_model_config() -> dict:
         loss_weight=0.5,
         loss_weight_warmup_steps=0,  # 0 = constant weight; cosmos_hs11 v3 = 200 (linear 0 -> loss_weight ramp)
         sigma_min=0.0,  # noise-level gate (hs11 v6/v7): REPA only for samples with sigma in [sigma_min, sigma_max]
+        target_subgrid_thw=(1, 1, 1),  # teacher cells per MoT token; (4, 3, 3) = sub-cell prediction (hs11 v10/v11)
+        student_upsampler="none",  # "trilinear" = upsample the student to the full teacher grid (hs11 v12)
         sigma_max=1.0,
         objective="token",  # "temporal_difference" (v8) | "spatial_normalized" (v10)
         spatial_norm_eps=1.0e-6,
@@ -74,6 +76,7 @@ def _action_policy_libero_edge_repa_model_config() -> dict:
         masked_seed=42,
         relation_loss_weight=0.0,  # VideoREPA-style token-relation term; v5 = 5.0 (with loss_weight 0.0)
         relation_distance="l2",  # "l2" (squared) | "l1" (absolute) entry-wise relation-map difference
+        relation_margin=0.0,  # VideoREPA TRD margin (hs11 v13-v15: 0.1); 0 = plain distance
         layer_index=8,  # output of MoT block 8 (of 28); next candidate: 14
         teacher="vjepa2_1_vit_base_384",  # ViT-B/16 default; "vjepa2_1_vit_large_384" = ViT-L/16
         teacher_checkpoint_path=None,  # $COSMOS_STORAGE/checkpoints/vjepa2_1/<release file>

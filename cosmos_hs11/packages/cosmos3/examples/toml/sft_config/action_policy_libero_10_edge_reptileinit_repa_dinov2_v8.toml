@@ -42,7 +42,7 @@ experiment   = "action_policy_libero_edge_repa"
 project      = "cosmos3_action_libero"
 group        = "edge_libero10_fewshot"
 name         = "edge_libero10_3ep_fullft_reptileinit_dinov2b_l24_w5.0_sigma_0_0.2"
-wandb_mode   = "online"
+wandb_mode   = "offline"
 
 [model]
 precision = "bfloat16"
@@ -108,7 +108,7 @@ episode_subset_path   = "libero_10_val_5ep_per_task_seed42_excl3ep.json"  # 5 he
 
 [checkpoint]
 load_path = "${oc.env:REPTILE_CKPT_PATH}"   # <reptile job>/checkpoints/iter_XXXXXXXXX (NOT the base Cosmos3-Edge dir)
-save_iter = 500
+save_iter = 2000
 # The Reptile DCP has no EMA; the action heads are skipped (fresh) and then overwritten by the meta heads below.
 keys_to_skip_loading = ["net_ema.", "repa_", "action2llm", "llm2action", "action_modality_embed"]   # + repa_head (absent from the Reptile DCP)
 meta_action_init_path                   = "${oc.env:META_ACTION_INIT_PATH}"

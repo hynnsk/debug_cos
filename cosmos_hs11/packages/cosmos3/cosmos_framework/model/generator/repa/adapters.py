@@ -37,6 +37,7 @@ import math
 from collections.abc import Sequence
 
 import torch
+import torch.utils.checkpoint
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -415,22 +416,32 @@ def repa_relation_loss(
     num_tokens_per_sample: Sequence[int],
     distance: str = "l2",
     eps: float = 1e-6,
+    margin: float = 0.0,
+    checkpoint: bool = False,
 ) -> torch.Tensor:
-    """Token-relation distillation (VideoREPA-style): match the *pairwise cosine-similarity map* of the projected
+    """Token-relation distillation (VideoREPA TRD): match the *pairwise cosine-similarity map* of the projected
     student tokens to that of the teacher tokens, sample by sample.
 
     ``pred`` / ``target``: ``[N,D]`` rows in packing order (sample-major); ``num_tokens_per_sample`` says how many
     consecutive rows belong to each sample (``RepaAlignmentHead`` returns them as ``num_tokens_per_sample``). For
-    every sample the ``n_i x n_i`` relation matrices ``R = normalize(x) normalize(x)^T`` of both sides are compared
-    entry-wise with the squared (``"l2"``) or absolute (``"l1"``) difference and the result is the mean over all
-    relation entries of all samples. Unlike ``repa_cosine_loss`` this only constrains the *geometry* among the
-    tokens of a video (spatial pairs within a frame and temporal pairs across frames alike), never the absolute
-    direction of a token, so it is invariant to any rotation of either feature space.
+    every sample the ``n_i x n_i`` relation matrices ``R = normalize(x) normalize(x)^T`` over ALL tokens of the clip
+    (spatial pairs within a frame and temporal pairs across frames alike -- the full map VideoREPA's
+    ``token_relation_distillation`` uses) are compared entry-wise and averaged over all entries of all samples:
+
+        l1: mean(relu(|R_s - R_t| - margin))        l2: mean(relu(|R_s - R_t| - margin)^2)
+
+    ``margin`` (VideoREPA default 0.1) is the soft constraint: relation differences inside the margin are not
+    penalized. ``margin = 0`` is the plain l1 / l2 distance. Unlike ``repa_cosine_loss`` this only constrains the
+    *geometry* among the tokens of a video, never the absolute direction of a token, so it is invariant to any
+    rotation of either feature space. ``checkpoint=True`` recomputes each sample's maps in backward (the per-sample
+    path), which keeps the memory at one ``n_i x n_i`` map at a time (7200^2 / 8192^2 for the native-size recipes).
     """
     if pred.shape != target.shape:
         raise ValueError(f"pred {tuple(pred.shape)} and target {tuple(target.shape)} must have the same shape")
     if distance not in RELATION_DISTANCES:
         raise ValueError(f"Unknown relation distance {distance!r}; expected one of {RELATION_DISTANCES}")
+    if not math.isfinite(margin) or margin < 0:
+        raise ValueError(f"margin must be a finite non-negative float, got {margin}")
     counts = [int(c) for c in num_tokens_per_sample]
     if sum(counts) != pred.shape[0]:
         raise ValueError(f"num_tokens_per_sample sums to {sum(counts)} but pred has {pred.shape[0]} rows")
@@ -439,7 +450,13 @@ def repa_relation_loss(
         raise ValueError("repa_relation_loss needs at least one sample with tokens")
 
     def _penalty(diff: torch.Tensor) -> torch.Tensor:
-        return diff.square() if distance == "l2" else diff.abs()
+        d = diff.abs()
+        if margin > 0:
+            d = F.relu(d - margin)
+        return d.square() if distance == "l2" else d
+
+    def _sample_sum(p_i: torch.Tensor, t_i: torch.Tensor) -> torch.Tensor:
+        return _penalty(token_relation_matrix(p_i, eps) - token_relation_matrix(t_i, eps)).sum()
 
     if len(set(counts)) == 1 and len(counts) * counts[0] ** 2 <= RELATION_BATCHED_MAX_ENTRIES:
         # Uniform grids (the LIBERO case): one batched matmul per side. With a target sub-grid the per-sample maps grow
@@ -449,8 +466,12 @@ def repa_relation_loss(
         return _penalty(diff).sum() / (b * n * n)
     total = pred.new_zeros((), dtype=torch.float32)
     entries = 0
+    use_ckpt = bool(checkpoint) and torch.is_grad_enabled() and (pred.requires_grad or target.requires_grad)
     for p_i, t_i in zip(torch.split(pred, counts), torch.split(target, counts)):
-        total = total + _penalty(token_relation_matrix(p_i, eps) - token_relation_matrix(t_i, eps)).sum()
+        if use_ckpt:
+            total = total + torch.utils.checkpoint.checkpoint(_sample_sum, p_i, t_i, use_reentrant=False)
+        else:
+            total = total + _sample_sum(p_i, t_i)
         entries += p_i.shape[0] ** 2
     return total / entries
 
@@ -496,6 +517,34 @@ def concat_views_along_width(y: torch.Tensor, num_views: int) -> torch.Tensor:
     b = bv // num_views
     y = y.view(b, num_views, d, t, h, wv).permute(0, 3, 4, 1, 5, 2)  # [B,T,H,V,Wv,D]
     return y.reshape(b, t, h, num_views * wv, d)
+
+
+class StudentTrilinearUpsampler(nn.Module):
+    """Student-side "interpolation + conv" upsampler (cosmos_hs11 v12): trilinear interpolation of the MoT token grid of
+    one camera view (``[N, D, T, H, W]`` -> the teacher grid ``out_grid``) followed by a depthwise 3x3x3 Conv3d that is
+    identity-initialized, so at init the prediction at a teacher position is exactly the interpolated MoT feature and the
+    conv can learn a local sharpening. Runs BEFORE the (per-position) REPA MLP, i.e. the MLP sees upsampled 2048-d
+    features, which lets it mix the interpolated neighbours non-linearly.
+    """
+
+    def __init__(self, dim: int, kernel_size: int = 3) -> None:
+        super().__init__()
+        if kernel_size % 2 != 1:
+            raise ValueError("kernel_size must be odd")
+        self.dim, self.kernel_size = int(dim), int(kernel_size)
+        self.conv = nn.Conv3d(self.dim, self.dim, kernel_size=self.kernel_size, padding=self.kernel_size // 2, groups=self.dim, bias=True)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        k = (self.kernel_size,) * 3
+        copy_full_tensor_into_param(self.conv.weight, _identity_depthwise_conv3d_weight(self.dim, k))  # type: ignore[arg-type]
+        copy_full_tensor_into_param(self.conv.bias, torch.zeros(self.dim))
+
+    def forward(self, x: torch.Tensor, out_grid: Grid3) -> torch.Tensor:  # [N,D,T,H,W] -> [N,D,T_t,H_p,W_p]
+        grid = tuple(int(v) for v in out_grid)
+        if tuple(x.shape[2:]) != grid:
+            x = F.interpolate(x.float(), size=grid, mode="trilinear", align_corners=False).to(x.dtype)
+        return self.conv(x)
 
 
 def repa_sample_sigmas(timesteps: torch.Tensor, num_samples: int, max_timestep: float) -> torch.Tensor:

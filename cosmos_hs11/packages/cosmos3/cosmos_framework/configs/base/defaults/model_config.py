@@ -181,6 +181,9 @@ class RepaConfig:
     relation_loss_weight: float = 0.0
     # Entry-wise distance between the student and teacher relation maps: "l2" (squared) or "l1" (absolute).
     relation_distance: str = attrs.field(default="l2", validator=attrs.validators.in_({"l2", "l1"}))
+    # VideoREPA TRD margin (hs11 v13-v15): relation-map differences with |R_s - R_t| <= margin are not penalized
+    # (soft constraint; VideoREPA default 0.1). 0 = the plain l1 / l2 relation distance (v5 recipe).
+    relation_margin: float = attrs.field(default=0.0, validator=attrs.validators.ge(0.0))
     # Center the cosine loss: subtract the (detached) batch-mean teacher target from BOTH the projected student tokens
     # and the targets before the cosine. V-JEPA 2.1 tokens share a dominant common direction (on LIBERO a constant
     # prediction already scores raw cos ~0.92), so the raw objective is mostly satisfied by that shortcut; centering
@@ -224,6 +227,13 @@ class RepaConfig:
     # shared-direction energy 0.30 -> 0.25); temporal refinement adds almost nothing. Not supported with
     # objective="masked_prediction" (its pixel mask is per MoT token).
     target_subgrid_thw: tuple[int, int, int] = (1, 1, 1)
+    # cosmos_hs11 v12 ("interpolation + conv upsampler"): "trilinear" keeps the teacher at its FULL grid (no pooling at
+    # all, e.g. DINOv2 @224 = 16 frames x 16 x 16 per view) and upsamples the student's per-view MoT grid (4 x 5 x 5) to
+    # it with trilinear interpolation + an identity-initialized depthwise 3x3x3 conv BEFORE the per-position REPA MLP;
+    # rows = full teacher grid (8192 per window at 224 px), projector output D_t. Handles non-integer ratios (5 -> 16).
+    # Mutually exclusive with target_subgrid_thw != (1,1,1); needs target_adapter="avgpool" and a teacher temporal grid
+    # that is a multiple of the predicted latent frames (16 or 8 frames / 4). "none" = default.
+    student_upsampler: str = attrs.field(default="none", validator=attrs.validators.in_({"none", "trilinear"}))
     # Student-side projector: "mlp" = REPA's Linear-SiLU-Linear-SiLU-Linear (default), "linear" = one
     # Linear(hidden_size, D_t) so h_k itself has to become an affine image of the teacher features (v4 recipe).
     projector_type: str = attrs.field(default="mlp", validator=attrs.validators.in_({"mlp", "linear"}))

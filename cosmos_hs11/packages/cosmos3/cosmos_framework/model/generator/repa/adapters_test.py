@@ -351,3 +351,34 @@ def test_repa_sample_sigmas_and_select_repa_samples():
     assert ca == counts and torch.equal(pa, pred)
     with pytest.raises(ValueError):
         select_repa_samples(pred, target, counts, frames, keep[:3])
+
+
+def test_relation_loss_margin_and_checkpoint_paths(monkeypatch):
+    import cosmos_framework.model.generator.repa.adapters as ad
+
+    pred, target, counts = _relation_inputs(counts=(6, 6, 6), d=4, seed=11)
+    base = ad.repa_relation_loss(pred, target, counts, distance="l1")
+    # margin 0 == plain l1; a margin removes exactly the entries whose |diff| is inside it
+    torch.testing.assert_close(ad.repa_relation_loss(pred, target, counts, distance="l1", margin=0.0), base)
+    with torch.no_grad():
+        n = counts[0]
+        rs = ad.token_relation_matrix(pred.view(3, n, -1)); rt = ad.token_relation_matrix(target.view(3, n, -1))
+        expect = torch.relu((rs - rt).abs() - 0.1).mean()
+    torch.testing.assert_close(ad.repa_relation_loss(pred, target, counts, distance="l1", margin=0.1), expect)
+    assert ad.repa_relation_loss(pred, target, counts, distance="l1", margin=10.0).item() == 0.0  # everything inside the margin
+    # identical maps -> 0 with or without margin; l2 applies the hinge before squaring
+    torch.testing.assert_close(ad.repa_relation_loss(target.clone(), target, counts, margin=0.1), torch.tensor(0.0))
+    l2m = ad.repa_relation_loss(pred, target, counts, distance="l2", margin=0.1)
+    torch.testing.assert_close(l2m, torch.relu((rs - rt).abs() - 0.1).square().mean())
+    # the per-sample (large-map) path, with and without checkpointing, matches the batched path incl. gradients
+    def grad_of(**kw):
+        p = pred.detach().clone().requires_grad_(True)
+        ad.repa_relation_loss(p, target, counts, distance="l1", margin=0.1, **kw).backward()
+        return p.grad.clone()
+    g_batched = grad_of()
+    monkeypatch.setattr(ad, "RELATION_BATCHED_MAX_ENTRIES", 1)  # force the per-sample loop
+    torch.testing.assert_close(ad.repa_relation_loss(pred, target, counts, distance="l1", margin=0.1), expect)
+    torch.testing.assert_close(grad_of(checkpoint=False), g_batched)
+    torch.testing.assert_close(grad_of(checkpoint=True), g_batched)
+    with pytest.raises(ValueError, match="margin"):
+        ad.repa_relation_loss(pred, target, counts, margin=-0.1)

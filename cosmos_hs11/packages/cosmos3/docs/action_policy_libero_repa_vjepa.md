@@ -250,3 +250,44 @@ asks in which regime the semantic DINOv2 target helps. Recipes on the Reptile in
 skewed to high noise, so `sigma <= 0.5` keeps well under half of the samples; read `repa_sigma_frac` before comparing.
 Implementation: `adapters.repa_sample_sigmas` / `select_repa_samples`, used in `OmniMoTModel._compute_losses`;
 the gate requires one clip per sample (raises otherwise). Not GPU-smoked; CPU tests + dry-runs.
+
+## 11. Teacher at native size: sub-cells (v10 / v11) and the student upsampler (v12)
+
+Instead of pooling the teacher down to the 4 x 5x5 MoT grid, three recipes on the Reptile init align at (or near) the
+DINOv2 grid; everything else equals v2 (DINOv2-B, MoT block 24, weight 5.0), only the per-rank micro-batch is reduced
+with `grad_accum_iter` so the global batch stays 256:
+
+| recipe | teacher | mechanism | rows / window | projector | micro-batch |
+| --- | --- | --- | --- | --- | --- |
+| v10 | 224 px (16x16x16 per view) | `target_subgrid_thw = [4,3,3]`: each MoT token predicts 4 frames x 3x3 cells of a 16x15x15 grid (adaptive pool 16 -> 15 = mild blur) | 7200 | 2048 -> 2048 -> 2048 -> 27648 | 64 x 2 |
+| v11 | 210 px (16x15x15 per view) | same sub-cells, 15 = 3 x 5 exactly -> identity adapter, no pooling | 7200 | same | 64 x 2 |
+| v12 | 224 px, full grid | `student_upsampler = "trilinear"`: per-view MoT grid trilinearly upsampled to 16x16x16 + identity-init depthwise 3x3x3 conv, then the MLP (activation-checkpointed) | 8192 | 2048 -> 2048 -> 2048 -> 768 | 32 x 4 |
+
+The MoT grid itself cannot be made finer (VAE 16x + patch 2, temporal 4x), so all three predict finer teacher detail
+from coarse tokens; v10/v11 do it with independent sub-cell outputs, v12 with a smoothed, weight-shared blend of
+neighbouring tokens. Rows are frame-major / h / canvas-w in every case, so the sigma gate, centered / spatial-normalized /
+temporal objectives, the relation term (per-sample loop for maps this large) and SIGReg work unchanged. Launchers
+`launch_sft_action_policy_libero_10_edge_reptileinit_repa_dinov2_v1{0,1,2}.sh` (ports 50057 / 50058 / 50059). HF Dinov2
+interpolates its position embeddings for 210 px. Not GPU-smoked: the memory settings are estimates (cosine over
+~0.5 M x 768 fp32 rows per rank), raise the micro-batch on H200-class GPUs.
+
+## 12. VideoREPA token-relation distillation with a margin (v13 / v14 / v15)
+
+`relation_margin` (default 0) turns the existing relation term into VideoREPA's TRD loss: per window, both the
+projected student tokens and the teacher tokens are L2-normalized, their full pairwise cosine-similarity maps over ALL
+tokens of the clip (spatial pairs within a frame and temporal pairs across frames in one `n x n` map -- VideoREPA's
+`token_relation_distillation`; its `only_spatial` / `only_temporal` variants merely mask blocks) are compared entry-wise
+and averaged: `l1: mean(relu(|R_s - R_t| - margin))`, `l2: mean(relu(...)^2)`. VideoREPA uses margin 0.1, weight 0.5, L1,
+layer 18 of CogVideoX; the two camera views are treated as one wide frame here. The large maps of the native-size
+recipes (7200^2 / 8192^2 per window) are computed per sample with activation checkpointing, and a token-cosine term with
+weight 0 is now evaluated without autograd (it is still logged as `repa_cos_sim`, so the curves stay comparable).
+
+| recipe | base | tokens per window in the map | `[model.repa]` deltas vs the base |
+| --- | --- | --- | --- |
+| v13 | v2 (DINOv2-B @224 pooled to 4x5x10) | 200 | `loss_weight 0`, `relation_loss_weight 5.0`, `relation_distance "l1"`, `relation_margin 0.1` |
+| v14 | v10 (4x3x3 sub-cells, 224 px) | 7200 | same |
+| v15 | v12 (trilinear upsampler, full 224 px grid) | 8192 | same |
+
+Launchers `launch_sft_action_policy_libero_10_edge_reptileinit_repa_dinov2_v1{3,4,5}.sh` (ports 50060 / 50061 / 50062).
+Note the relation loss is rotation-invariant: it constrains the geometry among tokens, not their absolute direction,
+so `repa_cos_sim` need not rise under v13-v15. Not GPU-smoked; CPU tests + dry-runs.

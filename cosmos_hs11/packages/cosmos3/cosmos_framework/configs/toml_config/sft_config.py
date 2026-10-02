@@ -350,6 +350,10 @@ class RepaTomlConfig(BaseModel):
         default=None,
         description="Entry-wise distance of the relation loss: 'l2' (squared, default) or 'l1' (absolute).",
     )
+    relation_margin: Optional[float] = Field(
+        default=None, ge=0.0,
+        description="VideoREPA TRD margin: relation-map differences within +-margin are not penalized (0 = plain distance; VideoREPA uses 0.1).",
+    )
     layer_index: Optional[int] = Field(
         default=None,
         description="MoT decoder blocks applied before the aligned hidden state is read (8 = output of block 8 of 28).",
@@ -380,6 +384,10 @@ class RepaTomlConfig(BaseModel):
     target_subgrid_thw: Optional[list[int]] = Field(
         default=None,
         description="Teacher cells predicted per MoT token [st, sh, sw]; [1, 1, 1] = one pooled cell (default), [1, 2, 2] = 2x2 spatial sub-cells (v5, less pooling).",
+    )
+    student_upsampler: Optional[str] = Field(
+        default=None,
+        description="'trilinear' = keep the teacher at its full grid and upsample the student MoT grid to it (interpolation + depthwise conv, then the MLP; hs11 v12). Default 'none'.",
     )
     projector_type: Optional[str] = Field(
         default=None,
