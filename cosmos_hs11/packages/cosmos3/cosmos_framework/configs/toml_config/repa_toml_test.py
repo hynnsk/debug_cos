@@ -109,8 +109,7 @@ def test_repa_reptileinit_tomls_validate_and_route(toml_path: Path) -> None:
         assert {k: v for k, v in raw["checkpoint"].items() if k != "save_iter"} == {k: v for k, v in base["checkpoint"].items() if k != "save_iter"}
         assert {k: v for k, v in raw["model"].items() if k != "repa"} == {k: v for k, v in base["model"].items() if k != "repa"}
         assert "model.config.repa.relation_margin=0.1" in overrides and "model.config.repa.relation_loss_weight=5.0" in overrides
-    else:
-        assert "relation_margin" not in repa_raw
+    # (user variants such as v16-v18 combine the knobs freely; only the pinned recipes above are checked exactly)
     # v10 / v11 = v2 + 4x3x3 sub-cells (224 px / 210 px); v12 = v2 + student trilinear upsampler (full 224 px grid).
     # Only the teacher-size knob and the 64x2 / 32x4 micro-batching (global 256 kept) may differ from v2.
     v2 = tomllib.load(open(_TOML_DIR / "action_policy_libero_10_edge_reptileinit_repa_dinov2_v2.toml", "rb"))

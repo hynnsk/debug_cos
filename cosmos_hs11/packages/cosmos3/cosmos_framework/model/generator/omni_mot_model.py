@@ -1873,6 +1873,123 @@ class OmniMoTModel(ImaginaireModel):
         global_num_samples = (counts[0] if is_image_batch else counts[1]).clamp(min=1.0)
         return (group_size * num_samples) / global_num_samples
 
+    def _repa_loss_terms(
+        self, out_net: dict[str, Any], timesteps: torch.Tensor, iteration: int, losses_dict: dict[str, torch.Tensor]
+    ) -> torch.Tensor:
+        """REPA / token-relation distillation terms of ``_compute_losses`` (cosmos_hs10/hs11).
+
+        Returns ``repa_loss * repa_weight + repa_rel_loss * relation_loss_weight`` and fills ``losses_dict`` with the
+        logged keys (``repa_loss``, ``repa_rel_loss``, ``repa_weight``, ``repa_weighted_loss``, ``repa_cos_sim``,
+        ``repa_cos_sim_centered`` and the objective-specific cosines / ``repa_sigma_frac``). Only needs
+        ``self.config.repa`` and ``self.config.rectified_flow_inference_config.num_train_timesteps``, so it is unit-tested
+        on CPU with a stand-in ``self`` (``repa_loss_block_test.py``) -- this block once shipped with an UnboundLocalError
+        that no dry-run could catch.
+
+        ``out_net``: ``repa_pred`` / ``repa_target`` ``[N, D_t]`` rows, ``repa_num_tokens_per_sample``,
+        ``repa_frame_indexes_per_sample``, ``repa_empty`` (probe); ``timesteps``: vision timesteps ``[B_items, T]``.
+        """
+        repa_cfg = self.config.repa
+        repa_pred = out_net["repa_pred"]
+        # Ramped cosine-term weight (``repa.loss_weight_warmup_steps``, hs11 v3); computed up front so the token
+        # objective can skip autograd when its weight is 0 (relation-only recipes such as v13-v15 / hs10 v5).
+        repa_weight = auxiliary_weight(
+            float(repa_cfg.loss_weight), int(getattr(repa_cfg, "loss_weight_warmup_steps", 0)), iteration
+        )
+        if out_net.get("repa_empty", False):
+            repa_loss = 0.0 * repa_pred.sum()  # probe: keeps the REPA parameters in the graph, contributes 0
+            repa_rel_loss = repa_loss
+        else:
+            repa_target = out_net["repa_target"]
+            repa_counts = list(out_net["repa_num_tokens_per_sample"])
+            repa_frames = out_net["repa_frame_indexes_per_sample"]
+            repa_pred_all, repa_target_all = repa_pred, repa_target  # every aligned row (for the logged cosines)
+            repa_gate = 1.0
+            # cosmos_hs11 v6/v7: noise-level gate -- distill only the samples whose vision sigma (= timestep /
+            # num_train_timesteps, 0 clean .. 1 pure noise) lies in [sigma_min, sigma_max]. The objective below then
+            # runs on the selected samples' rows; with no sample in the window the full rows are used for the logs
+            # and the terms are multiplied by 0 (parameters stay in the graph).
+            sigma_lo = float(getattr(repa_cfg, "sigma_min", 0.0))
+            sigma_hi = float(getattr(repa_cfg, "sigma_max", 1.0))
+            if sigma_lo > 0.0 or sigma_hi < 1.0:
+                if sigma_lo > sigma_hi:
+                    raise ValueError(f"repa.sigma_min={sigma_lo} > repa.sigma_max={sigma_hi}")
+                sample_sigma = repa_sample_sigmas(
+                    timesteps, len(repa_counts), self.config.rectified_flow_inference_config.num_train_timesteps
+                )
+                keep = (sample_sigma >= sigma_lo) & (sample_sigma <= sigma_hi)
+                losses_dict["repa_sigma_frac"] = keep.float().mean()
+                if bool(keep.any()):
+                    repa_pred, repa_target, repa_counts, repa_frames = select_repa_samples(
+                        repa_pred, repa_target, repa_counts, repa_frames, keep
+                    )
+                else:
+                    repa_gate = 0.0
+            # Weight 0 (e.g. relation-only recipes): the token objective is only logged -> no autograd graph.
+            with torch.set_grad_enabled(repa_weight != 0.0):
+                objective = str(repa_cfg.objective)
+                if objective == "temporal_difference":
+                    repa_loss, objective_cos = repa_temporal_difference_cosine_loss(
+                        repa_pred,
+                        repa_target,
+                        repa_counts,
+                        repa_frames,
+                    )
+                    losses_dict["repa_cos_sim_transition"] = objective_cos
+                elif objective == "spatial_normalized":
+                    repa_loss, objective_cos = repa_spatial_normalized_cosine_loss(
+                        repa_pred,
+                        repa_target,
+                        repa_counts,
+                        repa_frames,
+                        eps=float(repa_cfg.spatial_norm_eps),
+                    )
+                    losses_dict["repa_cos_sim_spatial_norm"] = objective_cos
+                elif objective == "token" and repa_cfg.center_targets:
+                    # Centered objective: the shared (batch-mean) teacher direction is removed from both sides, so only
+                    # the token-specific structure is trained. ``repa_cos_sim`` still logs the raw cosine.
+                    repa_loss, repa_cos_centered = repa_centered_cosine_loss(repa_pred, repa_target)
+                elif objective == "token":
+                    repa_loss, repa_cos = repa_cosine_loss(repa_pred, repa_target)
+                    # Shortcut detector (no gradient): cosine after removing the batch-mean teacher direction. On LIBERO
+                    # a constant / per-position-mean prediction already reads raw cos ~0.92-0.95 but ~0 here.
+                    repa_cos_centered = centered_cosine_similarity(repa_pred, repa_target)
+                else:
+                    raise ValueError(f"Unknown REPA objective {objective!r}")
+
+            # The logged cosines always cover ALL aligned rows (also the samples outside a sigma window), so they
+            # stay comparable across recipes; the specialized objective cosines above say what the loss optimized.
+            _, repa_cos = repa_cosine_loss(repa_pred_all.detach(), repa_target_all)
+            repa_cos_centered = centered_cosine_similarity(repa_pred_all, repa_target_all)
+            losses_dict["repa_cos_sim"] = repa_cos
+            losses_dict["repa_cos_sim_centered"] = repa_cos_centered
+            # Weight 0 = monitor only: evaluate without building an autograd graph over the per-sample n_i x n_i
+            # relation maps (n_i = 200 x S rows with target_subgrid_thw; the value logged is identical).
+            with torch.set_grad_enabled(float(repa_cfg.relation_loss_weight) != 0.0):
+                repa_rel_loss = repa_relation_loss(
+                    repa_pred,
+                    repa_target,
+                    repa_counts,
+                    distance=repa_cfg.relation_distance,
+                    margin=float(getattr(repa_cfg, "relation_margin", 0.0)),
+                    checkpoint=True,  # per-sample maps recomputed in backward (7200^2+ for the native-size recipes)
+                )
+            if repa_weight == 0.0 and float(repa_cfg.relation_loss_weight) == 0.0:
+                # neither term trains: keep the REPA parameters in the graph (FSDP gradient reduction)
+                repa_loss = repa_loss + 0.0 * repa_pred_all.sum()
+            if repa_gate != 1.0:  # no sample inside [sigma_min, sigma_max] this step
+                repa_loss = repa_loss * repa_gate
+                repa_rel_loss = repa_rel_loss * repa_gate
+        # Optional linear warmup of the cosine-term weight (``repa.loss_weight_warmup_steps`` > 0, cosmos_hs11 v3):
+        # ``loss_weight * min(1, iteration / N)`` -- 0 at iteration 0, ``loss_weight`` from iteration N on (the same
+        # ramp as the masked-JEPA branch). 0 (default) = the constant weight. ``getattr`` keeps configs pickled before
+        # the knob existed loadable. ``repa_weight`` / ``repa_weighted_loss`` are logged (train + val).
+        losses_dict["repa_loss"] = repa_loss
+        losses_dict["repa_rel_loss"] = repa_rel_loss
+        losses_dict["repa_weight"] = repa_loss.new_tensor(repa_weight)
+        losses_dict["repa_weighted_loss"] = (repa_loss * repa_weight).detach()
+        return repa_loss * repa_weight + repa_rel_loss * repa_cfg.relation_loss_weight
+
+
     def _compute_losses(
         self,
         out_net: dict,
@@ -2081,106 +2198,7 @@ class OmniMoTModel(ImaginaireModel):
         #     ``R`` the per-sample pairwise cosine-similarity map, weight ``repa.relation_loss_weight`` (v5 recipe).
         # Both are always computed and logged; a zero weight contributes exactly 0 to ``total_loss``.
         if self.repa_enabled and not self.masked_prediction_enabled and "repa_pred" in out_net:
-            repa_cfg = self.config.repa
-            repa_pred = out_net["repa_pred"]
-            # Ramped cosine-term weight (``repa.loss_weight_warmup_steps``, hs11 v3); computed up front so the token
-            # objective can skip autograd when its weight is 0 (relation-only recipes such as v13-v15 / hs10 v5).
-            repa_weight = auxiliary_weight(
-                float(repa_cfg.loss_weight), int(getattr(repa_cfg, "loss_weight_warmup_steps", 0)), iteration
-            )
-            if out_net.get("repa_empty", False):
-                repa_loss = 0.0 * repa_pred.sum()  # probe: keeps the REPA parameters in the graph, contributes 0
-                repa_rel_loss = repa_loss
-            else:
-                repa_target = out_net["repa_target"]
-                repa_counts = list(repa_counts)
-                repa_frames = repa_frames
-                repa_pred_all, repa_target_all = repa_pred, repa_target  # every aligned row (for the logged cosines)
-                repa_gate = 1.0
-                # cosmos_hs11 v6/v7: noise-level gate -- distill only the samples whose vision sigma (= timestep /
-                # num_train_timesteps, 0 clean .. 1 pure noise) lies in [sigma_min, sigma_max]. The objective below then
-                # runs on the selected samples' rows; with no sample in the window the full rows are used for the logs
-                # and the terms are multiplied by 0 (parameters stay in the graph).
-                sigma_lo = float(getattr(repa_cfg, "sigma_min", 0.0))
-                sigma_hi = float(getattr(repa_cfg, "sigma_max", 1.0))
-                if sigma_lo > 0.0 or sigma_hi < 1.0:
-                    if sigma_lo > sigma_hi:
-                        raise ValueError(f"repa.sigma_min={sigma_lo} > repa.sigma_max={sigma_hi}")
-                    sample_sigma = repa_sample_sigmas(
-                        timesteps, len(repa_counts), self.config.rectified_flow_inference_config.num_train_timesteps
-                    )
-                    keep = (sample_sigma >= sigma_lo) & (sample_sigma <= sigma_hi)
-                    losses_dict["repa_sigma_frac"] = keep.float().mean()
-                    if bool(keep.any()):
-                        repa_pred, repa_target, repa_counts, repa_frames = select_repa_samples(
-                            repa_pred, repa_target, repa_counts, repa_frames, keep
-                        )
-                    else:
-                        repa_gate = 0.0
-                # Weight 0 (e.g. relation-only recipes): the token objective is only logged -> no autograd graph.
-                with torch.set_grad_enabled(repa_weight != 0.0):
-                    objective = str(repa_cfg.objective)
-                    if objective == "temporal_difference":
-                        repa_loss, objective_cos = repa_temporal_difference_cosine_loss(
-                            repa_pred,
-                            repa_target,
-                            repa_counts,
-                            repa_frames,
-                        )
-                        losses_dict["repa_cos_sim_transition"] = objective_cos
-                    elif objective == "spatial_normalized":
-                        repa_loss, objective_cos = repa_spatial_normalized_cosine_loss(
-                            repa_pred,
-                            repa_target,
-                            repa_counts,
-                            repa_frames,
-                            eps=float(repa_cfg.spatial_norm_eps),
-                        )
-                        losses_dict["repa_cos_sim_spatial_norm"] = objective_cos
-                    elif objective == "token" and repa_cfg.center_targets:
-                        # Centered objective: the shared (batch-mean) teacher direction is removed from both sides, so only
-                        # the token-specific structure is trained. ``repa_cos_sim`` still logs the raw cosine.
-                        repa_loss, repa_cos_centered = repa_centered_cosine_loss(repa_pred, repa_target)
-                    elif objective == "token":
-                        repa_loss, repa_cos = repa_cosine_loss(repa_pred, repa_target)
-                        # Shortcut detector (no gradient): cosine after removing the batch-mean teacher direction. On LIBERO
-                        # a constant / per-position-mean prediction already reads raw cos ~0.92-0.95 but ~0 here.
-                        repa_cos_centered = centered_cosine_similarity(repa_pred, repa_target)
-                    else:
-                        raise ValueError(f"Unknown REPA objective {objective!r}")
-
-                # The logged cosines always cover ALL aligned rows (also the samples outside a sigma window), so they
-                # stay comparable across recipes; the specialized objective cosines above say what the loss optimized.
-                _, repa_cos = repa_cosine_loss(repa_pred_all.detach(), repa_target_all)
-                repa_cos_centered = centered_cosine_similarity(repa_pred_all, repa_target_all)
-                losses_dict["repa_cos_sim"] = repa_cos
-                losses_dict["repa_cos_sim_centered"] = repa_cos_centered
-                # Weight 0 = monitor only: evaluate without building an autograd graph over the per-sample n_i x n_i
-                # relation maps (n_i = 200 x S rows with target_subgrid_thw; the value logged is identical).
-                with torch.set_grad_enabled(float(repa_cfg.relation_loss_weight) != 0.0):
-                    repa_rel_loss = repa_relation_loss(
-                        repa_pred,
-                        repa_target,
-                        repa_counts,
-                        distance=repa_cfg.relation_distance,
-                        margin=float(getattr(repa_cfg, "relation_margin", 0.0)),
-                        checkpoint=True,  # per-sample maps recomputed in backward (7200^2+ for the native-size recipes)
-                    )
-                if repa_weight == 0.0 and float(repa_cfg.relation_loss_weight) == 0.0:
-                    # neither term trains: keep the REPA parameters in the graph (FSDP gradient reduction)
-                    repa_loss = repa_loss + 0.0 * repa_pred_all.sum()
-                if repa_gate != 1.0:  # no sample inside [sigma_min, sigma_max] this step
-                    repa_loss = repa_loss * repa_gate
-                    repa_rel_loss = repa_rel_loss * repa_gate
-            # Optional linear warmup of the cosine-term weight (``repa.loss_weight_warmup_steps`` > 0, cosmos_hs11 v3):
-            # ``loss_weight * min(1, iteration / N)`` -- 0 at iteration 0, ``loss_weight`` from iteration N on (the same
-            # ramp as the masked-JEPA branch). 0 (default) = the constant weight. ``getattr`` keeps configs pickled before
-            # the knob existed loadable. ``repa_weight`` / ``repa_weighted_loss`` are logged (train + val).
-            total_loss += repa_loss * repa_weight + repa_rel_loss * repa_cfg.relation_loss_weight
-            losses_dict["repa_loss"] = repa_loss
-            losses_dict["repa_rel_loss"] = repa_rel_loss
-            losses_dict["repa_weight"] = repa_loss.new_tensor(repa_weight)
-            losses_dict["repa_weighted_loss"] = (repa_loss * repa_weight).detach()
+            total_loss = total_loss + self._repa_loss_terms(out_net, timesteps, iteration, losses_dict)
 
         # 1b'. cosmos_hs12 masked V-JEPA feature prediction on the auxiliary branch: L1 over masked (+ 0.25 x visible)
         # target cells, lambda ramped over masked_warmup_steps; a global sample mean across ranks of unequal aux size.
