@@ -19,7 +19,7 @@ task         = "vfm"
 experiment   = "action_policy_libero_edge"
 project      = "cosmos3_action_libero"
 group        = "edge_libero10_fewshot"
-name         = "hs08_v5"
+name         = "hs08_v6"
 wandb_mode   = "offline"
 
 [model]
@@ -32,7 +32,7 @@ rate            = 0.1
 iteration_shift = 0
 
 [model.parallelism]
-data_parallel_shard_degree     = 2
+data_parallel_shard_degree     = 8
 data_parallel_replicate_degree = 1
 
 [model.activation_checkpointing]

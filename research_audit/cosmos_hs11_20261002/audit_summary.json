@@ -1,0 +1,1453 @@
+{
+  "data": {
+    "episodes": 379,
+    "frames": 101469,
+    "train_episodes": 30,
+    "val_episodes": 50,
+    "overlap": [],
+    "seed42_sampling_reproduced": true,
+    "train_windows": 7618,
+    "val_windows": 13049,
+    "all_windows": 95405,
+    "per_task": [
+      {
+        "dataset_task_id": 0,
+        "description": "turn on the stove and put the moka pot on it",
+        "train_episodes": [
+          38,
+          66,
+          361
+        ],
+        "train_windows": 762
+      },
+      {
+        "dataset_task_id": 1,
+        "description": "put both the alphabet soup and the tomato sauce in the basket",
+        "train_episodes": [
+          156,
+          181,
+          200
+        ],
+        "train_windows": 811
+      },
+      {
+        "dataset_task_id": 2,
+        "description": "put the white mug on the left plate and put the yellow and white mug on the right plate",
+        "train_episodes": [
+          88,
+          107,
+          343
+        ],
+        "train_windows": 700
+      },
+      {
+        "dataset_task_id": 3,
+        "description": "put the black bowl in the bottom drawer of the cabinet and close it",
+        "train_episodes": [
+          16,
+          36,
+          319
+        ],
+        "train_windows": 677
+      },
+      {
+        "dataset_task_id": 4,
+        "description": "pick up the book and place it in the back compartment of the caddy",
+        "train_episodes": [
+          28,
+          64,
+          136
+        ],
+        "train_windows": 508
+      },
+      {
+        "dataset_task_id": 5,
+        "description": "put the yellow and white mug in the microwave and close it",
+        "train_episodes": [
+          3,
+          145,
+          357
+        ],
+        "train_windows": 748
+      },
+      {
+        "dataset_task_id": 6,
+        "description": "put the white mug on the plate and put the chocolate pudding to the right of the plate",
+        "train_episodes": [
+          113,
+          356,
+          369
+        ],
+        "train_windows": 748
+      },
+      {
+        "dataset_task_id": 7,
+        "description": "put both the cream cheese box and the butter in the basket",
+        "train_episodes": [
+          117,
+          232,
+          251
+        ],
+        "train_windows": 716
+      },
+      {
+        "dataset_task_id": 8,
+        "description": "put both moka pots on the stove",
+        "train_episodes": [
+          70,
+          194,
+          314
+        ],
+        "train_windows": 1217
+      },
+      {
+        "dataset_task_id": 9,
+        "description": "put both the alphabet soup and the cream cheese box in the basket",
+        "train_episodes": [
+          7,
+          96,
+          223
+        ],
+        "train_windows": 731
+      }
+    ]
+  },
+  "evaluation": {
+    "edge_libero10_all379_fullft_reptileinit_50demo_2000": {
+      "path": "cosmos_storage/outputs/eval/cosmos3_action_libero/edge_libero10_alldata/edge_libero10_all379_fullft_reptileinit_50demo_2000/summary.json",
+      "total_episodes": 500,
+      "total_successes": 267,
+      "success_rate": 0.534,
+      "per_task": [
+        {
+          "task_id": 0,
+          "task_description": "put both the alphabet soup and the tomato sauce in the basket",
+          "episodes": 50,
+          "successes": 37
+        },
+        {
+          "task_id": 1,
+          "task_description": "put both the cream cheese box and the butter in the basket",
+          "episodes": 50,
+          "successes": 38
+        },
+        {
+          "task_id": 2,
+          "task_description": "turn on the stove and put the moka pot on it",
+          "episodes": 50,
+          "successes": 44
+        },
+        {
+          "task_id": 3,
+          "task_description": "put the black bowl in the bottom drawer of the cabinet and close it",
+          "episodes": 50,
+          "successes": 4
+        },
+        {
+          "task_id": 4,
+          "task_description": "put the white mug on the left plate and put the yellow and white mug on the right plate",
+          "episodes": 50,
+          "successes": 26
+        },
+        {
+          "task_id": 5,
+          "task_description": "pick up the book and place it in the back compartment of the caddy",
+          "episodes": 50,
+          "successes": 45
+        },
+        {
+          "task_id": 6,
+          "task_description": "put the white mug on the plate and put the chocolate pudding to the right of the plate",
+          "episodes": 50,
+          "successes": 25
+        },
+        {
+          "task_id": 7,
+          "task_description": "put both the alphabet soup and the cream cheese box in the basket",
+          "episodes": 50,
+          "successes": 45
+        },
+        {
+          "task_id": 8,
+          "task_description": "put both moka pots on the stove",
+          "episodes": 50,
+          "successes": 0
+        },
+        {
+          "task_id": 9,
+          "task_description": "put the yellow and white mug in the microwave and close it",
+          "episodes": 50,
+          "successes": 3
+        }
+      ],
+      "metadata_limitation": "Summary does not record checkpoint, eval seed, initial-state hashes, or server settings."
+    },
+    "edge_libero10_3ep_fullft_reptileinit_50demo_2000": {
+      "path": "cosmos_storage/outputs/eval/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit_50demo_2000/summary.json",
+      "total_episodes": 500,
+      "total_successes": 322,
+      "success_rate": 0.644,
+      "per_task": [
+        {
+          "task_id": 0,
+          "task_description": "put both the alphabet soup and the tomato sauce in the basket",
+          "episodes": 50,
+          "successes": 14
+        },
+        {
+          "task_id": 1,
+          "task_description": "put both the cream cheese box and the butter in the basket",
+          "episodes": 50,
+          "successes": 32
+        },
+        {
+          "task_id": 2,
+          "task_description": "turn on the stove and put the moka pot on it",
+          "episodes": 50,
+          "successes": 21
+        },
+        {
+          "task_id": 3,
+          "task_description": "put the black bowl in the bottom drawer of the cabinet and close it",
+          "episodes": 50,
+          "successes": 32
+        },
+        {
+          "task_id": 4,
+          "task_description": "put the white mug on the left plate and put the yellow and white mug on the right plate",
+          "episodes": 50,
+          "successes": 28
+        },
+        {
+          "task_id": 5,
+          "task_description": "pick up the book and place it in the back compartment of the caddy",
+          "episodes": 50,
+          "successes": 42
+        },
+        {
+          "task_id": 6,
+          "task_description": "put the white mug on the plate and put the chocolate pudding to the right of the plate",
+          "episodes": 50,
+          "successes": 34
+        },
+        {
+          "task_id": 7,
+          "task_description": "put both the alphabet soup and the cream cheese box in the basket",
+          "episodes": 50,
+          "successes": 38
+        },
+        {
+          "task_id": 8,
+          "task_description": "put both moka pots on the stove",
+          "episodes": 50,
+          "successes": 36
+        },
+        {
+          "task_id": 9,
+          "task_description": "put the yellow and white mug in the microwave and close it",
+          "episodes": 50,
+          "successes": 45
+        }
+      ],
+      "metadata_limitation": "Summary does not record checkpoint, eval seed, initial-state hashes, or server settings."
+    },
+    "edge_libero10_3ep_fullft_reptileinit_repa_dinov2b_l24_avgpool_w5.0_50demo_2000": {
+      "path": "cosmos_storage/outputs/eval/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit_repa_dinov2b_l24_avgpool_w5.0_50demo_2000/summary.json",
+      "total_episodes": 500,
+      "total_successes": 331,
+      "success_rate": 0.662,
+      "per_task": [
+        {
+          "task_id": 0,
+          "task_description": "put both the alphabet soup and the tomato sauce in the basket",
+          "episodes": 50,
+          "successes": 13
+        },
+        {
+          "task_id": 1,
+          "task_description": "put both the cream cheese box and the butter in the basket",
+          "episodes": 50,
+          "successes": 37
+        },
+        {
+          "task_id": 2,
+          "task_description": "turn on the stove and put the moka pot on it",
+          "episodes": 50,
+          "successes": 30
+        },
+        {
+          "task_id": 3,
+          "task_description": "put the black bowl in the bottom drawer of the cabinet and close it",
+          "episodes": 50,
+          "successes": 37
+        },
+        {
+          "task_id": 4,
+          "task_description": "put the white mug on the left plate and put the yellow and white mug on the right plate",
+          "episodes": 50,
+          "successes": 33
+        },
+        {
+          "task_id": 5,
+          "task_description": "pick up the book and place it in the back compartment of the caddy",
+          "episodes": 50,
+          "successes": 33
+        },
+        {
+          "task_id": 6,
+          "task_description": "put the white mug on the plate and put the chocolate pudding to the right of the plate",
+          "episodes": 50,
+          "successes": 35
+        },
+        {
+          "task_id": 7,
+          "task_description": "put both the alphabet soup and the cream cheese box in the basket",
+          "episodes": 50,
+          "successes": 32
+        },
+        {
+          "task_id": 8,
+          "task_description": "put both moka pots on the stove",
+          "episodes": 50,
+          "successes": 40
+        },
+        {
+          "task_id": 9,
+          "task_description": "put the yellow and white mug in the microwave and close it",
+          "episodes": 50,
+          "successes": 41
+        }
+      ],
+      "metadata_limitation": "Summary does not record checkpoint, eval seed, initial-state hashes, or server settings."
+    },
+    "edge_libero10_3ep_fullft_reptileinit_repa_dinov2b_l24_subgrid122_w5.0_50demo_2000": {
+      "path": "cosmos_storage/outputs/eval/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit_repa_dinov2b_l24_subgrid122_w5.0_50demo_2000/summary.json",
+      "total_episodes": 500,
+      "total_successes": 329,
+      "success_rate": 0.658,
+      "per_task": [
+        {
+          "task_id": 0,
+          "task_description": "put both the alphabet soup and the tomato sauce in the basket",
+          "episodes": 50,
+          "successes": 11
+        },
+        {
+          "task_id": 1,
+          "task_description": "put both the cream cheese box and the butter in the basket",
+          "episodes": 50,
+          "successes": 36
+        },
+        {
+          "task_id": 2,
+          "task_description": "turn on the stove and put the moka pot on it",
+          "episodes": 50,
+          "successes": 27
+        },
+        {
+          "task_id": 3,
+          "task_description": "put the black bowl in the bottom drawer of the cabinet and close it",
+          "episodes": 50,
+          "successes": 35
+        },
+        {
+          "task_id": 4,
+          "task_description": "put the white mug on the left plate and put the yellow and white mug on the right plate",
+          "episodes": 50,
+          "successes": 33
+        },
+        {
+          "task_id": 5,
+          "task_description": "pick up the book and place it in the back compartment of the caddy",
+          "episodes": 50,
+          "successes": 43
+        },
+        {
+          "task_id": 6,
+          "task_description": "put the white mug on the plate and put the chocolate pudding to the right of the plate",
+          "episodes": 50,
+          "successes": 28
+        },
+        {
+          "task_id": 7,
+          "task_description": "put both the alphabet soup and the cream cheese box in the basket",
+          "episodes": 50,
+          "successes": 36
+        },
+        {
+          "task_id": 8,
+          "task_description": "put both moka pots on the stove",
+          "episodes": 50,
+          "successes": 38
+        },
+        {
+          "task_id": 9,
+          "task_description": "put the yellow and white mug in the microwave and close it",
+          "episodes": 50,
+          "successes": 42
+        }
+      ],
+      "metadata_limitation": "Summary does not record checkpoint, eval seed, initial-state hashes, or server settings."
+    },
+    "edge_libero10_3ep_fullft_reptileinit_repa_dinov2b_l8_avgpool_w1.0_ramp200_50demo_2000": {
+      "path": "cosmos_storage/outputs/eval/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit_repa_dinov2b_l8_avgpool_w1.0_ramp200_50demo_2000/summary.json",
+      "total_episodes": 500,
+      "total_successes": 322,
+      "success_rate": 0.644,
+      "per_task": [
+        {
+          "task_id": 0,
+          "task_description": "put both the alphabet soup and the tomato sauce in the basket",
+          "episodes": 50,
+          "successes": 8
+        },
+        {
+          "task_id": 1,
+          "task_description": "put both the cream cheese box and the butter in the basket",
+          "episodes": 50,
+          "successes": 41
+        },
+        {
+          "task_id": 2,
+          "task_description": "turn on the stove and put the moka pot on it",
+          "episodes": 50,
+          "successes": 27
+        },
+        {
+          "task_id": 3,
+          "task_description": "put the black bowl in the bottom drawer of the cabinet and close it",
+          "episodes": 50,
+          "successes": 27
+        },
+        {
+          "task_id": 4,
+          "task_description": "put the white mug on the left plate and put the yellow and white mug on the right plate",
+          "episodes": 50,
+          "successes": 32
+        },
+        {
+          "task_id": 5,
+          "task_description": "pick up the book and place it in the back compartment of the caddy",
+          "episodes": 50,
+          "successes": 36
+        },
+        {
+          "task_id": 6,
+          "task_description": "put the white mug on the plate and put the chocolate pudding to the right of the plate",
+          "episodes": 50,
+          "successes": 35
+        },
+        {
+          "task_id": 7,
+          "task_description": "put both the alphabet soup and the cream cheese box in the basket",
+          "episodes": 50,
+          "successes": 33
+        },
+        {
+          "task_id": 8,
+          "task_description": "put both moka pots on the stove",
+          "episodes": 50,
+          "successes": 42
+        },
+        {
+          "task_id": 9,
+          "task_description": "put the yellow and white mug in the microwave and close it",
+          "episodes": 50,
+          "successes": 41
+        }
+      ],
+      "metadata_limitation": "Summary does not record checkpoint, eval seed, initial-state hashes, or server settings."
+    },
+    "edge_libero10_3ep_fullft_reptileinit_repa_dinov2b_l8_avgpool_w5.0_50demo_2000": {
+      "path": "cosmos_storage/outputs/eval/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit_repa_dinov2b_l8_avgpool_w5.0_50demo_2000/summary.json",
+      "total_episodes": 500,
+      "total_successes": 314,
+      "success_rate": 0.628,
+      "per_task": [
+        {
+          "task_id": 0,
+          "task_description": "put both the alphabet soup and the tomato sauce in the basket",
+          "episodes": 50,
+          "successes": 10
+        },
+        {
+          "task_id": 1,
+          "task_description": "put both the cream cheese box and the butter in the basket",
+          "episodes": 50,
+          "successes": 38
+        },
+        {
+          "task_id": 2,
+          "task_description": "turn on the stove and put the moka pot on it",
+          "episodes": 50,
+          "successes": 28
+        },
+        {
+          "task_id": 3,
+          "task_description": "put the black bowl in the bottom drawer of the cabinet and close it",
+          "episodes": 50,
+          "successes": 31
+        },
+        {
+          "task_id": 4,
+          "task_description": "put the white mug on the left plate and put the yellow and white mug on the right plate",
+          "episodes": 50,
+          "successes": 26
+        },
+        {
+          "task_id": 5,
+          "task_description": "pick up the book and place it in the back compartment of the caddy",
+          "episodes": 50,
+          "successes": 39
+        },
+        {
+          "task_id": 6,
+          "task_description": "put the white mug on the plate and put the chocolate pudding to the right of the plate",
+          "episodes": 50,
+          "successes": 32
+        },
+        {
+          "task_id": 7,
+          "task_description": "put both the alphabet soup and the cream cheese box in the basket",
+          "episodes": 50,
+          "successes": 33
+        },
+        {
+          "task_id": 8,
+          "task_description": "put both moka pots on the stove",
+          "episodes": 50,
+          "successes": 38
+        },
+        {
+          "task_id": 9,
+          "task_description": "put the yellow and white mug in the microwave and close it",
+          "episodes": 50,
+          "successes": 39
+        }
+      ],
+      "metadata_limitation": "Summary does not record checkpoint, eval seed, initial-state hashes, or server settings."
+    },
+    "edge_libero10_3ep_fullft_reptileinit_repa_dinov2b_l8_avgpool_w5.0_ramp200_50demo_2000": {
+      "path": "cosmos_storage/outputs/eval/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit_repa_dinov2b_l8_avgpool_w5.0_ramp200_50demo_2000/summary.json",
+      "total_episodes": 500,
+      "total_successes": 310,
+      "success_rate": 0.62,
+      "per_task": [
+        {
+          "task_id": 0,
+          "task_description": "put both the alphabet soup and the tomato sauce in the basket",
+          "episodes": 50,
+          "successes": 16
+        },
+        {
+          "task_id": 1,
+          "task_description": "put both the cream cheese box and the butter in the basket",
+          "episodes": 50,
+          "successes": 37
+        },
+        {
+          "task_id": 2,
+          "task_description": "turn on the stove and put the moka pot on it",
+          "episodes": 50,
+          "successes": 24
+        },
+        {
+          "task_id": 3,
+          "task_description": "put the black bowl in the bottom drawer of the cabinet and close it",
+          "episodes": 50,
+          "successes": 32
+        },
+        {
+          "task_id": 4,
+          "task_description": "put the white mug on the left plate and put the yellow and white mug on the right plate",
+          "episodes": 50,
+          "successes": 28
+        },
+        {
+          "task_id": 5,
+          "task_description": "pick up the book and place it in the back compartment of the caddy",
+          "episodes": 50,
+          "successes": 36
+        },
+        {
+          "task_id": 6,
+          "task_description": "put the white mug on the plate and put the chocolate pudding to the right of the plate",
+          "episodes": 50,
+          "successes": 37
+        },
+        {
+          "task_id": 7,
+          "task_description": "put both the alphabet soup and the cream cheese box in the basket",
+          "episodes": 50,
+          "successes": 26
+        },
+        {
+          "task_id": 8,
+          "task_description": "put both moka pots on the stove",
+          "episodes": 50,
+          "successes": 36
+        },
+        {
+          "task_id": 9,
+          "task_description": "put the yellow and white mug in the microwave and close it",
+          "episodes": 50,
+          "successes": 38
+        }
+      ],
+      "metadata_limitation": "Summary does not record checkpoint, eval seed, initial-state hashes, or server settings."
+    },
+    "hs08_v2_50demo_2000": {
+      "path": "cosmos_storage/outputs/eval/cosmos3_action_libero/edge_libero10_fewshot/hs08_v2_50demo_2000/summary.json",
+      "total_episodes": 500,
+      "total_successes": 290,
+      "success_rate": 0.58,
+      "per_task": [
+        {
+          "task_id": 0,
+          "task_description": "put both the alphabet soup and the tomato sauce in the basket",
+          "episodes": 50,
+          "successes": 10
+        },
+        {
+          "task_id": 1,
+          "task_description": "put both the cream cheese box and the butter in the basket",
+          "episodes": 50,
+          "successes": 38
+        },
+        {
+          "task_id": 2,
+          "task_description": "turn on the stove and put the moka pot on it",
+          "episodes": 50,
+          "successes": 25
+        },
+        {
+          "task_id": 3,
+          "task_description": "put the black bowl in the bottom drawer of the cabinet and close it",
+          "episodes": 50,
+          "successes": 28
+        },
+        {
+          "task_id": 4,
+          "task_description": "put the white mug on the left plate and put the yellow and white mug on the right plate",
+          "episodes": 50,
+          "successes": 25
+        },
+        {
+          "task_id": 5,
+          "task_description": "pick up the book and place it in the back compartment of the caddy",
+          "episodes": 50,
+          "successes": 37
+        },
+        {
+          "task_id": 6,
+          "task_description": "put the white mug on the plate and put the chocolate pudding to the right of the plate",
+          "episodes": 50,
+          "successes": 27
+        },
+        {
+          "task_id": 7,
+          "task_description": "put both the alphabet soup and the cream cheese box in the basket",
+          "episodes": 50,
+          "successes": 29
+        },
+        {
+          "task_id": 8,
+          "task_description": "put both moka pots on the stove",
+          "episodes": 50,
+          "successes": 30
+        },
+        {
+          "task_id": 9,
+          "task_description": "put the yellow and white mug in the microwave and close it",
+          "episodes": 50,
+          "successes": 41
+        }
+      ],
+      "metadata_limitation": "Summary does not record checkpoint, eval seed, initial-state hashes, or server settings."
+    },
+    "hs10_repa_dinov2b_l24_avgpool_w5.0_50demo_2000": {
+      "path": "cosmos_storage/outputs/eval/cosmos3_action_libero/edge_libero10_fewshot_repa/hs10_repa_dinov2b_l24_avgpool_w5.0_50demo_2000/summary.json",
+      "total_episodes": 500,
+      "total_successes": 297,
+      "success_rate": 0.594,
+      "per_task": [
+        {
+          "task_id": 0,
+          "task_description": "put both the alphabet soup and the tomato sauce in the basket",
+          "episodes": 50,
+          "successes": 16
+        },
+        {
+          "task_id": 1,
+          "task_description": "put both the cream cheese box and the butter in the basket",
+          "episodes": 50,
+          "successes": 25
+        },
+        {
+          "task_id": 2,
+          "task_description": "turn on the stove and put the moka pot on it",
+          "episodes": 50,
+          "successes": 26
+        },
+        {
+          "task_id": 3,
+          "task_description": "put the black bowl in the bottom drawer of the cabinet and close it",
+          "episodes": 50,
+          "successes": 27
+        },
+        {
+          "task_id": 4,
+          "task_description": "put the white mug on the left plate and put the yellow and white mug on the right plate",
+          "episodes": 50,
+          "successes": 27
+        },
+        {
+          "task_id": 5,
+          "task_description": "pick up the book and place it in the back compartment of the caddy",
+          "episodes": 50,
+          "successes": 43
+        },
+        {
+          "task_id": 6,
+          "task_description": "put the white mug on the plate and put the chocolate pudding to the right of the plate",
+          "episodes": 50,
+          "successes": 27
+        },
+        {
+          "task_id": 7,
+          "task_description": "put both the alphabet soup and the cream cheese box in the basket",
+          "episodes": 50,
+          "successes": 28
+        },
+        {
+          "task_id": 8,
+          "task_description": "put both moka pots on the stove",
+          "episodes": 50,
+          "successes": 38
+        },
+        {
+          "task_id": 9,
+          "task_description": "put the yellow and white mug in the microwave and close it",
+          "episodes": 50,
+          "successes": 40
+        }
+      ],
+      "metadata_limitation": "Summary does not record checkpoint, eval seed, initial-state hashes, or server settings."
+    }
+  },
+  "conditional_paired_comparison": {
+    "conditional_only": "Episode IDs match; identical historical rollout conditions are not proven by the summaries.",
+    "wins": 70,
+    "losses": 61,
+    "exact_mcnemar_two_sided_p": 0.48472021812853056
+  },
+  "meta": {
+    "path": "cosmos_storage/outputs/cosmos3_action_meta/reptile_meta/edge_reptile_full_k8w16_s10_eps0.5_seed42_v2/reptile_train_log.jsonl",
+    "logged_iterations": 1000,
+    "last_iteration": 1000,
+    "query_buckets": [
+      {
+        "iteration_range": [
+          1,
+          250
+        ],
+        "query_evaluations": 50,
+        "zero_shot_mean": 2.6664964616298676,
+        "adapted_mean": 2.453128788471222,
+        "negative_gain_count": 27
+      },
+      {
+        "iteration_range": [
+          251,
+          500
+        ],
+        "query_evaluations": 50,
+        "zero_shot_mean": 1.9679192966222763,
+        "adapted_mean": 2.183247198462486,
+        "negative_gain_count": 41
+      },
+      {
+        "iteration_range": [
+          501,
+          750
+        ],
+        "query_evaluations": 50,
+        "zero_shot_mean": 2.0793818068504333,
+        "adapted_mean": 2.3428189343214036,
+        "negative_gain_count": 42
+      },
+      {
+        "iteration_range": [
+          751,
+          1000
+        ],
+        "query_evaluations": 50,
+        "zero_shot_mean": 1.81247139275074,
+        "adapted_mean": 2.064377606511116,
+        "negative_gain_count": 43
+      }
+    ],
+    "embodiment_counts": {
+      "robomind_franka": 185,
+      "bridge": 212,
+      "fractal": 217,
+      "robomind_ur": 189,
+      "molmoact2_yam": 197
+    },
+    "summed_hours": {
+      "iter_time": 58.6925042929252,
+      "t_encode": 19.378604240549937,
+      "t_inner": 38.85775116609202,
+      "t_eval": 0.21587202495998806,
+      "t_data": 0.10777277032534281
+    }
+  },
+  "saved_configs": {
+    "edge_reptile_full_k8w16_s10_eps0.5_seed42_v2": {
+      "path": "cosmos_storage/outputs/cosmos3_action_meta/reptile_meta/edge_reptile_full_k8w16_s10_eps0.5_seed42_v2/config.yaml",
+      "checkpoint": {
+        "load_path": "/gallery_moma/hyunseok.seong/project/cosmos_storage/checkpoints/Cosmos3-Edge",
+        "meta_action_init_path": "",
+        "load_ema_to_reg": false
+      },
+      "lr": 5e-05,
+      "lr_multipliers": {
+        "action2llm": 1.0,
+        "action_modality_embed": 1.0,
+        "llm2action": 1.0,
+        "lora_": 1.0
+      },
+      "cycle_lengths": [
+        10000000
+      ],
+      "validation": {
+        "max_val_iter": null,
+        "run_validation": false,
+        "run_validation_on_start": false,
+        "validation_iter": 100
+      },
+      "repa": {}
+    },
+    "edge_libero10_3ep_fullft_reptileinit": {
+      "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit/config.yaml",
+      "checkpoint": {
+        "load_path": "/gallery_moma/hyunseok.seong/project/cosmos_storage/outputs/cosmos3_action_meta/reptile_meta/edge_reptile_full_k8w16_s10_eps0.5_seed42_v2/checkpoints/iter_000001000",
+        "meta_action_init_path": "/gallery_moma/hyunseok.seong/project/cosmos_storage/outputs/cosmos3_action_meta/reptile_meta/edge_reptile_full_k8w16_s10_eps0.5_seed42_v2/meta_action_init_iter_001000.pt",
+        "load_ema_to_reg": false
+      },
+      "lr": 5e-05,
+      "lr_multipliers": {
+        "action2llm": 1.0,
+        "action_modality_embed": 1.0,
+        "llm2action": 1.0,
+        "lora_": 1.0
+      },
+      "cycle_lengths": [
+        2000
+      ],
+      "validation": {
+        "max_val_iter": 16,
+        "run_validation": true,
+        "run_validation_on_start": true,
+        "validation_iter": 200
+      },
+      "repa": {
+        "center_targets": false,
+        "enabled": false,
+        "layer_index": 8,
+        "loss_weight": 0.5,
+        "masked_max_samples": 16,
+        "masked_ratio_max": 0.7,
+        "masked_ratio_min": 0.4,
+        "masked_seed": 42,
+        "masked_visible_weight": 0.25,
+        "masked_warmup_steps": 200,
+        "native_video_key": "video_native",
+        "num_views": 2,
+        "objective": "token",
+        "projector_hidden_dim": 2048,
+        "projector_type": "mlp",
+        "relation_distance": "l2",
+        "relation_loss_weight": 0.0,
+        "spatial_norm_eps": 1e-06,
+        "target_adapter": "avgpool",
+        "target_adapter_depthwise": true,
+        "target_adapter_kernel_size": 3,
+        "target_grid_thw": [
+          4,
+          5,
+          5
+        ],
+        "teacher": "vjepa2_1_vit_base_384",
+        "teacher_batch_size": 32,
+        "teacher_checkpoint_path": null,
+        "teacher_input_size": 256,
+        "teacher_num_frames": 16
+      }
+    },
+    "edge_libero10_3ep_fullft_reptileinit_repa_dinov2b_l24_avgpool_w5.0": {
+      "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit_repa_dinov2b_l24_avgpool_w5.0/config.yaml",
+      "checkpoint": {
+        "load_path": "/gallery_moma/hyunseok.seong/project/cosmos_storage/outputs/cosmos3_action_meta/reptile_meta/edge_reptile_full_k8w16_s10_eps0.5_seed42_v2/checkpoints/iter_000001000",
+        "meta_action_init_path": "/gallery_moma/hyunseok.seong/project/cosmos_storage/outputs/cosmos3_action_meta/reptile_meta/edge_reptile_full_k8w16_s10_eps0.5_seed42_v2/meta_action_init_iter_001000.pt",
+        "load_ema_to_reg": false
+      },
+      "lr": 5e-05,
+      "lr_multipliers": {
+        "action2llm": 1.0,
+        "action_modality_embed": 1.0,
+        "llm2action": 1.0,
+        "lora_": 1.0
+      },
+      "cycle_lengths": [
+        2000
+      ],
+      "validation": {
+        "max_val_iter": 16,
+        "run_validation": true,
+        "run_validation_on_start": true,
+        "validation_iter": 200
+      },
+      "repa": {
+        "center_targets": false,
+        "enabled": true,
+        "layer_index": 24,
+        "loss_weight": 5.0,
+        "masked_max_samples": 16,
+        "masked_ratio_max": 0.7,
+        "masked_ratio_min": 0.4,
+        "masked_seed": 42,
+        "masked_visible_weight": 0.25,
+        "masked_warmup_steps": 200,
+        "native_video_key": "video_native",
+        "num_views": 2,
+        "objective": "token",
+        "projector_hidden_dim": 2048,
+        "projector_type": "mlp",
+        "relation_distance": "l2",
+        "relation_loss_weight": 0.0,
+        "spatial_norm_eps": 1e-06,
+        "target_adapter": "avgpool",
+        "target_adapter_depthwise": true,
+        "target_adapter_kernel_size": 3,
+        "target_grid_thw": [
+          4,
+          5,
+          5
+        ],
+        "teacher": "dinov2_vitb14",
+        "teacher_batch_size": 32,
+        "teacher_checkpoint_path": null,
+        "teacher_input_size": 224,
+        "teacher_num_frames": 16
+      }
+    },
+    "hs08_v2": {
+      "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/hs08_v2/config.yaml",
+      "checkpoint": {
+        "load_path": "/gallery_moma/hyunseok.seong/project/cosmos_storage/checkpoints/Cosmos3-Edge",
+        "meta_action_init_path": null,
+        "load_ema_to_reg": false
+      },
+      "lr": 5e-05,
+      "lr_multipliers": {
+        "action2llm": 5.0,
+        "action_modality_embed": 5.0,
+        "llm2action": 5.0
+      },
+      "cycle_lengths": [
+        2000
+      ],
+      "validation": {
+        "max_val_iter": 32,
+        "run_validation": true,
+        "run_validation_on_start": true,
+        "validation_iter": 100
+      },
+      "repa": {}
+    }
+  },
+  "validation_logs": {
+    "edge_reptile_full_k8w16_s10_eps0.5_seed42_v2": [],
+    "edge_libero10_3ep_fullft_reptileinit": [
+      {
+        "iteration": 0,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit/wandb/run-20260926_125427-zbpug4t3/files/output.log",
+        "line": 13,
+        "loss_total": 5.03141,
+        "flow_matching_loss_action": 0.31373,
+        "flow_matching_loss_vision": 0.18941,
+        "num_batches": 32.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 200,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit/wandb/run-20260926_125427-zbpug4t3/files/output.log",
+        "line": 253,
+        "loss_total": 2.0947,
+        "flow_matching_loss_action": 0.07957,
+        "flow_matching_loss_vision": 0.1299,
+        "num_batches": 32.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 400,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit/wandb/run-20260926_125427-zbpug4t3/files/output.log",
+        "line": 490,
+        "loss_total": 2.07011,
+        "flow_matching_loss_action": 0.06806,
+        "flow_matching_loss_vision": 0.13895,
+        "num_batches": 32.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 600,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit/wandb/run-20260926_125427-zbpug4t3/files/output.log",
+        "line": 730,
+        "loss_total": 3.07337,
+        "flow_matching_loss_action": 0.17547,
+        "flow_matching_loss_vision": 0.13187,
+        "num_batches": 32.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 800,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit/wandb/run-20260926_125427-zbpug4t3/files/output.log",
+        "line": 967,
+        "loss_total": 1.72442,
+        "flow_matching_loss_action": 0.04685,
+        "flow_matching_loss_vision": 0.12559,
+        "num_batches": 32.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 1000,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit/wandb/run-20260926_125427-zbpug4t3/files/output.log",
+        "line": 1207,
+        "loss_total": 1.85734,
+        "flow_matching_loss_action": 0.05899,
+        "flow_matching_loss_vision": 0.12675,
+        "num_batches": 32.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 1200,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit/wandb/run-20260926_125427-zbpug4t3/files/output.log",
+        "line": 1444,
+        "loss_total": 1.84311,
+        "flow_matching_loss_action": 0.04824,
+        "flow_matching_loss_vision": 0.13607,
+        "num_batches": 32.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 1400,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit/wandb/run-20260926_125427-zbpug4t3/files/output.log",
+        "line": 1681,
+        "loss_total": 2.19351,
+        "flow_matching_loss_action": 0.07629,
+        "flow_matching_loss_vision": 0.14306,
+        "num_batches": 32.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 1600,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit/wandb/run-20260926_125427-zbpug4t3/files/output.log",
+        "line": 1921,
+        "loss_total": 2.3701,
+        "flow_matching_loss_action": 0.07927,
+        "flow_matching_loss_vision": 0.15774,
+        "num_batches": 32.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 1800,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit/wandb/run-20260926_125427-zbpug4t3/files/output.log",
+        "line": 2158,
+        "loss_total": 3.17092,
+        "flow_matching_loss_action": 0.13213,
+        "flow_matching_loss_vision": 0.18496,
+        "num_batches": 32.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 2000,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit/wandb/run-20260926_125427-zbpug4t3/files/output.log",
+        "line": 2398,
+        "loss_total": 2.39016,
+        "flow_matching_loss_action": 0.07421,
+        "flow_matching_loss_vision": 0.16481,
+        "num_batches": 32.0,
+        "num_nonfinite": 0.0
+      }
+    ],
+    "edge_libero10_3ep_fullft_reptileinit_repa_dinov2b_l24_avgpool_w5.0": [
+      {
+        "iteration": 0,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit_repa_dinov2b_l24_avgpool_w5.0/wandb/run-20260927_231854-nxtfridz/files/output.log",
+        "line": 13,
+        "loss_total": 9.9625,
+        "flow_matching_loss_action": 0.30816,
+        "flow_matching_loss_vision": 0.18634,
+        "repa_loss": 1.00351,
+        "repa_cos_sim": -0.00351,
+        "repa_rel_loss": 0.07724,
+        "repa_cos_sim_centered": -0.00388,
+        "num_batches": 32.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 200,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit_repa_dinov2b_l24_avgpool_w5.0/wandb/run-20260927_231854-nxtfridz/files/output.log",
+        "line": 253,
+        "loss_total": 3.00885,
+        "flow_matching_loss_action": 0.07789,
+        "flow_matching_loss_vision": 0.13642,
+        "repa_loss": 0.17316,
+        "repa_cos_sim": 0.82684,
+        "repa_rel_loss": 0.01922,
+        "repa_cos_sim_centered": 0.74287,
+        "num_batches": 32.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 400,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit_repa_dinov2b_l24_avgpool_w5.0/wandb/run-20260927_231854-nxtfridz/files/output.log",
+        "line": 490,
+        "loss_total": 2.75955,
+        "flow_matching_loss_action": 0.06644,
+        "flow_matching_loss_vision": 0.14622,
+        "repa_loss": 0.12658,
+        "repa_cos_sim": 0.87342,
+        "repa_rel_loss": 0.00825,
+        "repa_cos_sim_centered": 0.81806,
+        "num_batches": 32.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 600,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit_repa_dinov2b_l24_avgpool_w5.0/wandb/run-20260927_231854-nxtfridz/files/output.log",
+        "line": 730,
+        "loss_total": 3.58112,
+        "flow_matching_loss_action": 0.17197,
+        "flow_matching_loss_vision": 0.13338,
+        "repa_loss": 0.10553,
+        "repa_cos_sim": 0.89447,
+        "repa_rel_loss": 0.00703,
+        "repa_cos_sim_centered": 0.84409,
+        "num_batches": 32.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 800,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit_repa_dinov2b_l24_avgpool_w5.0/wandb/run-20260927_231854-nxtfridz/files/output.log",
+        "line": 967,
+        "loss_total": 2.26457,
+        "flow_matching_loss_action": 0.04901,
+        "flow_matching_loss_vision": 0.13264,
+        "repa_loss": 0.08963,
+        "repa_cos_sim": 0.91037,
+        "repa_rel_loss": 0.0051,
+        "repa_cos_sim_centered": 0.86731,
+        "num_batches": 32.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 1000,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit_repa_dinov2b_l24_avgpool_w5.0/wandb/run-20260927_231854-nxtfridz/files/output.log",
+        "line": 1207,
+        "loss_total": 2.04127,
+        "flow_matching_loss_action": 0.03945,
+        "flow_matching_loss_vision": 0.129,
+        "repa_loss": 0.07135,
+        "repa_cos_sim": 0.92865,
+        "repa_rel_loss": 0.00339,
+        "repa_cos_sim_centered": 0.89051,
+        "num_batches": 32.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 1200,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit_repa_dinov2b_l24_avgpool_w5.0/wandb/run-20260927_231854-nxtfridz/files/output.log",
+        "line": 1444,
+        "loss_total": 2.54193,
+        "flow_matching_loss_action": 0.07381,
+        "flow_matching_loss_vision": 0.14186,
+        "repa_loss": 0.07703,
+        "repa_cos_sim": 0.92297,
+        "repa_rel_loss": 0.00401,
+        "repa_cos_sim_centered": 0.8809,
+        "num_batches": 32.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 1400,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit_repa_dinov2b_l24_avgpool_w5.0/wandb/run-20260927_231854-nxtfridz/files/output.log",
+        "line": 1681,
+        "loss_total": 2.39296,
+        "flow_matching_loss_action": 0.05112,
+        "flow_matching_loss_vision": 0.15094,
+        "repa_loss": 0.07448,
+        "repa_cos_sim": 0.92552,
+        "repa_rel_loss": 0.00397,
+        "repa_cos_sim_centered": 0.88383,
+        "num_batches": 32.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 1600,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit_repa_dinov2b_l24_avgpool_w5.0/wandb/run-20260927_231854-nxtfridz/files/output.log",
+        "line": 1921,
+        "loss_total": 3.3425,
+        "flow_matching_loss_action": 0.1128,
+        "flow_matching_loss_vision": 0.18216,
+        "repa_loss": 0.07857,
+        "repa_cos_sim": 0.92143,
+        "repa_rel_loss": 0.00411,
+        "repa_cos_sim_centered": 0.87831,
+        "num_batches": 32.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 1800,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit_repa_dinov2b_l24_avgpool_w5.0/wandb/run-20260927_231854-nxtfridz/files/output.log",
+        "line": 2158,
+        "loss_total": 3.02206,
+        "flow_matching_loss_action": 0.09004,
+        "flow_matching_loss_vision": 0.17384,
+        "repa_loss": 0.07665,
+        "repa_cos_sim": 0.92335,
+        "repa_rel_loss": 0.00411,
+        "repa_cos_sim_centered": 0.88136,
+        "num_batches": 32.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 2000,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/edge_libero10_3ep_fullft_reptileinit_repa_dinov2b_l24_avgpool_w5.0/wandb/run-20260927_231854-nxtfridz/files/output.log",
+        "line": 2398,
+        "loss_total": 3.2135,
+        "flow_matching_loss_action": 0.11064,
+        "flow_matching_loss_vision": 0.17555,
+        "repa_loss": 0.07032,
+        "repa_cos_sim": 0.92968,
+        "repa_rel_loss": 0.00333,
+        "repa_cos_sim_centered": 0.89021,
+        "num_batches": 32.0,
+        "num_nonfinite": 0.0
+      }
+    ],
+    "hs08_v2": [
+      {
+        "iteration": 0,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/hs08_v2/wandb/run-20260915_183803-9nlnxw1o/files/output.log",
+        "line": 13,
+        "loss_total": 56.8712,
+        "flow_matching_loss_action": 3.49922,
+        "flow_matching_loss_vision": 2.1879,
+        "num_batches": 64.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 100,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/hs08_v2/wandb/run-20260915_183803-9nlnxw1o/files/output.log",
+        "line": 130,
+        "loss_total": 2.30681,
+        "flow_matching_loss_action": 0.08834,
+        "flow_matching_loss_vision": 0.14234,
+        "num_batches": 64.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 200,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/hs08_v2/wandb/run-20260915_183803-9nlnxw1o/files/output.log",
+        "line": 257,
+        "loss_total": 2.15145,
+        "flow_matching_loss_action": 0.07803,
+        "flow_matching_loss_vision": 0.13711,
+        "num_batches": 64.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 300,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/hs08_v2/wandb/run-20260915_183803-9nlnxw1o/files/output.log",
+        "line": 371,
+        "loss_total": 1.85081,
+        "flow_matching_loss_action": 0.05759,
+        "flow_matching_loss_vision": 0.12749,
+        "num_batches": 64.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 400,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/hs08_v2/wandb/run-20260915_183803-9nlnxw1o/files/output.log",
+        "line": 498,
+        "loss_total": 1.91053,
+        "flow_matching_loss_action": 0.06354,
+        "flow_matching_loss_vision": 0.12751,
+        "num_batches": 64.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 500,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/hs08_v2/wandb/run-20260915_183803-9nlnxw1o/files/output.log",
+        "line": 615,
+        "loss_total": 1.94243,
+        "flow_matching_loss_action": 0.06532,
+        "flow_matching_loss_vision": 0.12893,
+        "num_batches": 64.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 600,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/hs08_v2/wandb/run-20260915_183803-9nlnxw1o/files/output.log",
+        "line": 742,
+        "loss_total": 1.86964,
+        "flow_matching_loss_action": 0.06005,
+        "flow_matching_loss_vision": 0.12691,
+        "num_batches": 64.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 700,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/hs08_v2/wandb/run-20260915_183803-9nlnxw1o/files/output.log",
+        "line": 856,
+        "loss_total": 2.03823,
+        "flow_matching_loss_action": 0.06916,
+        "flow_matching_loss_vision": 0.13466,
+        "num_batches": 64.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 800,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/hs08_v2/wandb/run-20260915_183803-9nlnxw1o/files/output.log",
+        "line": 983,
+        "loss_total": 1.88576,
+        "flow_matching_loss_action": 0.0585,
+        "flow_matching_loss_vision": 0.13008,
+        "num_batches": 64.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 900,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/hs08_v2/wandb/run-20260915_183803-9nlnxw1o/files/output.log",
+        "line": 1097,
+        "loss_total": 1.94634,
+        "flow_matching_loss_action": 0.06514,
+        "flow_matching_loss_vision": 0.1295,
+        "num_batches": 64.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 1000,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/hs08_v2/wandb/run-20260915_183803-9nlnxw1o/files/output.log",
+        "line": 1227,
+        "loss_total": 2.26163,
+        "flow_matching_loss_action": 0.08848,
+        "flow_matching_loss_vision": 0.13768,
+        "num_batches": 64.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 1100,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/hs08_v2/wandb/run-20260915_183803-9nlnxw1o/files/output.log",
+        "line": 1341,
+        "loss_total": 2.01154,
+        "flow_matching_loss_action": 0.06704,
+        "flow_matching_loss_vision": 0.13411,
+        "num_batches": 64.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 1200,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/hs08_v2/wandb/run-20260915_183803-9nlnxw1o/files/output.log",
+        "line": 1468,
+        "loss_total": 2.25457,
+        "flow_matching_loss_action": 0.08503,
+        "flow_matching_loss_vision": 0.14042,
+        "num_batches": 64.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 1300,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/hs08_v2/wandb/run-20260915_183803-9nlnxw1o/files/output.log",
+        "line": 1582,
+        "loss_total": 2.17459,
+        "flow_matching_loss_action": 0.07399,
+        "flow_matching_loss_vision": 0.14347,
+        "num_batches": 64.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 1400,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/hs08_v2/wandb/run-20260915_183803-9nlnxw1o/files/output.log",
+        "line": 1709,
+        "loss_total": 2.293,
+        "flow_matching_loss_action": 0.08496,
+        "flow_matching_loss_vision": 0.14434,
+        "num_batches": 64.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 1500,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/hs08_v2/wandb/run-20260915_183803-9nlnxw1o/files/output.log",
+        "line": 1826,
+        "loss_total": 2.27862,
+        "flow_matching_loss_action": 0.08182,
+        "flow_matching_loss_vision": 0.14605,
+        "num_batches": 64.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 1600,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/hs08_v2/wandb/run-20260915_183803-9nlnxw1o/files/output.log",
+        "line": 1953,
+        "loss_total": 2.44133,
+        "flow_matching_loss_action": 0.09162,
+        "flow_matching_loss_vision": 0.15251,
+        "num_batches": 64.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 1700,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/hs08_v2/wandb/run-20260915_183803-9nlnxw1o/files/output.log",
+        "line": 2067,
+        "loss_total": 2.64,
+        "flow_matching_loss_action": 0.1046,
+        "flow_matching_loss_vision": 0.1594,
+        "num_batches": 64.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 1800,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/hs08_v2/wandb/run-20260915_183803-9nlnxw1o/files/output.log",
+        "line": 2194,
+        "loss_total": 2.35024,
+        "flow_matching_loss_action": 0.08057,
+        "flow_matching_loss_vision": 0.15446,
+        "num_batches": 64.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 1900,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/hs08_v2/wandb/run-20260915_183803-9nlnxw1o/files/output.log",
+        "line": 2308,
+        "loss_total": 2.49731,
+        "flow_matching_loss_action": 0.08474,
+        "flow_matching_loss_vision": 0.16499,
+        "num_batches": 64.0,
+        "num_nonfinite": 0.0
+      },
+      {
+        "iteration": 2000,
+        "path": "cosmos_storage/outputs/cosmos3_action_libero/edge_libero10_fewshot/hs08_v2/wandb/run-20260915_183803-9nlnxw1o/files/output.log",
+        "line": 2438,
+        "loss_total": 2.51096,
+        "flow_matching_loss_action": 0.08657,
+        "flow_matching_loss_vision": 0.16452,
+        "num_batches": 64.0,
+        "num_nonfinite": 0.0
+      }
+    ]
+  }
+}
