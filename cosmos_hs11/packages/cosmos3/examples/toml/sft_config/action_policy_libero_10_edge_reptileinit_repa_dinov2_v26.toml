@@ -1,0 +1,106 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# cosmos_hs11 -- REPTILE INIT -> FULL fine-tune + DINOv2 REPA distillation (cosmos_hs10 v7 loss on the Reptile init).
+# = action_policy_libero_10_edge_reptileinit.toml + [model.repa] + "repa_" in keys_to_skip_loading (+ experiment/name):
+#     loss_total = 10 * fm_vision + 10 * fm_action                                                    (unchanged)
+#                + repa.loss_weight * (1 - cos(MLP(h_8[predicted video tokens]), avgpool(DINOv2-ViT-B/14(frames 1..16))))
+#   frozen facebook/dinov2-base per frame at 224 px (16x16 patches), pooled 16 frames -> 4 latent frames and 16x16 -> 5x5
+#   per view, views concatenated along width (4x5x10 = the MoT token grid). New trainable params: net.repa_head.* (the
+#   REPA 3-layer SiLU MLP 2048->2048->2048->768; "repa_" is in the experiment's keys_to_select). The Reptile DCP has no
+#   repa_head -> skipped at load, fresh init. Compare against the plain reptileinit TOML: only the loss differs.
+#   wandb val/*: + val/repa_loss, val/repa_cos_sim, val/repa_cos_sim_centered (watch the centered one; raw saturates).
+# Extra env: HF_HOME (facebook/dinov2-base snapshot under $HF_HOME/hub, default $COSMOS_STORAGE/hf_cache; downloaded once
+#   if absent -- do that on a node with internet). Memory: +~2 GB vs the plain recipe (teacher + head); 4 x 64 fits 44 GiB.
+# Docs: docs/action_reptile_meta.md section 8, docs/action_policy_libero_repa_vjepa.md (REPA code, cosmos_hs10).
+#
+# Base recipe: LIBERO-10 few-shot post-training (3 demos/task = 30 episodes) with the
+# ORIGINAL Cosmos3 recipe (experiment action_policy_libero_edge), warm-started from a full-mode Reptile checkpoint:
+#   [checkpoint].load_path       = REPTILE_CKPT_PATH  (<reptile job>/checkpoints/iter_XXXXXXXXX -- the dir holding model/)
+#                                  -> moe_gen, time_embedder, vae2llm, llm2vae, k_norm_und_for_gen come from theta
+#   [checkpoint].meta_action_init_path = META_ACTION_INIT_PATH (<reptile job>/meta_action_init_iter_XXXXXX.pt)
+#                                  -> the meta action heads are copied from the scratch row into the LIBERO row (5)
+# Same trainable set, LR, schedule, batch and validation as the full-FT baseline (cosmos_hs08 / hs09); differences to the
+# fresh baseline: the init, and the action-head LR multiplier (5x fresh-head boost -> 1x, the heads are meta-initialized).
+# 4 GPUs (shard 4) x 64 windows = global batch 256, warmup 200, cycle 2000, 2000 iterations, held-out val every 200.
+# Env: LIBERO_ROOT, REPTILE_CKPT_PATH, META_ACTION_INIT_PATH, WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT. See docs/action_reptile_meta.md.
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_libero_edge_repa"
+project      = "cosmos3_action_libero"
+group        = "edge_libero10_fewshot"
+name         = "edge_libero10_3ep_fullft_reptileinitv4_dinov2b_l28_w10.0"
+wandb_mode   = "offline"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+lora_enabled = false            # full mode: theta lives in the DCP weights themselves, no adapters
+
+# ---- cosmos_hs10 v7: DINOv2 ViT-B/14 REPA distillation (hs10 default setting: block 8, avgpool, MLP projector, w 5.0)
+[model.repa]
+enabled            = true
+loss_weight        = 10.0                   # unweighted 1 - cos in [0, 2]; the fm terms are x10-scaled (see hs10 docs)
+layer_index        = 28                     # output of MoT block 8 (of 28); next candidate 14
+teacher            = "dinov2_vitb14"       # facebook/dinov2-base (D=768), per frame; V-JEPA 2.1 = "vjepa2_1_vit_base_384"
+teacher_input_size = 224                   # 16x16 patches of 14 px (REPA reference setting)
+target_adapter     = "avgpool"             # variant 1 (parameter-free) | "avgpool_conv" (2) | "strided_conv" (3)
+target_grid_thw    = [4, 5, 5]             # per-view MoT token grid (validated at runtime)
+
+[model.ema]
+enabled         = true
+rate            = 0.1
+iteration_shift = 0
+
+[model.parallelism]
+data_parallel_shard_degree     = 2      # 4-GPU run: NPROC_PER_NODE=4 sr 4 48 ...
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 5.0e-05          # full-FT LR of the recipe
+
+[optimizer.lr_multipliers]
+action2llm            = 1.0   # 5x in the fresh-head baseline; heads are meta-initialized here -> 1x
+llm2action            = 1.0
+action_modality_embed = 1.0
+
+[scheduler]
+cycle_lengths = [2000]        # linear decay to 0 at max_iter (matches the cosmos_hs08 baseline)
+warm_up_steps = [200]
+
+[trainer]
+max_iter        = 2000
+logging_iter    = 20
+grad_accum_iter = 1              # global 256 = 64 windows/rank x 4 ranks (2-GPU alternative: shard 2, bs 64, accum 2)
+# held-out validation
+run_validation          = true
+run_validation_on_start = true   # iteration 0 = the Reptile-initialized model before any update
+validation_iter         = 200
+max_val_iter            = 16     # x 64 windows x 4 ranks = 4096 windows ~= half of the 50-episode val set (same windows every time)
+
+[dataloader_train]
+max_samples_per_batch = 128       # per rank; x 4 ranks = global batch 256
+episode_subset_path   = "libero_10_3ep_per_task_seed42.json"          # 3 demos/task x 10 tasks = 30 episodes
+
+[dataloader_val]
+max_samples_per_batch = 16
+episode_subset_path   = "libero_10_val_5ep_per_task_seed42_excl3ep.json"  # 5 held-out demos/task, disjoint from train
+
+[checkpoint]
+load_path = "${oc.env:REPTILE_CKPT_PATH}"   # <reptile job>/checkpoints/iter_XXXXXXXXX (NOT the base Cosmos3-Edge dir)
+save_iter = 2000
+# The Reptile DCP has no EMA; the action heads are skipped (fresh) and then overwritten by the meta heads below.
+keys_to_skip_loading = ["net_ema.", "repa_", "action2llm", "llm2action", "action_modality_embed"]   # + repa_head (absent from the Reptile DCP)
+meta_action_init_path                   = "${oc.env:META_ACTION_INIT_PATH}"
+meta_action_init_domain_id              = 5      # EMBODIMENT_TO_DOMAIN_ID["libero"]
+meta_action_init_include_modality_embed = true
+meta_action_init_include_lora           = false  # full mode: no adapters
+meta_action_init_include_time_embedder  = false  # already in the DCP weights

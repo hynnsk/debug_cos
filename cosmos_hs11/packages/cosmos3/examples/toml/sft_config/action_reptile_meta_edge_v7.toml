@@ -1,0 +1,85 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# cosmos_hs11 -- REPTILE meta-training, FULL-parameter mode (the default).
+# Experiment: action_reptile_meta_edge; entry point: cosmos_framework.scripts.train_action_reptile.
+# theta = moe_gen + time_embedder + vae2llm + llm2vae + k_norm_und_for_gen + action heads (1.42B) == the trainable
+# set of the Cosmos full-FT post-training recipe. Each meta-iteration: one embodiment, K=8 demos, k=20 FusedAdam
+# steps at the downstream LR (5e-5) from theta, then theta <- theta + eps * (theta_tilde - theta).
+# 4 GPUs (FSDP shard 4, fp32 master weights). Est. ~1.5-2 min / meta-iteration -> 1000 iterations ~ 26-33 h (the 2-GPU variant
+# measured 150 s / iteration and 25.5 GiB peak per GPU; see action_reptile_meta_edge_2gpu.toml).
+# Output: <IMAGINAIRE_OUTPUT_ROOT>/cosmos3_action_meta/reptile_meta/<name>/checkpoints/iter_XXXXXXXXX (DCP = theta)
+#         + meta_action_init[_iter_XXXXXX].pt (action heads for the LIBERO domain row). Downstream:
+#         examples/toml/sft_config/action_policy_libero_10_edge_reptileinit.toml (REPTILE_CKPT_PATH + META_ACTION_INIT_PATH).
+# Env: ROBOT_FEWSHOT_ROOT, BASE_CHECKPOINT_PATH, WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT. See docs/action_reptile_meta.md.
+
+[job]
+task         = "vfm"
+experiment   = "action_reptile_meta_edge"
+project      = "cosmos3_action_meta"
+group        = "reptile_meta"
+name         = "edge_reptile_v7"
+wandb_mode   = "offline"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+lora_enabled = false          # full-parameter mode
+
+[model.parallelism]
+data_parallel_shard_degree     = 4    # 4-GPU run: NPROC_PER_NODE=4 sr 4 48 ...
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+# ---- INNER optimizer = the downstream full-FT optimizer (FusedAdam) ----------------------------------------------
+[optimizer]
+lr             = 5.0e-05      # downstream full-FT LR; the inner loop must resemble the post-training it prepares for
+weight_decay   = 0.05
+keys_to_select = ["moe_gen", "time_embedder", "vae2llm", "llm2vae", "k_norm_und_for_gen", "action2llm", "llm2action", "action_modality_embed"]
+
+[optimizer.lr_multipliers]
+action2llm            = 1.0   # heads are meta-learned across episodes, not fresh per episode -> no 5x boost
+llm2action            = 1.0
+action_modality_embed = 1.0
+
+[trainer]
+max_iter     = 1000           # meta-iterations. eps anneals to meta_lr * meta_lr_min_ratio AT max_iter -> change this, do not stop early
+logging_iter = 10
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 1000               # DCP snapshot of theta (~24 GB each: 13.5 GB weights + Adam moments) + meta_action_init_iter_XXXXXX.pt
+keys_to_skip_loading = ["net_ema.", "action2llm", "llm2action", "action_modality_embed"]
+
+# ---- Reptile knobs (docs/action_reptile_meta.md) --------------------------------------------------------------------
+[custom.meta]
+theta_mode                  = "full"
+# episodic sampler: K support demos x w windows shared by all ranks (sharded), Q query demos for diagnostics only
+k_shot                = 32
+q_query               = 8
+windows_per_demo      = 8        # 8 x 16 = 128 support windows -> 32 per rank = one inner step = one pass over the support set
+max_samples_per_batch = 64        # per-rank windows per inner step
+disjoint_tasks        = false
+num_workers           = 8
+loader_timeout_s      = 1800
+seed                  = 42
+# inner loop: k standard optimizer steps from theta (~20 passes over the K demos, a miniature of the 3-demo post-training)
+inner_steps           = 10
+inner_warmup_steps    = 2         # linear LR ramp; Adam restarts from an empty state every episode
+inner_grad_clip       = 1.0
+inner_reset_optimizer = true
+# outer loop: theta <- theta + eps * (theta_tilde - theta); eps 0.5 -> 0.05 linearly over max_iter
+meta_optimizer        = "sgd"
+meta_lr               = 0.5
+meta_lr_min_ratio     = 0.1
+meta_lr_warmup_iters  = 0
+meta_batch_embodiments = 2        # >1 averages the displacement of several embodiments per meta step (x cost)
+loss_mode             = "total"   # the recipe's objective (10 x vision + 10 x action, EDGE_MODEL_CONFIG loss_scale / action_loss_weight) -- mimics post-training
+scratch_domain_id     = 31
+eval_query_every      = 5         # zero-shot vs adapted query loss (diagnostics; 2 extra forward passes)
