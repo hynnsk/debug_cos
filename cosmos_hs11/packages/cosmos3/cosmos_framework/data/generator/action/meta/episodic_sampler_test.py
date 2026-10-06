@@ -4,13 +4,18 @@
 """CPU tests for the episodic embodiment sampler and the batch packer."""
 
 import numpy as np
+import pytest
 import torch
 
 from cosmos_framework.data.generator.action.meta.episodic_sampler import (
     EpisodicEmbodimentSampler,
     pack_samples_into_batch,
 )
-from cosmos_framework.data.generator.action.meta.lazy_rows import EpisodeEntry, EpisodeTable, build_episode_table_from_rows
+from cosmos_framework.data.generator.action.meta.lazy_rows import (
+    EpisodeEntry,
+    EpisodeTable,
+    build_episode_table_from_rows,
+)
 
 
 def _table(num_episodes: int, num_tasks: int, frames: int, chunk: int = 16) -> EpisodeTable:
@@ -108,6 +113,62 @@ def test_pack_samples_into_batch_matches_packing_dataloader_layout() -> None:
     assert batch["conditioning_fps"][0].shape == (1,)
     assert batch["dataset_name"] == ["fractal", "fractal"]
     assert batch["raw_action_dim"][0].item() == 10
+
+
+def test_pack_samples_into_batch_keeps_native_video_per_sample() -> None:
+    """cosmos_hs11 v11: the native REPA-teacher frames travel like ``video`` (one [C,T,H,W] uint8 per sample)."""
+    a, b = _fake_sample(7), _fake_sample(7, "place")
+    a["video_native"] = torch.full((3, 17, 48, 64), 1, dtype=torch.uint8)
+    b["video_native"] = torch.full((3, 17, 48, 64), 2, dtype=torch.uint8)
+    batch = pack_samples_into_batch([a, b], "fractal")
+    assert isinstance(batch["video_native"], list) and len(batch["video_native"]) == 2
+    first = batch["video_native"][0]
+    first = first[0] if isinstance(first, list) else first
+    assert first.dtype == torch.uint8 and tuple(first.shape)[-4:] == (3, 17, 48, 64) and int(first.max()) == 1
+    plain = pack_samples_into_batch([_fake_sample(7)], "fractal")
+    assert "video_native" not in plain  # keep_native_video off -> byte-identical layout to before
+
+
+def test_resize_native_video_clip_matches_the_teacher_resize() -> None:
+    from cosmos_framework.data.generator.action.meta.episodic_sampler import resize_native_video_clip
+
+    g = torch.Generator().manual_seed(0)
+    clip = torch.randint(0, 256, (3, 5, 48, 64), generator=g, dtype=torch.uint8)
+    out = resize_native_video_clip(clip, 16)
+    assert out.shape == (3, 5, 16, 16) and out.dtype == torch.uint8 and out.is_contiguous()
+    # what the DINOv2 teacher computes from the native clip (per frame, antialiased bilinear) up to uint8 rounding
+    ref = torch.nn.functional.interpolate(
+        clip.permute(1, 0, 2, 3).float(), size=(16, 16), mode="bilinear", align_corners=False, antialias=True
+    ).permute(1, 0, 2, 3)
+    assert (out.float() - ref).abs().max() <= 0.5 + 1e-4
+    same = resize_native_video_clip(out, 16)
+    assert same is out  # already the right size: no copy
+    with pytest.raises(ValueError):
+        resize_native_video_clip(clip[0], 16)
+
+
+def test_synchronized_dataset_resizes_native_video_in_load() -> None:
+    from cosmos_framework.data.generator.action.meta.episodic_sampler import (
+        EpisodicEmbodimentSampler,
+        SynchronizedMetaEpisodeIterableDataset,
+    )
+
+    class _DS:
+        def __getitem__(self, i):
+            s = _fake_sample(1)
+            s["video_native"] = torch.zeros(3, 17, 40, 56, dtype=torch.uint8)
+            return s
+
+    sampler = EpisodicEmbodimentSampler({"a": _table(20, 5, 100)}, {"a": 1}, k_shot=2, q_query=1, windows_per_demo=2)
+    d = SynchronizedMetaEpisodeIterableDataset({"a": _DS()}, sampler, max_samples_per_batch=4, seed=7, native_video_size=16)
+    s = d._load("a", [0, 1])
+    assert all(tuple(x["video_native"].shape) == (3, 17, 16, 16) for x in s)
+    d0 = SynchronizedMetaEpisodeIterableDataset({"a": _DS()}, sampler, max_samples_per_batch=4, seed=7)
+    assert tuple(d0._load("a", [0])[0]["video_native"].shape) == (3, 17, 40, 56)  # default: untouched
+    dfull = SynchronizedMetaEpisodeIterableDataset(
+        {"a": _DS()}, sampler, max_samples_per_batch=4, seed=7, native_video_size=16, native_video_full_res=["a"]
+    )
+    assert tuple(dfull._load("a", [0])[0]["video_native"].shape) == (3, 17, 40, 56)  # composite canvas: camera resolution kept
 
 
 def test_synchronized_dataset_specs_identical_across_ranks_and_shards_disjoint() -> None:

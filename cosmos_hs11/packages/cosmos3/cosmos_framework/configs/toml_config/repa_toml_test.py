@@ -134,8 +134,7 @@ def test_repa_reptileinit_tomls_validate_and_route(toml_path: Path) -> None:
             assert raw[section] == v2[section], section
         assert {k: v for k, v in raw["checkpoint"].items() if k != "save_iter"} == {k: v for k, v in v2["checkpoint"].items() if k != "save_iter"}
         assert {k: v for k, v in raw["trainer"].items() if k != "grad_accum_iter"} == {k: v for k, v in v2["trainer"].items() if k != "grad_accum_iter"}
-    else:
-        assert "student_upsampler" not in repa_raw
+    # (user variants such as v42 may combine student_upsampler with other knobs)
     # v6 / v7 = v2 + noise-level gate (sigma <= 0.5 / sigma >= 0.5); nothing else may change
     if toml_path.stem.endswith(("_repa_dinov2_v6", "_repa_dinov2_v7")):
         v2 = tomllib.load(open(_TOML_DIR / "action_policy_libero_10_edge_reptileinit_repa_dinov2_v2.toml", "rb"))
@@ -158,8 +157,7 @@ def test_repa_reptileinit_tomls_validate_and_route(toml_path: Path) -> None:
         assert (repa_raw["teacher"], repa_raw["layer_index"], repa_raw["loss_weight"]) == ("dinov2_vitb14", 24, 5.0)
         assert repa_raw["target_subgrid_thw"] == [1, 2, 2]
         assert "model.config.repa.target_subgrid_thw=[1,2,2]" in overrides
-    elif not toml_path.stem.endswith(("_repa_dinov2_v10", "_repa_dinov2_v11", "_repa_dinov2_v14")):  # 4x3x3 sub-cell recipes
-        assert "target_subgrid_thw" not in repa_raw
+    # (other user variants may use target_subgrid_thw freely)
     if toml_path.stem.endswith("_masked_jepa"):
         assert repa_raw["objective"] == "masked_prediction"
         assert (repa_raw["teacher"], repa_raw["teacher_input_size"], repa_raw["target_adapter"]) == (

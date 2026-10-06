@@ -1,0 +1,136 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# cosmos_hs11 -- REPTILE meta-training, FULL-parameter mode, with DINOv2 REPA distillation INSIDE the inner loop (v11).
+# = action_reptile_meta_edge_v4.toml + [model.repa] + "repa_" in optimizer.keys_to_select / checkpoint.keys_to_skip_loading.
+# Experiment: action_reptile_meta_edge; entry point: cosmos_framework.scripts.train_action_reptile (launch_reptile_meta_edge_v11.sh).
+#
+#   L_inner = L_base + lambda_meta * (1 - cos(P_phi(h_theta^(l)), sg[T(x)]))     L_base = 10 x fm_vision + 10 x fm_action
+#   psi = (theta, phi);  psi' = U^k_{L_inner}(psi);  psi <- psi + eps * (psi' - psi)   (the ordinary Reptile step)
+#
+#   T      = frozen DINOv2 ViT-B/14 (facebook/dinov2-base, $HF_HOME/hub) on the native frames 1..16 of every window,
+#            one image per frame at 224 px -> 16x16 patch tokens, average-pooled onto the MoT token grid of the window
+#   h^(l)  = residual stream of the predicted video tokens after MoT block l = [model.repa] layer_index
+#   P_phi  = net.repa_head (REPA 3-layer SiLU MLP 2048 -> 2048 -> 2048 -> 768), trainable, part of theta ("repa_")
+#   lambda = [model.repa] loss_weight, optionally ramped 0 -> loss_weight over loss_weight_warmup_steps META-iterations
+#
+# KNOBS YOU TUNE HERE: [model.repa] layer_index (1..28) and loss_weight (+ loss_weight_warmup_steps); [job] name accordingly.
+# Everything else is the v4 recipe: K=32 demos x 8 windows = 256 support windows per meta-episode, 4 ranks x 64, k=10
+# inner FusedAdam steps at 5e-5, eps 0.5 -> 0.05 over 1000 meta-iterations, loss_mode "total".
+#
+# Teacher tokens are computed ONCE per meta-episode (like the VAE encode) and shared by the k inner steps and the query
+# diagnostics. Camera views (num_views = 1 for the alignment head: the whole canvas is one token grid):
+#   * RT-1 / Bridge / RoboMIND-UR / RoboMIND-Franka ship ONE camera -> the canvas is one 224 px teacher image (shrunk to
+#     224x224 in the loader workers);
+#   * MolmoAct2-YAM ships a 2x2 COMPOSITE (top camera over the two half-sized wrist cameras, compose_multiview) ->
+#     [model.repa.view_layouts] molmoact2_yam = "primary_over_two": the teacher crops the native 540x640 canvas into the
+#     3 views, encodes EACH at 224 px (a full 16x16 DINOv2 grid per view) and re-assembles the per-view grids in the
+#     composite layout (24x16 cells: top 16x16, wrists 8x8 each) before pooling onto the window's MoT grid. Its native
+#     clips are kept at camera resolution ([custom.meta] native_video_full_res). See model/generator/repa/view_layouts.py.
+# Extra logged keys (jsonl / wandb): support_repa_loss_first/last, support_repa_cos_centered_last, support_loss_fm_last,
+# repa_weight, query_repa_loss(_zero_shot), query_repa_cos_centered, query_loss_fm(_zero_shot), adapt_delta/repa_head,
+# theta_norm/repa_head. NOTE query_loss / support_loss are the TOTAL (incl. the weighted REPA term); compare *_fm with v4.
+# Downstream: the DCP carries theta incl. net.repa_head.*; the existing reptileinit / reptileinit_repa_dinov2 TOMLs skip
+# "repa_" at load (fresh projector). To reuse the meta-learned projector downstream, drop "repa_" from that TOML's
+# keys_to_skip_loading and keep [model.repa] layer_index / teacher / projector identical to this file.
+# Extra env: HF_HOME (facebook/dinov2-base snapshot under $HF_HOME/hub; download once on a node with internet).
+# Memory: v4 peaked at 28.8 GiB alloc / 33.8 GiB reserved per GPU at 4 x 64 windows; + teacher (~0.2 GB), the cached
+# teacher tokens (~0.4 GB bf16 per 64 windows), the shrunk native clips (~0.16 GB) and the REPA head -> fits 44 GiB.
+
+[job]
+task         = "vfm"
+experiment   = "action_reptile_meta_edge"
+project      = "cosmos3_action_meta"
+group        = "reptile_meta"
+name         = "edge_reptile_v14"
+wandb_mode   = "online"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+lora_enabled = false          # full-parameter mode
+
+# ---- REPA distillation in the INNER objective (cosmos_hs11 v11) ---------------------------------------------------
+[model.repa]
+enabled                  = true
+layer_index              = 24                  # <-- MoT block whose residual stream is aligned (1..28; hs10 default 8, downstream v2/v25 = 24/28)
+loss_weight              = 5.0                 # <-- lambda_meta on the unweighted (1 - cos) in [0, 2]; L_base is x10-scaled, support loss ~1-3
+loss_weight_warmup_steps = 50                  # linear ramp 0 -> loss_weight over the first N META-iterations (0 = constant from iteration 0)
+objective                = "token"             # per-token cosine (hs10 v7); "spatial_normalized" / "temporal_difference" also work here
+relation_loss_weight     = 0.0                 # VideoREPA token-relation term (always logged as repa_rel_loss; 0 = not trained)
+teacher                  = "dinov2_vitb14"     # facebook/dinov2-base (D=768), per frame; "dinov2_vitl14" = ViT-L/14 (D=1024)
+teacher_input_size       = 224                 # 16x16 patches of 14 px per frame (native clips are shrunk to this square in the loader)
+teacher_num_frames       = 16                  # = chunk_length: the predicted frames 1..16 of a window
+teacher_batch_size       = 192                  # clips per teacher forward chunk (64 windows / rank -> 2 chunks)
+target_adapter           = "avgpool"           # parameter-free pooling of the 16x16x16 teacher grid onto each window's MoT grid
+target_grid_thw          = [4, 8, 8]           # nominal per-view MoT grid (256x256 canvas); avgpool adapts to the real grid per batch
+target_subgrid_thw       = [1, 1, 1]           # one pooled teacher cell per MoT token
+projector_type           = "mlp"               # P_phi: REPA 3-layer SiLU MLP ("linear" = one Linear(2048, D_t))
+projector_hidden_dim     = 2048
+num_views                = 1                   # the canvas is ONE token grid for the head (single-view embodiments; composites via view_layouts)
+
+[model.repa.view_layouts]                      # composite canvases encoded per view (keys = embodiment / dataset_name; "canvas" = no split)
+molmoact2_yam            = "primary_over_two"  # top camera (upper 2/3) over left + right wrist (lower 1/3, half width each)
+
+[model.parallelism]
+data_parallel_shard_degree     = 4    # 4-GPU run: NPROC_PER_NODE=4 sr 4 48 ...
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+# ---- INNER optimizer = the downstream full-FT optimizer (FusedAdam) ----------------------------------------------
+[optimizer]
+lr             = 5.0e-05      # downstream full-FT LR; the inner loop must resemble the post-training it prepares for
+weight_decay   = 0.05
+# theta = the v4 trainable set + the REPA projector / target adapter (phi); "repa_" is REQUIRED with [model.repa] enabled
+keys_to_select = ["moe_gen", "time_embedder", "vae2llm", "llm2vae", "k_norm_und_for_gen", "action2llm", "llm2action", "action_modality_embed", "repa_"]
+
+[optimizer.lr_multipliers]
+action2llm            = 1.0   # heads are meta-learned across episodes, not fresh per episode -> no 5x boost
+llm2action            = 1.0
+action_modality_embed = 1.0
+
+[trainer]
+max_iter     = 1000           # meta-iterations. eps anneals to meta_lr * meta_lr_min_ratio AT max_iter -> change this, do not stop early
+logging_iter = 10
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
+save_iter = 250               # DCP snapshot of theta (~24 GB each: 13.5 GB weights + Adam moments) + meta_action_init_iter_XXXXXX.pt
+keys_to_skip_loading = ["net_ema.", "action2llm", "llm2action", "action_modality_embed", "repa_"]   # base DCP has no repa_head -> fresh init
+
+# ---- Reptile knobs (docs/action_reptile_meta.md) --------------------------------------------------------------------
+[custom.meta]
+theta_mode                  = "full"
+# episodic sampler: K support demos x w windows shared by all ranks (sharded), Q query demos for diagnostics only
+k_shot                = 32
+q_query               = 8
+windows_per_demo      = 8        # 32 x 8 = 256 support windows -> 64 per rank = one inner step = one pass over the support set
+max_samples_per_batch = 64        # per-rank windows per inner step
+disjoint_tasks        = false
+num_workers           = 8
+loader_timeout_s      = 1800
+seed                  = 42
+# native frames for the REPA teacher (the trainer sets these itself from [model.repa]; stated here for clarity)
+keep_native_video     = true
+native_video_size     = 224      # = teacher_input_size (num_views = 1): shrink single-view canvases in the loader workers
+native_video_full_res = ["molmoact2_yam"]   # composite canvases with a view layout stay at camera resolution (cropped by the teacher)
+# inner loop: k standard optimizer steps from theta (~10 passes over the K demos, a miniature of the 3-demo post-training)
+inner_steps           = 10
+inner_warmup_steps    = 2         # linear LR ramp; Adam restarts from an empty state every episode
+inner_grad_clip       = 1.0
+inner_reset_optimizer = true
+# outer loop: theta <- theta + eps * (theta_tilde - theta); eps 0.5 -> 0.05 linearly over max_iter
+meta_optimizer        = "sgd"
+meta_lr               = 0.5
+meta_lr_min_ratio     = 0.1
+meta_lr_warmup_iters  = 0
+meta_batch_embodiments = 1        # >1 averages the displacement of several embodiments per meta step (x cost)
+loss_mode             = "total"   # REQUIRED for REPA in the inner loop (10 x vision + 10 x action + lambda x REPA)
+scratch_domain_id     = 31
+eval_query_every      = 5         # zero-shot vs adapted query loss (diagnostics; 2 extra forward passes)

@@ -74,6 +74,49 @@ def _action_reptile_meta_edge_model_config() -> dict:
     cfg["lora_alpha"] = 64
     cfg["lora_target_modules"] = LORA_TARGET_MODULES
     cfg["lora_freeze_base"] = False  # LoRA + heads + time_embedder train together; keys_to_select selects
+    # REPA distillation INSIDE the inner loop (cosmos_hs11 v11, action_reptile_meta_edge_v11.toml): off by default
+    # (bit-identical to the plain recipe); the dict re-states the RepaConfig defaults so a TOML [model.repa] block can
+    # override any knob (Hydra cannot add dict keys). With enabled=true the inner objective becomes
+    # L_base + loss_weight * (1 - cos(P_phi(h_theta at MoT block layer_index), sg[teacher(frames)])) and the projector
+    # P_phi (net.repa_head) joins theta via "repa_" in optimizer.keys_to_select. See docs/action_reptile_meta.md 8b.
+    cfg["repa"] = dict(
+        enabled=False,
+        loss_weight=0.5,
+        loss_weight_warmup_steps=0,  # ramp is counted in META-iterations here (the inner loop passes the meta-iteration)
+        sigma_min=0.0,
+        sigma_max=1.0,
+        objective="token",
+        masked_ratio_min=0.4,  # masked_prediction is NOT supported in the inner loop (needs the raw batch every step)
+        masked_ratio_max=0.7,
+        masked_visible_weight=0.25,
+        masked_max_samples=16,
+        masked_warmup_steps=200,
+        masked_seed=42,
+        spatial_norm_eps=1.0e-6,
+        relation_loss_weight=0.0,
+        relation_distance="l2",
+        relation_margin=0.0,
+        center_targets=False,
+        layer_index=8,
+        teacher="vjepa2_1_vit_base_384",
+        teacher_checkpoint_path=None,
+        teacher_input_size=256,
+        teacher_num_frames=16,
+        teacher_batch_size=32,
+        target_adapter="avgpool",
+        target_adapter_kernel_size=3,
+        target_adapter_depthwise=True,
+        target_grid_thw=(4, 5, 5),
+        target_subgrid_thw=(1, 1, 1),
+        student_upsampler="none",
+        projector_type="mlp",
+        projector_hidden_dim=2048,
+        num_views=2,  # v11 uses 1: the source embodiments are single-view / composite canvases of varying aspect ratio
+        native_video_key="video_native",
+        # composite-canvas layouts per embodiment (model/generator/repa/view_layouts.py); every key pre-declared so a
+        # TOML [model.repa.view_layouts] table can override it (v11: molmoact2_yam = "primary_over_two")
+        view_layouts={name: "canvas" for name in META_EMBODIMENTS},
+    )
     return cfg
 
 
@@ -197,6 +240,11 @@ action_reptile_meta_edge = LazyDict(
             loader_timeout_s=1800.0,
             seed=42,
             embodiment_override=None,
+            # cosmos_hs11 v11: native uint8 frames for the REPA teacher in the inner loop (set automatically by
+            # train_action_reptile.py when model.config.repa.enabled; overridable from [custom.meta]).
+            keep_native_video=False,
+            native_video_size=None,  # pre-shrink the native clips to this square in the loader workers (num_views=1 only)
+            native_video_full_res=None,  # embodiments kept at camera resolution (composite canvases with a view layout)
         ),
         dataloader_val=None,
         upload_reproducible_setup=False,

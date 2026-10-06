@@ -25,6 +25,12 @@ extra local-shard copy of the trainable parameters (:class:`ReptileMetaState`). 
 * ``lora``: theta = LoRA adapters + heads + time_embedder -- the cosmos_hs09 set; downstream unchanged
   (``meta_action_init.pt`` carries all groups).
 
+Optional (cosmos_hs11 v11, ``action_reptile_meta_edge_v11.toml``): a REPA distillation term INSIDE the inner objective,
+``L_inner = L_base + w * (1 - cos(P_phi(h_theta), sg[T(x)]))`` with a frozen teacher ``T`` (DINOv2) and the projector
+``P_phi = net.repa_head`` part of theta (``"repa_"`` in ``keys_to_select``); the Reptile update is unchanged and acts on
+``psi = (theta, phi)``. Teacher tokens are computed once per meta-episode and shared by the k inner steps. Off unless
+``model.config.repa.enabled`` (every other recipe is bit-identical).
+
 Outputs (``<IMAGINAIRE_OUTPUT_ROOT>/<project>/<group>/<name>/``)::
 
     checkpoints/iter_XXXXXXXXX/{model,optim,scheduler,trainer}   DCP checkpoint = theta (standard format; auto-resume)
@@ -65,11 +71,13 @@ from cosmos_framework.data.generator.action.meta.meta_action_adapter import save
 from cosmos_framework.data.generator.action.meta.reptile_meta import (
     GROUP_LORA,
     GROUP_MOE_GEN,
+    GROUP_REPA_HEAD,
     ReptileMetaState,
     capture_base_lrs,
     reset_optimizer_state,
     set_lr_scale,
 )
+from cosmos_framework.model.generator.repa.view_layouts import resolve_view_layout
 from cosmos_framework.scripts.train_action_meta import (
     SAMPLER_OVERRIDE_KEYS,
     _mean,
@@ -202,6 +210,87 @@ def _assert_same_across_ranks(value: int, what: str) -> None:
         raise RuntimeError(f"ranks disagree on {what}: {vals} -- FSDP collectives would deadlock")
 
 
+# --------------------------------------------------------------------------------------------
+# REPA inside the inner loop (cosmos_hs11 v11)
+# --------------------------------------------------------------------------------------------
+_REPA_LOG_KEYS = ("repa_loss", "repa_cos_sim", "repa_cos_sim_centered", "repa_rel_loss", "repa_weight", "repa_weighted_loss")
+
+
+def _repa_scalars(out: dict[str, Any]) -> dict[str, float]:
+    """The logged REPA terms of one training step as floats (empty when REPA is off)."""
+    vals: dict[str, float] = {}
+    for k in _REPA_LOG_KEYS:
+        v = out.get(k)
+        if isinstance(v, torch.Tensor):
+            vals[k] = float(v.detach())
+        elif isinstance(v, (int, float)):
+            vals[k] = float(v)
+    return vals
+
+
+def _fm_part(total: float, scalars: dict[str, float], relation_weight: float) -> float:
+    """Flow-matching part of a ``loss_mode="total"`` value: total minus the weighted REPA cosine / relation terms."""
+    return total - scalars.get("repa_weighted_loss", 0.0) - float(relation_weight) * scalars.get("repa_rel_loss", 0.0)
+
+
+def _episode_repa_tokens(model: Any, batches: list[dict[str, Any]], inputs: list[Any]) -> list[torch.Tensor]:
+    """Frozen-teacher tokens of every sub-batch of a meta-episode, computed ONCE (the inner loop re-uses them for its
+    k steps and the query diagnostics). ``inputs[i][1]`` are the sequence plans of ``batches[i]``; the teacher pops
+    the native frames out of the batch dict afterwards."""
+    if len(batches) != len(inputs):
+        raise ValueError(f"{len(batches)} batches vs {len(inputs)} training inputs")
+    with torch.no_grad():
+        return [model._compute_repa_teacher_tokens(b, inp[1]) for b, inp in zip(batches, inputs)]
+
+
+def _repa_section(config: Config) -> Any:
+    model_cfg = config.model.config
+    if hasattr(model_cfg, "get"):
+        return model_cfg.get("repa", None)
+    return getattr(model_cfg, "repa", None)
+
+
+def _cfg_value(section: Any, key: str, default: Any) -> Any:
+    if section is None:
+        return default
+    if hasattr(section, "get"):
+        v = section.get(key, default)
+    else:
+        v = getattr(section, key, default)
+    return default if v is None else v
+
+
+def apply_repa_loader_settings(config: Config) -> dict[str, Any]:
+    """REPA in the inner loop needs the native frames: switch the episodic loader to ``keep_native_video`` and, for a
+    single-view teacher (``num_views == 1``), pre-shrink every native clip to ``teacher_input_size`` in the loader
+    workers (what the teacher would do anyway; saves host/GPU memory for 480x640 / 720x1280 cameras). No-op when
+    ``model.config.repa.enabled`` is false, so every existing recipe is untouched. Explicit ``[custom.meta]``
+    ``keep_native_video`` / ``native_video_size`` values are kept."""
+    repa = _repa_section(config)
+    if not bool(_cfg_value(repa, "enabled", False)):
+        return {}
+    dl = config.dataloader_train
+    for k in ("keep_native_video", "native_video_size", "native_video_full_res"):
+        if k not in dl:
+            raise KeyError(f"dataloader_train has no field {k!r}: the experiment's episode loader cannot feed the REPA teacher")
+    applied: dict[str, Any] = {}
+    if not bool(dl["keep_native_video"]):
+        dl["keep_native_video"] = True
+        applied["keep_native_video"] = True
+    num_views = int(_cfg_value(repa, "num_views", 2))
+    if dl["native_video_size"] is None and num_views == 1:
+        dl["native_video_size"] = int(_cfg_value(repa, "teacher_input_size", 256))
+        applied["native_video_size"] = dl["native_video_size"]
+    # composite canvases with a view layout are cropped into views by the teacher -> keep their camera resolution
+    layouts = _cfg_value(repa, "view_layouts", {}) or {}
+    items = layouts.items() if hasattr(layouts, "items") else []
+    full_res = sorted(str(k) for k, v in items if resolve_view_layout(v) is not None)
+    if dl["native_video_full_res"] is None and full_res:
+        dl["native_video_full_res"] = full_res
+        applied["native_video_full_res"] = full_res
+    return applied
+
+
 def _warm_up_checkpoint_collectives(world_size: int) -> None:
     """Open the NCCL point-to-point connections that ``dcp.save`` needs while the GPU is still empty.
 
@@ -277,6 +366,29 @@ def launch(config: Config, cfg: ReptileTrainConfig, args: argparse.Namespace) ->
             "mode='full' with trainable LoRA parameters -- they are meta-learned too (unusual; check the TOML)"
         )
     trainable_params = list(state.params.values())
+    # ---- REPA inside the inner loop (v11): L_inner = L_base + w * (1 - cos(P_phi(h_theta), sg[T(x)])) --------------
+    if bool(getattr(model, "masked_prediction_enabled", False)):
+        raise NotImplementedError(
+            "repa.objective='masked_prediction' is not supported in the Reptile inner loop (it re-encodes a masked "
+            "raw batch every step); use the token / relation objectives"
+        )
+    repa_inner = bool(getattr(model, "repa_enabled", False))
+    repa_relation_weight = 0.0
+    if repa_inner:
+        if cfg.loss_mode != "total":
+            raise ValueError("REPA in the inner loop needs loss_mode='total' (the distillation term lives in the total loss only)")
+        if GROUP_REPA_HEAD not in groups_present:
+            raise ValueError(
+                "model.config.repa.enabled=true but net.repa_head is not trainable: add 'repa_' to optimizer.keys_to_select "
+                "so the projector / target adapter is part of theta"
+            )
+        repa_relation_weight = float(model.config.repa.relation_loss_weight)
+        logging.info(
+            f"REPA in the inner loop: teacher={model.config.repa.teacher}, MoT block {model.config.repa.layer_index}, "
+            f"loss_weight={model.config.repa.loss_weight} (ramp {model.config.repa.loss_weight_warmup_steps} META-iterations), "
+            f"relation_loss_weight={repa_relation_weight}, num_views={model.config.repa.num_views}; teacher tokens are "
+            f"computed once per meta-episode and shared by the {cfg.inner_steps} inner steps"
+        )
     base_lrs = capture_base_lrs(optimizer)
     if cfg.inner_reset_optimizer:
         reset_optimizer_state(optimizer)
@@ -370,13 +482,30 @@ def launch(config: Config, cfg: ReptileTrainConfig, args: argparse.Namespace) ->
             return None
         return item
 
-    def _eval_query(query_inputs: list, iteration: int) -> float:
+    def _eval_query(
+        query_inputs: list, iteration: int, query_repa: list[torch.Tensor] | None = None
+    ) -> tuple[float, dict[str, float]]:
+        """Rank-averaged query loss (+ the REPA terms and the flow-matching part when REPA is on)."""
         vals: list[float] = []
+        repa_vals: dict[str, list[float]] = {k: [] for k in _REPA_LOG_KEYS}
+        fm_vals: list[float] = []
         with torch.no_grad():
-            for inp in query_inputs:
-                out, total = model.training_step_from_inputs(inp, iteration)
-                vals.append(float(_select_loss(out, total, cfg.loss_mode).detach()))
-        return _reduce_mean(vals)
+            for i, inp in enumerate(query_inputs):
+                tokens = query_repa[i] if query_repa is not None else None
+                out, total = model.training_step_from_inputs(inp, iteration, repa_teacher_tokens=tokens)
+                loss = float(_select_loss(out, total, cfg.loss_mode).detach())
+                vals.append(loss)
+                if repa_inner:
+                    sc = _repa_scalars(out)
+                    for k, v in sc.items():
+                        repa_vals[k].append(v)
+                    fm_vals.append(_fm_part(loss, sc, repa_relation_weight))
+        extras: dict[str, float] = {}
+        if repa_inner:  # fixed key order: _reduce_mean is a collective
+            for k in _REPA_LOG_KEYS:
+                extras[k] = _reduce_mean(repa_vals[k])
+            extras["loss_fm"] = _reduce_mean(fm_vals)
+        return _reduce_mean(vals), extras
 
     logging.info(
         f"Starting Reptile meta-training: iterations {start_iter} -> {max_iter}, world_size={world_size}, mode={cfg.theta_mode}"
@@ -404,15 +533,22 @@ def launch(config: Config, cfg: ReptileTrainConfig, args: argparse.Namespace) ->
             support_batches = [misc.to(b, device="cuda") for b in support_batches]
             query_batches = [misc.to(b, device="cuda") for b in query_batches]
 
-            # VAE encode / tokenize once per episode (model == theta here)
+            # VAE encode / tokenize once per episode (model == theta here); with REPA in the inner loop also the
+            # frozen-teacher tokens of every sub-batch (shared by the k inner steps + the query diagnostics)
             t0 = time.time()
             with torch.no_grad():
                 support_inputs = [model._get_training_inputs(b, iteration) for b in support_batches]
                 query_inputs = [model._get_training_inputs(b, iteration) for b in query_batches]
+            support_repa = query_repa = None
+            if repa_inner:
+                support_repa = _episode_repa_tokens(model, support_batches, support_inputs)
+                query_repa = _episode_repa_tokens(model, query_batches, query_inputs)
             t_encode += time.time() - t0
 
             t0 = time.time()
-            q_zero = _eval_query(query_inputs, iteration) if do_eval and query_inputs else float("nan")
+            q_zero, q_zero_extra = (
+                _eval_query(query_inputs, iteration, query_repa) if do_eval and query_inputs else (float("nan"), {})
+            )
             t_eval += time.time() - t0
 
             # ---- inner loop: k standard optimizer steps from theta -------------------------------
@@ -421,12 +557,18 @@ def launch(config: Config, cfg: ReptileTrainConfig, args: argparse.Namespace) ->
                 reset_optimizer_state(optimizer)
             inner_losses: list[float] = []
             inner_gnorms: list[float] = []
+            inner_repa: list[dict[str, float]] = []
             for s in range(cfg.inner_steps):
                 scale = min(1.0, (s + 1) / cfg.inner_warmup_steps) if cfg.inner_warmup_steps > 0 else 1.0
                 set_lr_scale(optimizer, base_lrs, scale)
-                inp = support_inputs[s % len(support_inputs)]
-                out, total = model.training_step_from_inputs(inp, iteration)
+                idx = s % len(support_inputs)
+                inp = support_inputs[idx]
+                out, total = model.training_step_from_inputs(
+                    inp, iteration, repa_teacher_tokens=(support_repa[idx] if support_repa is not None else None)
+                )
                 loss = _select_loss(out, total, cfg.loss_mode)
+                if repa_inner:
+                    inner_repa.append(_repa_scalars(out))
                 backward_loss = out.get("_backward_loss", total) if cfg.loss_mode == "total" else loss
                 backward_loss.backward()
                 model.on_after_backward()
@@ -439,21 +581,44 @@ def launch(config: Config, cfg: ReptileTrainConfig, args: argparse.Namespace) ->
             t_inner += time.time() - t0
 
             t0 = time.time()
-            q_adapted = _eval_query(query_inputs, iteration) if do_eval and query_inputs else float("nan")
-            t_eval += time.time() - t0
-            disp = state.displacement_norms_by_group()
-            per_ep.append(
-                {
-                    "embodiment": ep["embodiment"],
-                    "support_loss_first": _reduce_mean([inner_losses[0]]),
-                    "support_loss_last": _reduce_mean([inner_losses[-1]]),
-                    "inner_grad_norm": _mean(inner_gnorms),
-                    "query_loss_zero_shot": q_zero,
-                    "query_loss": q_adapted,
-                    "adapt_delta": math.sqrt(sum(v * v for v in disp.values())),
-                    "adapt_delta_by_group": disp,
-                }
+            q_adapted, q_adapted_extra = (
+                _eval_query(query_inputs, iteration, query_repa) if do_eval and query_inputs else (float("nan"), {})
             )
+            t_eval += time.time() - t0
+            del support_repa, query_repa
+            disp = state.displacement_norms_by_group()
+            ep_record = {
+                "embodiment": ep["embodiment"],
+                "support_loss_first": _reduce_mean([inner_losses[0]]),
+                "support_loss_last": _reduce_mean([inner_losses[-1]]),
+                "inner_grad_norm": _mean(inner_gnorms),
+                "query_loss_zero_shot": q_zero,
+                "query_loss": q_adapted,
+                "adapt_delta": math.sqrt(sum(v * v for v in disp.values())),
+                "adapt_delta_by_group": disp,
+            }
+            if repa_inner:
+                # REPA diagnostics (all rank-averaged, fixed key order = same collectives on every rank): the raw
+                # cosine term and centered cosine at the first / last inner step, the flow-matching part of the
+                # support loss, and the same for the query set before / after adaptation.
+                first, last = inner_repa[0], inner_repa[-1]
+                ep_record.update(
+                    {
+                        "support_repa_loss_first": _reduce_mean([first["repa_loss"]] if "repa_loss" in first else []),
+                        "support_repa_loss_last": _reduce_mean([last["repa_loss"]] if "repa_loss" in last else []),
+                        "support_repa_cos_centered_last": _reduce_mean(
+                            [last["repa_cos_sim_centered"]] if "repa_cos_sim_centered" in last else []
+                        ),
+                        "support_loss_fm_last": _reduce_mean([_fm_part(inner_losses[-1], last, repa_relation_weight)]),
+                        "repa_weight": last.get("repa_weight", float("nan")),
+                        "query_repa_loss_zero_shot": q_zero_extra.get("repa_loss", float("nan")),
+                        "query_repa_loss": q_adapted_extra.get("repa_loss", float("nan")),
+                        "query_repa_cos_centered": q_adapted_extra.get("repa_cos_sim_centered", float("nan")),
+                        "query_loss_fm_zero_shot": q_zero_extra.get("loss_fm", float("nan")),
+                        "query_loss_fm": q_adapted_extra.get("loss_fm", float("nan")),
+                    }
+                )
+            per_ep.append(ep_record)
             if cfg.meta_batch_embodiments > 1:
                 state.accumulate_displacement()
                 state.restore_to_model()
@@ -498,6 +663,20 @@ def launch(config: Config, cfg: ReptileTrainConfig, args: argparse.Namespace) ->
             }
             if not (math.isnan(record["query_loss"]) or math.isnan(record["query_loss_zero_shot"])):
                 record["query_loss_gain"] = record["query_loss_zero_shot"] - record["query_loss"]
+            if repa_inner:
+                for key in (
+                    "support_repa_loss_first",
+                    "support_repa_loss_last",
+                    "support_repa_cos_centered_last",
+                    "support_loss_fm_last",
+                    "repa_weight",
+                    "query_repa_loss_zero_shot",
+                    "query_repa_loss",
+                    "query_repa_cos_centered",
+                    "query_loss_fm_zero_shot",
+                    "query_loss_fm",
+                ):
+                    record[key] = _mean([e[key] for e in per_ep if not math.isnan(e.get(key, float("nan")))])
             for grp in sorted({k for e in per_ep for k in e["adapt_delta_by_group"]}):
                 record[f"adapt_delta/{grp}"] = _mean(
                     [e["adapt_delta_by_group"][grp] for e in per_ep if grp in e["adapt_delta_by_group"]]
@@ -517,8 +696,15 @@ def launch(config: Config, cfg: ReptileTrainConfig, args: argparse.Namespace) ->
                 adapt_str = ", ".join(
                     f"{k.split('/')[1]} {v:.3f}" for k, v in record.items() if k.startswith("adapt_delta/")
                 )
+                repa_str = (
+                    f"repa {record['support_repa_loss_first']:.3f} -> {record['support_repa_loss_last']:.3f} "
+                    f"(cos_c {record['support_repa_cos_centered_last']:.3f}, w {record['repa_weight']:.2f}, "
+                    f"fm {record['support_loss_fm_last']:.4f}) | "
+                    if repa_inner
+                    else ""
+                )
                 logging.info(
-                    f"iter {iteration}/{max_iter} | {record['embodiments']} | {q_str}"
+                    f"iter {iteration}/{max_iter} | {record['embodiments']} | {q_str}{repa_str}"
                     f"support {record['support_loss_first']:.4f} -> {record['support_loss_last']:.4f} | "
                     f"inner-grad {record['inner_grad_norm']:.3f} | adapt {record['adapt_delta']:.3f} ({adapt_str}) | "
                     f"eps {eps:.3f} step {meta_step_norm:.3f} | {record['iter_time']:.1f}s (data {t_data:.1f} enc {t_encode:.1f} "
@@ -570,6 +756,9 @@ def main() -> None:
     config = load_experiment_from_toml(args.sft_toml, extra_overrides=args.opts)
     cfg, sampler_overrides = split_custom_meta(config)
     apply_sampler_overrides(config, sampler_overrides)
+    repa_loader_settings = apply_repa_loader_settings(config)  # no-op unless model.config.repa.enabled (v11)
+    if repa_loader_settings:
+        logging.info(f"REPA in the inner loop -> episode loader settings applied: {repa_loader_settings}")
     args.config = args.sft_toml
 
     if args.dryrun:

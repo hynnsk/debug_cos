@@ -53,9 +53,11 @@ GROUP_MOE_GEN = "moe_gen"
 GROUP_VAE2LLM = "vae2llm"
 GROUP_LLM2VAE = "llm2vae"
 GROUP_K_NORM = "k_norm_und_for_gen"
+GROUP_REPA_HEAD = "repa_head"  # REPA projector / target adapter when the distillation loss runs in the inner loop (v11)
 
 __all__ = [
     "GROUP_K_NORM",
+    "GROUP_REPA_HEAD",
     "GROUP_LLM2VAE",
     "GROUP_MOE_GEN",
     "GROUP_VAE2LLM",
@@ -81,6 +83,8 @@ def reptile_param_group(name: str) -> str:
         return GROUP_LLM2VAE
     if "k_norm_und_for_gen" in name:
         return GROUP_K_NORM
+    if "repa_head" in name:
+        return GROUP_REPA_HEAD
     return "other"
 
 

@@ -1,0 +1,125 @@
+{
+  "description": "Fixed LIBERO subset: 5 randomly sampled demonstration episodes per task (random.Random(seed=42), tasks in ascending task_index order, candidates sorted by episode_index); 30 excluded episodes (disjoint from the given subset files); consumed by LIBEROLeRobotDataset(episode_subset_path=...).",
+  "seed": 42,
+  "episodes_per_task": 5,
+  "n_excluded": 30,
+  "n_tasks": 10,
+  "n_episodes_total_in_dataset": 454,
+  "n_episodes": 50,
+  "tasks": {
+    "0": {
+      "task": "pick up the alphabet soup and place it in the basket",
+      "n_available": 41,
+      "episodes": [
+        18,
+        80,
+        178,
+        204,
+        438
+      ]
+    },
+    "1": {
+      "task": "pick up the chocolate pudding and place it in the basket",
+      "n_available": 47,
+      "episodes": [
+        40,
+        68,
+        137,
+        320,
+        407
+      ]
+    },
+    "2": {
+      "task": "pick up the bbq sauce and place it in the basket",
+      "n_available": 43,
+      "episodes": [
+        5,
+        17,
+        42,
+        318,
+        423
+      ]
+    },
+    "3": {
+      "task": "pick up the orange juice and place it in the basket",
+      "n_available": 42,
+      "episodes": [
+        47,
+        206,
+        234,
+        350,
+        390
+      ]
+    },
+    "4": {
+      "task": "pick up the cream cheese and place it in the basket",
+      "n_available": 42,
+      "episodes": [
+        49,
+        129,
+        384,
+        391,
+        449
+      ]
+    },
+    "5": {
+      "task": "pick up the milk and place it in the basket",
+      "n_available": 42,
+      "episodes": [
+        182,
+        196,
+        278,
+        298,
+        375
+      ]
+    },
+    "6": {
+      "task": "pick up the butter and place it in the basket",
+      "n_available": 42,
+      "episodes": [
+        12,
+        100,
+        153,
+        205,
+        269
+      ]
+    },
+    "7": {
+      "task": "pick up the ketchup and place it in the basket",
+      "n_available": 42,
+      "episodes": [
+        31,
+        56,
+        117,
+        156,
+        220
+      ]
+    },
+    "8": {
+      "task": "pick up the tomato sauce and place it in the basket",
+      "n_available": 39,
+      "episodes": [
+        76,
+        230,
+        304,
+        321,
+        447
+      ]
+    },
+    "9": {
+      "task": "pick up the salad dressing and place it in the basket",
+      "n_available": 44,
+      "episodes": [
+        24,
+        90,
+        233,
+        294,
+        358
+      ]
+    }
+  },
+  "excluded_from": [
+    "libero_object_3ep_per_task_seed42.json"
+  ],
+  "source_root_basename": "libero_object"
+}

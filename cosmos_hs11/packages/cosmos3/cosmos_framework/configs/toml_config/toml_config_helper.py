@@ -62,6 +62,10 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         ("dataloader_train", "episode_subset_path"): (
             "dataloader_train", "dataloader", "datasets", "libero", "dataset", "episode_subset_path",
         ),
+        # Demonstration-uniform sampling switch of the LIBERO few-shot recipes (cosmos_hs11 v43); same nested node.
+        ("dataloader_train", "episode_balanced_sampling"): (
+            "dataloader_train", "dataloader", "datasets", "libero", "dataset", "episode_balanced_sampling",
+        ),
         # Held-out LIBERO validation subset of the LoRA recipes (action_policy_libero_lora_edge, cosmos_hs09):
         # same nested `libero` dataset node, on dataloader_val.
         ("dataloader_val", "episode_subset_path"): (
@@ -91,6 +95,7 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         ("model", "repa"): None,                                               # VFM-only REPA (V-JEPA) loss knobs
         ("model", "sigreg"): None,                                             # VFM-only visual-token SIGReg knobs
         ("dataloader_train", "seed"): None,
+        ("dataloader_train", "episode_balanced_sampling"): None,                # VFM/LIBERO-only knob
         ("optimizer", "eps"): None,                                            # VLM_OPTIMIZER_KWARGS has no eps field
         ("scheduler", "verbosity_interval"): None,                             # VLM_LAMBDACOSINE_KWARGS has no verbosity_interval
         ("trainer", "callbacks", "compile_tokenizer"): None,                   # VFM-only callback (VLM has no torch.compile of the tokenizer)

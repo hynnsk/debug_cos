@@ -30,6 +30,7 @@ from typing import Any, Iterator, Sequence
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, IterableDataset, get_worker_info
 
 from cosmos_framework.data.generator.action.meta.lazy_rows import EpisodeTable
@@ -289,6 +290,26 @@ def _chunk(indices: list[int], size: int) -> list[list[int]]:
 # --------------------------------------------------------------------------------------------
 # Iterable dataset + loader
 # --------------------------------------------------------------------------------------------
+def resize_native_video_clip(clip: torch.Tensor, size: int) -> torch.Tensor:
+    """``[C,T,H,W]`` uint8 native frames -> ``[C,T,size,size]`` uint8 (cosmos_hs11 v11).
+
+    The REPA teacher resizes every frame to its square input anyway (``F.interpolate`` bilinear, antialiased), so
+    doing it here, in the loader worker, changes nothing the teacher sees but keeps a 720x1280 RoboMIND clip from
+    travelling through the DataLoader queue and the GPU at 47 MB per window. One frame at a time (bounded memory).
+    """
+    if clip.ndim != 4:
+        raise ValueError(f"expected a [C,T,H,W] native clip, got {tuple(clip.shape)}")
+    size = int(size)
+    if tuple(clip.shape[-2:]) == (size, size):
+        return clip
+    frames = []
+    for t in range(clip.shape[1]):
+        x = clip[:, t].unsqueeze(0).float()  # [1,C,H,W]
+        y = F.interpolate(x, size=(size, size), mode="bilinear", align_corners=False, antialias=True)
+        frames.append(y.round_().clamp_(0, 255).to(torch.uint8)[0])
+    return torch.stack(frames, dim=1).contiguous()  # [C,T,size,size]
+
+
 class MetaEpisodeIterableDataset(IterableDataset):
     """Infinite stream of materialized meta-episodes (one dict per meta-episode).
 
@@ -312,6 +333,9 @@ class MetaEpisodeIterableDataset(IterableDataset):
         max_samples_per_batch: int = 40,
         seed: int = 42,
         embodiment_override: str | None = None,
+        native_video_size: int | None = None,
+        native_video_key: str = "video_native",
+        native_video_full_res: Sequence[str] | None = None,
     ) -> None:
         super().__init__()
         self.datasets = datasets
@@ -319,13 +343,26 @@ class MetaEpisodeIterableDataset(IterableDataset):
         self.max_samples_per_batch = int(max_samples_per_batch)
         self.seed = int(seed)
         self.embodiment_override = embodiment_override
+        # cosmos_hs11 v11: shrink the native REPA-teacher frames (shipped by keep_native_video) to this square in the
+        # worker; None = leave them at camera resolution (the only option for multi-view canvases, num_views > 1).
+        # ``native_video_full_res``: embodiments exempt from the shrink -- composite canvases that the teacher crops into
+        # views itself (``repa.view_layouts``), which need the full camera resolution per view.
+        self.native_video_size = int(native_video_size) if native_video_size else None
+        self.native_video_key = str(native_video_key)
+        self.native_video_full_res = frozenset(str(n) for n in (native_video_full_res or ()))
         self.max_consecutive_failures = 8  # a systematic error (missing stats, bad root) must surface, not spin
         self.shard_rank = 0
         self.shard_world_size = 1
 
     def _load(self, name: str, indices: list[int]) -> list[dict[str, Any]]:
         dataset = self.datasets[name]
-        return [dataset[int(i)] for i in indices]
+        samples = [dataset[int(i)] for i in indices]
+        if self.native_video_size is not None and name not in self.native_video_full_res:
+            for sample in samples:
+                native = sample.get(self.native_video_key)
+                if isinstance(native, torch.Tensor):
+                    sample[self.native_video_key] = resize_native_video_clip(native, self.native_video_size)
+        return samples
 
     def materialize(self, spec: MetaEpisodeSpec) -> dict[str, Any]:
         support = [
@@ -637,10 +674,19 @@ def build_reptile_episode_loader(
     seed: int = 42,
     embodiment_override: str | None = None,
     spec_offset: int = 0,
+    keep_native_video: bool = False,
+    native_video_size: int | None = None,
+    native_video_full_res: Sequence[str] | None = None,
 ) -> MetaEpisodeLoader:
     """Same datasets / sampler as :func:`build_meta_episode_loader`, streamed as rank-SYNCHRONIZED episodes
     (:class:`SynchronizedMetaEpisodeIterableDataset`) for the Reptile trainer
     (``scripts/train_action_reptile.py``). ``max_samples_per_batch`` is the per-rank windows per inner step.
+
+    ``keep_native_video`` / ``native_video_size`` (cosmos_hs11 v11): ship the native uint8 frames of every window as
+    ``video_native`` for the frozen REPA teacher of the inner loop, optionally shrunk to a square of
+    ``native_video_size`` px in the workers (set automatically by the trainer from ``model.config.repa``);
+    ``native_video_full_res`` names the embodiments kept at camera resolution (composite canvases with a
+    ``repa.view_layouts`` entry, cropped into views by the teacher).
     """
     from cosmos_framework.data.generator.action.meta.embodiments import (
         build_embodiment_sft_dataset,
@@ -654,6 +700,7 @@ def build_reptile_episode_loader(
         cfg_dropout_rate=cfg_dropout_rate,
         append_idle_frames=append_idle_frames,
         format_prompt_as_json=format_prompt_as_json,
+        keep_native_video=keep_native_video,
     )
     datasets: dict[str, Any] = {}
     tables: dict[str, EpisodeTable] = {}
@@ -691,6 +738,8 @@ def build_reptile_episode_loader(
         seed=seed,
         embodiment_override=embodiment_override,
         spec_offset=spec_offset,
+        native_video_size=native_video_size,
+        native_video_full_res=native_video_full_res,
     )
     return MetaEpisodeLoader(
         stream, num_workers=num_workers, prefetch_factor=prefetch_factor, timeout_s=loader_timeout_s

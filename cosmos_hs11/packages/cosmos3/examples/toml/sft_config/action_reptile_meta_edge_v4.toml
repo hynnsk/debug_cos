@@ -18,8 +18,8 @@ task         = "vfm"
 experiment   = "action_reptile_meta_edge"
 project      = "cosmos3_action_meta"
 group        = "reptile_meta"
-name         = "edge_reptile_v4_my"
-wandb_mode   = "online"
+name         = "edge_reptile_v4_my_4gpu"
+wandb_mode   = "offline"
 
 [model]
 precision = "bfloat16"
@@ -54,7 +54,7 @@ logging_iter = 10
 
 [checkpoint]
 load_path = "${oc.env:BASE_CHECKPOINT_PATH}"
-save_iter = 250               # DCP snapshot of theta (~24 GB each: 13.5 GB weights + Adam moments) + meta_action_init_iter_XXXXXX.pt
+save_iter = 1000               # DCP snapshot of theta (~24 GB each: 13.5 GB weights + Adam moments) + meta_action_init_iter_XXXXXX.pt
 keys_to_skip_loading = ["net_ema.", "action2llm", "llm2action", "action_modality_embed"]
 
 # ---- Reptile knobs (docs/action_reptile_meta.md) --------------------------------------------------------------------

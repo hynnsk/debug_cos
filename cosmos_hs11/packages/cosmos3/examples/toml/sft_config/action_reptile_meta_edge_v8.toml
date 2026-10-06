@@ -18,7 +18,7 @@ task         = "vfm"
 experiment   = "action_reptile_meta_edge"
 project      = "cosmos3_action_meta"
 group        = "reptile_meta"
-name         = "edge_reptile_v8"
+name         = "edge_reptile_v8_4gpu"
 wandb_mode   = "offline"
 
 [model]

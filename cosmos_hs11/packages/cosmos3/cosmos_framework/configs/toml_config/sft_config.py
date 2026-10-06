@@ -397,6 +397,13 @@ class RepaTomlConfig(BaseModel):
         default=None, description="REPA MLP hidden width (2048); ignored for projector_type='linear'."
     )
     num_views: Optional[int] = Field(default=None, description="Camera views concatenated along the canvas width (2).")
+    view_layouts: Optional[dict[str, str]] = Field(
+        default=None,
+        description=(
+            "cosmos_hs11 v11: per-embodiment composite-canvas layout for the teacher, {dataset_name: 'canvas' | "
+            "'primary_over_two'} (model/generator/repa/view_layouts.py); keys must exist in the experiment config."
+        ),
+    )
 
 
 class SigRegTomlConfig(BaseModel):
@@ -817,6 +824,14 @@ class DataloaderTrainConfig(BaseModel):
 
     model_config = _PYDANTIC_MODEL_CONFIG
 
+    episode_balanced_sampling: Optional[bool] = Field(
+        default=None,
+        description=(
+            "LIBERO few-shot recipes (action_policy_libero_edge): sample a demonstration uniformly, then a window within "
+            "it (demonstration- and task-uniform), instead of streaming every window once per epoch. Routed to the nested "
+            "libero dataset node; omit for the original window-uniform behaviour."
+        ),
+    )
     max_samples_per_batch: Optional[int] = Field(
         default=None,
         description=(

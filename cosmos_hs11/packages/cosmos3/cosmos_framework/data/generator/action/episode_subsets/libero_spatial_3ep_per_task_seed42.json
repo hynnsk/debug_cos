@@ -1,0 +1,103 @@
+{
+  "description": "Fixed LIBERO subset: 3 randomly sampled demonstration episodes per task (random.Random(seed=42), tasks in ascending task_index order, candidates sorted by episode_index); consumed by LIBEROLeRobotDataset(episode_subset_path=...).",
+  "seed": 42,
+  "episodes_per_task": 3,
+  "n_excluded": 0,
+  "n_tasks": 10,
+  "n_episodes_total_in_dataset": 432,
+  "n_episodes": 30,
+  "tasks": {
+    "0": {
+      "task": "pick up the black bowl next to the cookie box and place it on the plate",
+      "n_available": 46,
+      "episodes": [
+        13,
+        48,
+        352
+      ]
+    },
+    "1": {
+      "task": "pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate",
+      "n_available": 42,
+      "episodes": [
+        133,
+        159,
+        173
+      ]
+    },
+    "2": {
+      "task": "pick up the black bowl on the ramekin and place it on the plate",
+      "n_available": 39,
+      "episodes": [
+        80,
+        127,
+        419
+      ]
+    },
+    "3": {
+      "task": "pick up the black bowl on the stove and place it on the plate",
+      "n_available": 35,
+      "episodes": [
+        9,
+        64,
+        373
+      ]
+    },
+    "4": {
+      "task": "pick up the black bowl between the plate and the ramekin and place it on the plate",
+      "n_available": 45,
+      "episodes": [
+        12,
+        66,
+        134
+      ]
+    },
+    "5": {
+      "task": "pick up the black bowl on the cookie box and place it on the plate",
+      "n_available": 43,
+      "episodes": [
+        176,
+        339,
+        389
+      ]
+    },
+    "6": {
+      "task": "pick up the black bowl next to the plate and place it on the plate",
+      "n_available": 47,
+      "episodes": [
+        24,
+        132,
+        304
+      ]
+    },
+    "7": {
+      "task": "pick up the black bowl next to the ramekin and place it on the plate",
+      "n_available": 45,
+      "episodes": [
+        327,
+        403,
+        427
+      ]
+    },
+    "8": {
+      "task": "pick up the black bowl from table center and place it on the plate",
+      "n_available": 46,
+      "episodes": [
+        119,
+        217,
+        222
+      ]
+    },
+    "9": {
+      "task": "pick up the black bowl on the wooden cabinet and place it on the plate",
+      "n_available": 44,
+      "episodes": [
+        29,
+        174,
+        372
+      ]
+    }
+  },
+  "excluded_from": [],
+  "source_root_basename": "libero_spatial"
+}

@@ -204,6 +204,17 @@ lever. Read `iter_time` from the first ~10 iterations (skip iteration 1) and mul
 * `bob` (broken RoCE) is excluded automatically for single-node runs via `NCCL_IB_DISABLE=1`; the
   hs09 `_sft_launcher_common.sh` shard-vs-NPROC guard applies to the downstream launchers.
 
+**v43 (2026-10-06): demonstration-uniform sampling.** `action_policy_libero_10_edge_reptileinit_v43.toml` /
+`launch_sft_action_policy_libero_10_edge_reptileinit_v43.sh` (port 50063) = the user's v3 (head lr x2) plus
+`[dataloader_train].episode_balanced_sampling = true`. The default streaming loader (`ActionIterableShuffleDataset`)
+visits every window of every demonstration once per epoch, so a demonstration's share of the samples is proportional to
+its window count; `ActionEpisodeUniformIterableDataset` instead draws one of the 30 demonstrations uniformly and then a
+window uniformly inside it (with replacement, independent seeded stream per rank x worker), which makes the expected
+per-demonstration and per-task sample counts equal. Knob = `get_action_libero_sft_dataset(episode_balanced_sampling=...)`
+(needs `iterable_shuffle=True`), routed from the TOML to the nested libero dataset node by `toml_config_helper`; the
+experiment default is False, so no other recipe changes. Validation keeps the window-uniform held-out pass. Tests:
+`datasets/action_sft_dataset_test.py`, `toml_config/libero_sampling_toml_test.py`.
+
 ## 8. Post-training variants on the Reptile init: DINOv2 REPA and masked V-JEPA 2.1
 
 Both add an auxiliary representation objective to the plain `action_policy_libero_10_edge_reptileinit.toml` recipe; the
@@ -237,6 +248,56 @@ of host/GPU memory; 4 x 64 windows fits the 44 GiB cards, the 2-GPU x 128 layout
 **v5 (2026-09-29)** = v2 + less pooling: `[model.repa].target_subgrid_thw = [1, 2, 2]` (each MoT token predicts a 2x2
 block of the 4x10x10-per-view DINOv2 grid; see docs/action_policy_libero_repa_vjepa.md section 9). Launcher
 `examples/launch_sft_action_policy_libero_10_edge_reptileinit_repa_dinov2_v5.sh` (port 50048).
+
+## 8b. REPA inside the Reptile inner loop (v11)
+
+`examples/toml/sft_config/action_reptile_meta_edge_v11.toml` + `examples/launch_reptile_meta_edge_v11.sh` (port 50082)
+move the DINOv2 distillation from the post-training loss into the meta-training objective. With `L_base` the recipe's
+`10 x fm_vision + 10 x fm_action`, `T` the frozen DINOv2 ViT-B/14 and `P_phi = net.repa_head` the REPA projector:
+
+```
+L_inner = L_base + lambda_meta * (1 - cos(P_phi(h_theta^(l)), sg[T(x)]))      psi = (theta, phi)
+psi' = U^k_{L_inner}(psi)            k inner FusedAdam steps on one embodiment's K demos (as before)
+psi  <- psi + eps * (psi' - psi)     the unchanged Reptile step, now on the backbone AND the projector
+```
+
+* **What is tuned in the TOML**: `[model.repa] layer_index` (MoT block `l`, 1..28) and `loss_weight` (`lambda_meta`;
+  `loss_weight_warmup_steps` ramps it 0 -> `loss_weight` over the first N META-iterations). Teacher, input size,
+  objective, projector and adapter are the hs10 v7 settings; `num_views = 1`: the canvas is one token grid for the
+  alignment head (`avgpool` adapts to the real grid of every batch, so the 8x8 / 8x10 / 6x10 token grids of the
+  "256" buckets all work).
+* **Camera views** (`[model.repa.view_layouts]`, `model/generator/repa/view_layouts.py`): RT-1, Bridge (image_0),
+  RoboMIND-UR / -Franka (`*_1rgb`) ship one camera, so their canvas is one 224 px teacher image. MolmoAct2-YAM ships
+  the `compose_multiview` 2x2 composite (top camera over the two half-sized wrist cameras, 540x640), which the stock
+  width split cannot separate; with `molmoact2_yam = "primary_over_two"` the teacher crops the native canvas into the
+  three views, encodes each at 224 px (a full 16x16 DINOv2 grid per view) and re-assembles the grids in the composite
+  layout (24x16 cells: top 16x16, wrists 8x8 each) before the usual pooling onto the window's MoT grid. Needs
+  `num_views = 1`, an avgpool-type adapter, no student upsampler; such embodiments keep their camera resolution in
+  the loader (`native_video_full_res`). The same layout fits RoboMIND `concat_view` (top | left, right) should a 3-camera
+  export be used. Samples without a layout entry use the stock path.
+* **What the trainer does** (`train_action_reptile.py`, only when `model.config.repa.enabled`): checks
+  `loss_mode = "total"` and that `"repa_"` is in `optimizer.keys_to_select` (phi must be part of theta, group
+  `repa_head`); switches the episode loader to `keep_native_video` and shrinks the native clips to
+  `teacher_input_size` in the workers (`native_video_size`; both overridable from `[custom.meta]`); runs the frozen
+  teacher ONCE per meta-episode (like the VAE encode) and hands the tokens to every inner step and query evaluation
+  through `training_step_from_inputs(..., repa_teacher_tokens=...)`. `objective = "masked_prediction"` is rejected
+  (it needs the raw batch every step).
+* **Logging**: `support_repa_loss_first/last`, `support_repa_cos_centered_last`, `repa_weight`, `support_loss_fm_last`,
+  `query_repa_loss(_zero_shot)`, `query_repa_cos_centered`, `query_loss_fm(_zero_shot)`, `adapt_delta/repa_head`,
+  `theta_norm/repa_head`. `support_loss_*` / `query_loss*` are the TOTAL incl. the weighted REPA term -> compare the
+  `*_fm` keys with a v4 run.
+* **Scale**: the inner support loss of v4 sits at ~1-3 (x10-scaled fm terms); a fresh projector starts at
+  `1 - cos ~ 1`, so `loss_weight = 5` (the post-training value) would dominate the first inner steps. v11 starts at
+  1.0 with a 50-meta-iteration ramp; the meta-learned projector makes the term shrink over the run.
+* **Downstream**: the DCP contains `net.repa_head.*`. All existing downstream TOMLs skip `"repa_"` at load (fresh
+  projector; the plain `reptileinit` recipe has no head at all), so they run unchanged on a v11 checkpoint. To
+  continue with the meta-learned projector, remove `"repa_"` from the post-training TOML's `keys_to_skip_loading` and
+  keep its `[model.repa]` `layer_index` / `teacher` / `projector_*` identical to v11 (`num_views` / grids follow the
+  LIBERO canvas there).
+* **Controls**: `action_reptile_meta_edge2_joint_sft.toml` + the same `[model.repa]` block = "source-SFT + REPA"
+  (k = 1, eps = 1), which separates the meta-learning contribution from plain REPA pretraining on the source data.
+* Memory: v4 peaked at 28.8 GiB alloc / 33.8 GiB reserved per GPU (4 x 64 windows); v11 adds the teacher (~0.2 GB),
+  the cached tokens (~0.4 GB bf16 per 64 windows), the shrunk clips (~0.16 GB) and the head. Not GPU-smoked yet.
 
 ## 9. Cosmos3-Nano
 
@@ -315,3 +376,32 @@ loop that resembles the downstream post-training (30 demos, minibatch 256, many 
 | `max_iter` | eps anneals over it; more iterations = more theta drift budget | 1000; 1500-2000 affordable on H200 |
 | `compile.enabled` | works on Hopper (228 KB smem) and in principle with in-place theta rewrites, but untested in this trainer | leave off |
 
+
+## 10. LIBERO-Goal / Object / Spatial suite variants of the reptileinit v3 recipe (2026-10-06)
+
+`action_policy_libero_{goal,object,spatial}_edge_reptileinit_v3.toml` are byte-for-byte the LIBERO-10 v3 recipe except for
+`[job].group/name` (`edge_libero_<suite>_fewshot` / `edge_libero_<suite>_3ep_fullft_reptile_lrx2`) and the two episode-subset
+jsons. Nothing else in the code is suite specific: the dataset reads tasks / episodes / video paths from the suite's own `meta/`,
+and the bundled `quantile_rot` stats were computed on all four suites pooled (see `normalizer_stats/*libero*.json` metadata),
+so the same stats file serves training and the eval server.
+
+Fixed subsets (`make_libero_episode_subset`, seed 42, same procedure as the LIBERO-10 files; never regenerate):
+
+| suite | train json (3 demos/task = 30 eps) | val json (5 held-out demos/task = 50 eps, disjoint) | train windows |
+|---|---|---|---|
+| libero_goal (428 eps) | `libero_goal_3ep_per_task_seed42.json` | `libero_goal_val_5ep_per_task_seed42_excl3ep.json` | 3386 |
+| libero_object (454 eps) | `libero_object_3ep_per_task_seed42.json` | `libero_object_val_5ep_per_task_seed42_excl3ep.json` | 3902 |
+| libero_spatial (432 eps) | `libero_spatial_3ep_per_task_seed42.json` | `libero_spatial_val_5ep_per_task_seed42_excl3ep.json` | 3357 |
+
+The loader validates every listed episode against the suite's episode -> task mapping, so a LIBERO-10 json used with another
+suite's `LIBERO_ROOT` (or vice versa) fails at construction instead of training on the wrong demos. Run with the LIBERO-10
+launcher and two overrides (the launcher pins `MASTER_PORT=50014`; give concurrent suite jobs on one node different ports):
+
+```bash
+LIBERO_ROOT=$COSMOS_STORAGE/data/LIBERO_LeRobot_v3/libero_goal \
+TOML_FILE=examples/toml/sft_config/action_policy_libero_goal_edge_reptileinit_v3.toml \
+NPROC_PER_NODE=4 sr 4 48 examples/launch_sft_action_policy_libero_10_edge_reptileinit_v3.sh
+# closed-loop eval: the suite is TASK_SUITE (default libero_10 in examples/eval_libero_closed_loop.sh, which forwards it as
+# closed_loop_eval.py --task_suite; max steps per suite come from TASK_MAX_STEPS there)
+TASK_SUITE=libero_goal RUN_ROOT=<run dir> ITER=2000 OUT_DIR=<out> sr 1 48 examples/eval_libero_closed_loop.sh
+```

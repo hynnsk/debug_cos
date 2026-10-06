@@ -93,6 +93,54 @@ class ActionIterableShuffleDataset(IterableDataset):
             epoch += 1
 
 
+class ActionEpisodeUniformIterableDataset(IterableDataset):
+    """Streaming view of a map-style ``ActionSFTDataset`` that samples DEMONSTRATIONS uniformly (cosmos_hs11 v43).
+
+    ``ActionIterableShuffleDataset`` visits every window of every episode once per epoch, so an episode's share of
+    the training samples is proportional to its number of windows (long demonstrations, and the tasks they belong
+    to, are over-represented). This view instead draws, for every sample, an episode uniformly at random among the
+    episodes with at least one window and then a window uniformly within that episode (sampling with replacement,
+    infinite stream, no epochs). With a fixed subset of 3 demonstrations per task this makes the per-demonstration
+    AND per-task sample counts uniform in expectation.
+
+    Every ``(rank, worker)`` uses its own deterministic RNG stream (``seed`` mixed with the global shard id), so no
+    sharding of episodes is needed: the streams are independent draws from the same distribution.
+    ``shard_world_size`` / ``shard_rank`` are set by ``RankPartitionedDataLoader``.
+    """
+
+    def __init__(self, dataset: "ActionSFTDataset", seed: int = 42):
+        super().__init__()
+        self._dataset = dataset
+        self._seed = int(seed)
+        self.shard_world_size = 1
+        self.shard_rank = 0
+
+    def __len__(self) -> int:  # informational only; iteration is infinite
+        return len(self._dataset)
+
+    @staticmethod
+    def stream_indices(blocks, seed: int, shard_rank: int, worker_id: int, num_workers: int):
+        """Infinite generator of flat sample indices: episode uniform, then window uniform within the episode."""
+        import torch
+
+        blocks = [(int(s), int(n)) for s, n in blocks if int(n) > 0]
+        if not blocks:
+            raise ValueError("episode-uniform sampling needs at least one episode with a valid window")
+        g = torch.Generator()
+        g.manual_seed(int(seed) + 1_000_003 * (int(shard_rank) * int(num_workers) + int(worker_id)))
+        n_ep = len(blocks)
+        while True:
+            start, length = blocks[int(torch.randint(n_ep, (1,), generator=g))]
+            yield start + int(torch.randint(length, (1,), generator=g))
+
+    def __iter__(self):
+        wi = get_worker_info()
+        wid = wi.id if wi is not None else 0
+        nw = wi.num_workers if wi is not None else 1
+        for idx in self.stream_indices(self._dataset.get_shuffle_blocks(), self._seed, self.shard_rank, wid, nw):
+            yield self._dataset[idx]
+
+
 def get_action_droid_sft_dataset(
     *,
     root: str,
@@ -331,6 +379,7 @@ def get_action_libero_sft_dataset(
     episode_shuffle_seed: int = 42,
     episode_subset_path: str | None = None,
     keep_native_video: bool = False,
+    episode_balanced_sampling: bool = False,
 ) -> Dataset:
     """Build the LIBERO action-policy SFT dataset (GA reproduction defaults).
 
@@ -377,6 +426,11 @@ def get_action_libero_sft_dataset(
         keep_native_video=keep_native_video,
     )
     sft = ActionSFTDataset(dataset, transform, resolution)
+    if episode_balanced_sampling:
+        # cosmos_hs11 v43: demonstration-uniform (-> task-uniform) sampling instead of window-uniform epochs.
+        if not iterable_shuffle:
+            raise ValueError("episode_balanced_sampling=True requires iterable_shuffle=True (streaming LIBERO loader)")
+        return ActionEpisodeUniformIterableDataset(sft, seed=episode_shuffle_seed)
     if iterable_shuffle:
         return ActionIterableShuffleDataset(sft, seed=episode_shuffle_seed)
     return sft

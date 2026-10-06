@@ -104,6 +104,10 @@ SAMPLER_OVERRIDE_KEYS = {
     "root_overrides",
     "format_prompt_as_json",
     "append_idle_frames",
+    # cosmos_hs11 v11 (Reptile loader only): native frames for the REPA teacher in the inner loop
+    "keep_native_video",
+    "native_video_size",
+    "native_video_full_res",
 }
 
 

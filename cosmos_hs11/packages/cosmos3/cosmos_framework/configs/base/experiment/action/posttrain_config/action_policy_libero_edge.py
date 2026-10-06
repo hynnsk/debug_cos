@@ -62,8 +62,13 @@ def _libero_packing_loader(
     max_samples_per_batch: int,
     num_workers: int,
     prefetch_factor: int,
+    episode_balanced_sampling: bool = False,
 ):
-    """LIBERO-10 PackingDataLoader; train and val share everything but the episode subset / dropout / seed."""
+    """LIBERO-10 PackingDataLoader; train and val share everything but the episode subset / dropout / seed.
+
+    ``episode_balanced_sampling`` (cosmos_hs11 v43, TOML ``[dataloader_train].episode_balanced_sampling``): sample a
+    demonstration uniformly, then a window within it, instead of streaming every window once per epoch (which weights
+    demonstrations by their length). Default False = unchanged behaviour for every other recipe."""
     return L(PackingDataLoader)(
         audio_sample_rate=48000,
         dataset_name=dataset_name,
@@ -103,6 +108,7 @@ def _libero_packing_loader(
                         val_ratio=0.01,
                         episode_subset_path=episode_subset_path,
                         iterable_shuffle=True,
+                        episode_balanced_sampling=episode_balanced_sampling,
                         episode_shuffle_seed=episode_shuffle_seed,
                         resolution=None,
                         max_action_dim="${model.config.max_action_dim}",

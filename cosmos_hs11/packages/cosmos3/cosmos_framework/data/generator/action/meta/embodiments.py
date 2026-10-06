@@ -282,8 +282,14 @@ def build_meta_transform(
     append_resolution_info: bool = True,
     append_idle_frames: bool = True,
     format_prompt_as_json: bool = True,
+    keep_native_video: bool = False,
+    native_video_key: str = "video_native",
 ) -> ActionTransformPipeline:
-    """One ``ActionTransformPipeline`` shared by every embodiment (mirrors the LIBERO recipe)."""
+    """One ``ActionTransformPipeline`` shared by every embodiment (mirrors the LIBERO recipe).
+
+    ``keep_native_video`` (cosmos_hs11 v11): also ship the decoded, un-resized uint8 frames as ``native_video_key`` --
+    the input of the frozen REPA teacher when the distillation loss runs inside the Reptile inner loop.
+    """
     return ActionTransformPipeline(
         tokenizer_config=tokenizer_config,
         cfg_dropout_rate=cfg_dropout_rate,
@@ -293,6 +299,8 @@ def build_meta_transform(
         append_resolution_info=append_resolution_info,
         append_idle_frames=append_idle_frames,
         format_prompt_as_json=format_prompt_as_json,
+        keep_native_video=keep_native_video,
+        native_video_key=native_video_key,
     )
 
 

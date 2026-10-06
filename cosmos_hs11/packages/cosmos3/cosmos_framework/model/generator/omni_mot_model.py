@@ -74,6 +74,12 @@ from cosmos_framework.model.generator.repa.adapters import (
     repa_temporal_difference_cosine_loss,
 )
 from cosmos_framework.model.generator.repa.alignment import RepaTeacherTokens
+from cosmos_framework.model.generator.repa.view_layouts import (
+    compose_view_grids,
+    crop_and_resize_views,
+    resolve_view_layout,
+    validate_repa_view_layouts,
+)
 from cosmos_framework.model.generator.repa.masked_prediction import (
     auxiliary_weight,
     masked_prediction_loss,
@@ -595,6 +601,9 @@ class OmniMoTModel(ImaginaireModel):
             load_weights=DEVICE == Device.CUDA,  # cpu/meta builds are checkpoint-conversion / smoke paths
         )
         object.__setattr__(self, "repa_teacher", teacher)
+        layouts = validate_repa_view_layouts(repa_cfg)  # cosmos_hs11 v11: composite-canvas layouts (empty = stock path)
+        if layouts:
+            log.info(f"REPA view layouts (composite canvases encoded per view, re-assembled before pooling): {layouts}")
         log.info(
             f"REPA enabled: objective={repa_cfg.objective}, teacher={teacher.spec.name} (D={teacher.embed_dim}, grid={teacher.grid_thw}, "
             f"input {teacher.input_size}px), MoT block {repa_cfg.layer_index}, projector={repa_cfg.projector_type}, "
@@ -602,9 +611,43 @@ class OmniMoTModel(ImaginaireModel):
             f"relation_loss_weight={repa_cfg.relation_loss_weight} ({repa_cfg.relation_distance})"
         )
 
+    def _resolve_repa_teacher_tokens(
+        self,
+        data_batch: dict[str, Any] | None,
+        sequence_plans: list[SequencePlan],
+        precomputed: "RepaTeacherTokens | torch.Tensor | None" = None,
+    ) -> "RepaTeacherTokens | None":
+        """The single-use holder of raw teacher tokens for this forward, or ``None`` when the REPA cosine / relation
+        objective is off (disabled, or ``objective="masked_prediction"`` which builds its own targets).
+
+        ``precomputed`` wins over ``data_batch``: the Reptile inner loop (cosmos_hs11 v11) runs the teacher once per
+        meta-episode and re-uses the tokens for its k inner steps + the query diagnostics. A holder passed in is
+        unwrapped first, so the same tensor can back any number of calls. Without either source a clear error is
+        raised (a silent skip would turn the recipe into plain fine-tuning). Only reads ``self.config.repa`` /
+        ``self.repa_enabled`` / ``self.masked_prediction_enabled`` / ``self.repa_teacher`` -> unit-tested on CPU with a
+        stand-in ``self`` (``scripts/train_action_reptile_repa_test.py``).
+        """
+        if not (self.repa_enabled and not self.masked_prediction_enabled and getattr(self, "repa_teacher", None) is not None):
+            return None
+        if precomputed is not None:
+            raw = precomputed.take() if isinstance(precomputed, RepaTeacherTokens) else precomputed
+            # Fresh single-use holder per call: the net takes the raw tokens out once the small targets are built,
+            # so this frame does not pin the raw tensor through the MoT forward (the caller's reference keeps it).
+            return RepaTeacherTokens(raw)
+        if data_batch is None:
+            raise ValueError(
+                "REPA is enabled but training_step_from_inputs() was called without the raw data_batch and without "
+                f"precomputed repa_teacher_tokens; the teacher needs data_batch[{self.config.repa.native_video_key!r}]. "
+                "Call training_step() instead, pass data_batch=..., or pass repa_teacher_tokens=... "
+                "(the Reptile inner loop does the latter; the FOMAML meta trainer supports neither)."
+            )
+        # Single-use holder: the net takes the raw tokens out once the small targets are built, so this
+        # frame does not pin ~0.8 GB through the MoT forward.
+        return RepaTeacherTokens(self._compute_repa_teacher_tokens(data_batch, sequence_plans))
+
     def _compute_repa_teacher_tokens(
         self, data_batch: dict[str, Any], sequence_plans: list[SequencePlan]
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | list[torch.Tensor]:
         """Run the frozen teacher on the native-resolution predicted frames of every camera view.
 
         ``data_batch[repa.native_video_key]`` holds one uint8 ``[C,T,H,V*W]`` clip per sample (the concat_view
@@ -612,6 +655,13 @@ class OmniMoTModel(ImaginaireModel):
         ``1..T-1`` are the ones the MoT denoises. Each view is encoded as its own ``[C,T-1,H,W]`` clip.
 
         Returns a ``[B,V,T_t,H_p,W_p,D_t]`` tensor in batch (= packing) order.
+
+        cosmos_hs11 v11 -- ``repa.view_layouts``: a sample whose ``data_batch["dataset_name"]`` has a layout (e.g.
+        MolmoAct2-YAM ``primary_over_two``) is cropped into its views by that layout instead of the width split; every
+        view is encoded at the teacher input size and the per-view grids are re-assembled into ONE canvas-shaped grid
+        (``[1,T_t,H_c,W_c,D_t]``, see ``repa/view_layouts.py``). As those grids differ in shape from the stock 16x16
+        ones, the result is then a LIST of per-sample ``[V_i,T_t,H_i,W_i,D_t]`` tensors (``compute_targets`` accepts
+        both forms). Without any layout sample the tensor form above is returned, bit-identical to before.
         """
         repa_cfg = self.config.repa
         native = data_batch.get(repa_cfg.native_video_key)
@@ -622,7 +672,12 @@ class OmniMoTModel(ImaginaireModel):
             )
         num_views = int(repa_cfg.num_views)
         expected_frames = int(repa_cfg.teacher_num_frames)
+        layouts = getattr(repa_cfg, "view_layouts", None) or {}
+        names = data_batch.get("dataset_name") if layouts else None
+        if layouts and names is not None and len(names) != len(native):
+            raise ValueError(f"{len(names)} dataset names for {len(native)} native clips")
         clips: list[torch.Tensor] = []
+        spans: list[tuple[int, int, tuple | None]] = []  # per sample: (first clip, #clips, layout boxes | None)
         for i, item in enumerate(native):
             if isinstance(item, (list, tuple)):
                 if len(item) != 1:
@@ -647,9 +702,16 @@ class OmniMoTModel(ImaginaireModel):
                 raise ValueError(
                     f"Sample {i} has {frames.shape[1]} predicted frames but repa.teacher_num_frames={expected_frames}"
                 )
-            if frames.shape[-1] % num_views != 0:
-                raise ValueError(f"Native width {frames.shape[-1]} is not divisible by repa.num_views={num_views}")
-            clips.extend(frames.chunk(num_views, dim=-1))  # V x [C,T-1,H,W], view-major within the sample
+            boxes = resolve_view_layout(layouts.get(str(names[i]))) if names is not None else None
+            if boxes is not None:
+                # composite canvas: one clip per view, each resized to the teacher input (shapes differ per view)
+                views = crop_and_resize_views(frames, boxes, int(repa_cfg.teacher_input_size))
+            else:
+                if frames.shape[-1] % num_views != 0:
+                    raise ValueError(f"Native width {frames.shape[-1]} is not divisible by repa.num_views={num_views}")
+                views = list(frames.chunk(num_views, dim=-1))  # V x [C,T-1,H,W], view-major within the sample
+            spans.append((len(clips), len(views), boxes))
+            clips.extend(views)
         # Encode in teacher-sized chunks: no [B*V,3,16,256,256] uint8 stack (0.8 GB) is ever materialized.
         chunk = max(1, int(repa_cfg.teacher_batch_size))
         outs = []
@@ -660,10 +722,19 @@ class OmniMoTModel(ImaginaireModel):
         num_samples = len(native)
         # The native clips (~0.85 GB on the GPU for 128 windows) are not needed after this point: drop them from
         # the batch dict so they do not stay resident through the MoT forward/backward.
-        del clips, native, frames
+        del clips, native, frames, views
         data_batch.pop(repa_cfg.native_video_key, None)
-        tokens = torch.cat(outs, dim=0)  # [B*V,T_t,H_p,W_p,D_t]
-        return tokens.view(num_samples, num_views, *tokens.shape[1:])  # [B,V,T_t,H_p,W_p,D_t]
+        tokens = torch.cat(outs, dim=0)  # [N_clips,T_t,H_p,W_p,D_t]
+        if not any(boxes is not None for _, _, boxes in spans):
+            return tokens.view(num_samples, num_views, *tokens.shape[1:])  # [B,V,T_t,H_p,W_p,D_t]
+        per_sample: list[torch.Tensor] = []
+        for start, count, boxes in spans:
+            grids = tokens[start : start + count]  # [V_i,T_t,H_p,W_p,D_t]
+            if boxes is None:
+                per_sample.append(grids)
+            else:
+                per_sample.append(compose_view_grids(list(grids), boxes).unsqueeze(0))  # [1,T_t,H_c,W_c,D_t]
+        return per_sample
 
     def load_pretrained_model_if_needed(
         self,
@@ -1468,6 +1539,7 @@ class OmniMoTModel(ImaginaireModel):
         ],
         iteration: int,
         data_batch: dict[str, Any] | None = None,
+        repa_teacher_tokens: "RepaTeacherTokens | torch.Tensor | None" = None,
     ) -> tuple[dict[str, torch.Tensor], torch.Tensor]:
         """Second half of :meth:`training_step`: noise sampling, packing, denoising and the loss.
 
@@ -1480,8 +1552,14 @@ class OmniMoTModel(ImaginaireModel):
 
         ``data_batch`` (cosmos_hs09_2): the raw batch dict, needed ONLY when the REPA loss is enabled -- the frozen
         teacher reads the native-resolution frames ``data_batch[repa.native_video_key]`` (and pops them once the
-        teacher tokens are built). :meth:`training_step` always passes it; the meta trainer does not, so REPA is
-        not available in the meta inner loop (a clear error is raised instead of a silent skip).
+        teacher tokens are built). :meth:`training_step` always passes it.
+
+        ``repa_teacher_tokens`` (cosmos_hs11 v11): the raw teacher tokens of this batch computed EARLIER with
+        :meth:`_compute_repa_teacher_tokens` (``[B,V,T_t,H_p,W_p,D_t]``). The Reptile inner loop
+        (``scripts/train_action_reptile.py``) runs the frozen teacher once per meta-episode and then calls this
+        method k times on the same inputs; passing the cached tokens here avoids k teacher forwards and the raw
+        batch. The tensor is not consumed (a fresh single-use holder is built per call), so the caller keeps it.
+        With neither argument and REPA enabled a clear error is raised instead of a silent skip.
         """
         input_text_indexes, sequence_plans, gen_data_clean, memory_info, data_resolutions, vae_pixel_shapes = (
             training_inputs
@@ -1667,18 +1745,8 @@ class OmniMoTModel(ImaginaireModel):
         packed_sequence.to_cuda()
 
         # REPA: frozen teacher (V-JEPA 2.1 / DINOv2) tokens of the predicted frames (per camera view), consumed
-        # inside the net forward.
-        repa_teacher_tokens = None
-        if self.repa_enabled and not self.masked_prediction_enabled and getattr(self, "repa_teacher", None) is not None:
-            if data_batch is None:
-                raise ValueError(
-                    "REPA is enabled but training_step_from_inputs() was called without the raw data_batch; the teacher "
-                    f"needs data_batch[{self.config.repa.native_video_key!r}]. Call training_step() instead, or pass "
-                    "data_batch=... (the meta trainer's inner loop does not support REPA)."
-                )
-            # Single-use holder: the net takes the raw tokens out once the small targets are built, so this
-            # frame does not pin ~0.8 GB through the MoT forward.
-            repa_teacher_tokens = RepaTeacherTokens(self._compute_repa_teacher_tokens(data_batch, sequence_plans))
+        # inside the net forward. Either computed here from the raw batch or handed in pre-computed (Reptile inner loop).
+        repa_teacher_tokens = self._resolve_repa_teacher_tokens(data_batch, sequence_plans, repa_teacher_tokens)
 
         # cosmos_hs12 masked prediction: an independent pixel-masked pack + frozen-teacher targets, consumed inside the
         # same root net forward (prefix up to the REPA block); needs the raw data_batch like the REPA teacher above.

@@ -243,6 +243,13 @@ class RepaConfig:
     num_views: int = 2
     # data_batch key holding the un-resized uint8 frames [C,T,H,V*W] (set keep_native_video=True on the dataset).
     native_video_key: str = "video_native"
+    # cosmos_hs11 v11: per-embodiment camera layout of a COMPOSITE canvas, keyed by the sample's ``dataset_name``
+    # (``model/generator/repa/view_layouts.py``): "canvas" (default, whole canvas = one teacher image) or
+    # "primary_over_two" (compose_multiview: primary view above two half-sized side / wrist views -- MolmoAct2-YAM,
+    # RoboMIND concat_view). A layout encodes every view separately and re-assembles the per-view teacher grids in
+    # the canvas layout before pooling; needs num_views = 1, an avgpool-type adapter and no student upsampler.
+    # Samples whose dataset_name is absent from the dict use the stock num_views width split.
+    view_layouts: dict[str, str] = attrs.field(factory=dict)
 
 
 @attrs.define(slots=False)
