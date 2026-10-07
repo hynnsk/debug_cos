@@ -405,3 +405,39 @@ NPROC_PER_NODE=4 sr 4 48 examples/launch_sft_action_policy_libero_10_edge_reptil
 # closed_loop_eval.py --task_suite; max steps per suite come from TASK_MAX_STEPS there)
 TASK_SUITE=libero_goal RUN_ROOT=<run dir> ITER=2000 OUT_DIR=<out> sr 1 48 examples/eval_libero_closed_loop.sh
 ```
+
+## 10b. Fresh Cosmos3-Edge baselines for the suites: 3-demo and full-data upper bound (2026-10-07)
+
+Two fresh-init (mid-trained Cosmos3-Edge, no Reptile warm start) recipes per suite, so every suite has the same three
+points as LIBERO-10: fresh 3-demo baseline, Reptile 3-demo (section 10), and the full-data upper bound. Both load
+`BASE_CHECKPOINT_PATH` (the base DCP dir), leave `keys_to_skip_loading` at the experiment default (fresh LIBERO action heads)
+and use the hs08 fresh-head LR boost (`lr_multipliers` 5x; the reptileinit recipes use 1x). Everything else -- experiment,
+trainable set, lr 5e-5, warmup 200, cycle 2000, 2000 iterations, EMA -- is the section 10 recipe.
+
+| recipe | TOML / launcher (`examples/`) | data | batch | validation | port |
+|---|---|---|---|---|---|
+| 3-demo fresh baseline | `action_policy_libero_<suite>_edge_baseinit.toml` / `launch_sft_action_policy_libero_<suite>_edge_baseinit.sh` | `libero_<suite>_3ep_per_task_seed42.json` (30 eps) | 2 GPUs (shard 2) x 128 = 256 | on, `libero_<suite>_val_5ep_per_task_seed42_excl3ep.json` every 200 | goal 50030, object 50031, spatial 50032 |
+| full-data upper bound | `action_policy_libero_<suite>_edge_baseinit_data_all.toml` / `..._baseinit_data_all.sh` | `libero_<suite>_all_episodes.json` (goal 428 / object 454 / spatial 432 eps) | 8 GPUs (shard 8) x 256 = 2048, grad_accum 1 | off (nothing held out; judge by rollout) | goal 50033, object 50034, spatial 50035 |
+
+The `*_all_episodes.json` files list every episode of the suite under its task (same format as `libero_10_all_episodes.json`;
+listing them as a fixed subset disables the dataset's seeded 1 % val carve-out). All ten subset jsons of the three suites were
+re-checked against each suite's `data/*.parquet` episode -> task mapping (every episode under the right task, no duplicates,
+train/val disjoint, `n_available` = the suite's per-task count). The launchers additionally refuse a `LIBERO_ROOT` whose
+basename is not the suite, so a wrong-suite dataset fails before torchrun starts.
+
+The full-data TOMLs still carry a `[dataloader_val]` section pointing at the suite's val json: `scripts/_train.py` instantiates
+`dataloader_val` unconditionally, and its experiment default (the LIBERO-10 val json) fails the suite's episode -> task check at
+construction. With `run_validation=false` that loader is never iterated.
+
+256 windows/rank is twice the activation footprint of the 128/rank recipes; if the full-data run OOMs, keep the global batch
+with `EXTRA_TAIL_OVERRIDES="dataloader_train.max_samples_per_batch=128 trainer.grad_accum_iter=2"`. `save_iter` is 2000
+(final checkpoint only); lower it to keep intermediate checkpoints for rollout eval.
+
+```bash
+S=$COSMOS_STORAGE   # data/LIBERO_LeRobot_v3/<suite>, checkpoints/Cosmos3-Edge, checkpoints/wan22_vae/Wan2.2_VAE.pth
+export BASE_CHECKPOINT_PATH=$S/checkpoints/Cosmos3-Edge WAN_VAE_PATH=$S/checkpoints/wan22_vae/Wan2.2_VAE.pth
+# 3-demo fresh baseline (2 GPUs)
+LIBERO_ROOT=$S/data/LIBERO_LeRobot_v3/libero_goal NPROC_PER_NODE=2 sr 2 48 examples/launch_sft_action_policy_libero_goal_edge_baseinit.sh
+# full-data upper bound (8 GPUs)
+LIBERO_ROOT=$S/data/LIBERO_LeRobot_v3/libero_goal NPROC_PER_NODE=8 sr 8 48 examples/launch_sft_action_policy_libero_goal_edge_baseinit_data_all.sh
+```

@@ -17,7 +17,7 @@ task         = "vfm"
 experiment   = "action_policy_libero_edge"
 project      = "cosmos3_action_libero"
 group        = "edge_libero10_fewshot"
-name         = "edge_libero10_3ep_fullft_reptile_v7_init_lr2x"
+name         = "edge_libero10_3ep_fullft_reptile_v7_init_from4gpu"
 wandb_mode   = "offline"
 
 [model]
@@ -45,9 +45,9 @@ vae_path = "${oc.env:WAN_VAE_PATH}"
 lr = 5.0e-05          # full-FT LR of the recipe
 
 [optimizer.lr_multipliers]
-action2llm            = 2.0   # 5x in the fresh-head baseline; heads are meta-initialized here -> 1x
-llm2action            = 2.0
-action_modality_embed = 2.0
+action2llm            = 1.0   # 5x in the fresh-head baseline; heads are meta-initialized here -> 1x
+llm2action            = 1.0
+action_modality_embed = 1.0
 
 [scheduler]
 cycle_lengths = [2000]        # linear decay to 0 at max_iter (matches the cosmos_hs08 baseline)

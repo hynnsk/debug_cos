@@ -13,11 +13,11 @@
 # Usage:
 #   NPROC_PER_NODE=4 sr 4 48 examples/launch_sft_action_policy_libero_10_edge_reptileinit.sh
 
-TOML_FILE="${TOML_FILE:-examples/toml/sft_config/action_policy_libero_10_edge_reptileinit_v10.toml}"
+TOML_FILE="${TOML_FILE:-examples/toml/sft_config/action_policy_libero_10_edge_reptileinit_v16.toml}"
 export LIBERO_ROOT="${LIBERO_ROOT:-}"
 export REPTILE_CKPT_PATH="${REPTILE_CKPT_PATH:-}"
 export META_ACTION_INIT_PATH="${META_ACTION_INIT_PATH:-}"
-export MASTER_PORT=50020
+export MASTER_PORT=50026
 # _sft_launcher_common.sh validates BASE_CHECKPOINT_PATH / defaults WAN_VAE_PATH when this is set; the TOML itself
 # reads REPTILE_CKPT_PATH.
 : "${BASE_CHECKPOINT_PATH:=${REPTILE_CKPT_PATH}}"

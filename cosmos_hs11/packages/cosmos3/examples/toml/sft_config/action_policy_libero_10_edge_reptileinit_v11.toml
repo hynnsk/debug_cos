@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
-# cosmos_hs11 -- REPTILE INIT -> FULL fine-tune. LIBERO-Spatial (libero_spatial suite) few-shot post-training (3 demos/task = 30 episodes) with the
+# cosmos_hs11 -- REPTILE INIT -> FULL fine-tune. LIBERO-10 few-shot post-training (3 demos/task = 30 episodes) with the
 # ORIGINAL Cosmos3 recipe (experiment action_policy_libero_edge), warm-started from a full-mode Reptile checkpoint:
 #   [checkpoint].load_path       = REPTILE_CKPT_PATH  (<reptile job>/checkpoints/iter_XXXXXXXXX -- the dir holding model/)
 #                                  -> moe_gen, time_embedder, vae2llm, llm2vae, k_norm_und_for_gen come from theta
@@ -10,16 +10,14 @@
 # Same trainable set, LR, schedule, batch and validation as the full-FT baseline (cosmos_hs08 / hs09); differences to the
 # fresh baseline: the init, and the action-head LR multiplier (5x fresh-head boost -> 1x, the heads are meta-initialized).
 # 4 GPUs (shard 4) x 64 windows = global batch 256, warmup 200, cycle 2000, 2000 iterations, held-out val every 200.
-# Suite variant of action_policy_libero_10_edge_reptileinit_v3.toml: same recipe, LIBERO_ROOT must point at <dir>/libero_spatial
-# and the fixed train/val episode subsets are the libero_spatial_* jsons (make_libero_episode_subset, seed 42).
-# Env: LIBERO_ROOT (=<dir>/libero_spatial), REPTILE_CKPT_PATH, META_ACTION_INIT_PATH, WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT. See docs/action_reptile_meta.md.
+# Env: LIBERO_ROOT, REPTILE_CKPT_PATH, META_ACTION_INIT_PATH, WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT. See docs/action_reptile_meta.md.
 
 [job]
 task         = "vfm"
 experiment   = "action_policy_libero_edge"
 project      = "cosmos3_action_libero"
-group        = "edge_libero_spatial_fewshot"
-name         = "edge_libero_spatial_3ep_fullft_reptile"
+group        = "edge_libero10_fewshot"
+name         = "edge_libero10_3ep_fullft_reptile_v11_init"
 wandb_mode   = "offline"
 
 [model]
@@ -67,11 +65,11 @@ max_val_iter            = 16     # x 64 windows x 4 ranks = 4096 windows ~= half
 
 [dataloader_train]
 max_samples_per_batch = 128       # per rank; x 4 ranks = global batch 256
-episode_subset_path   = "libero_spatial_3ep_per_task_seed42.json"        # 3 demos/task x 10 tasks = 30 episodes (libero_spatial)
+episode_subset_path   = "libero_10_3ep_per_task_seed42.json"          # 3 demos/task x 10 tasks = 30 episodes
 
 [dataloader_val]
 max_samples_per_batch = 16
-episode_subset_path   = "libero_spatial_val_5ep_per_task_seed42_excl3ep.json"  # 5 held-out demos/task, disjoint from train (libero_spatial)
+episode_subset_path   = "libero_10_val_5ep_per_task_seed42_excl3ep.json"  # 5 held-out demos/task, disjoint from train
 
 [checkpoint]
 load_path = "${oc.env:REPTILE_CKPT_PATH}"   # <reptile job>/checkpoints/iter_XXXXXXXXX (NOT the base Cosmos3-Edge dir)

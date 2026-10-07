@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
-# cosmos_hs11: LIBERO-10 few-shot (3 demos/task) FULL fine-tune warm-started from a full-mode REPTILE checkpoint.
+# cosmos_hs11 v43: LIBERO-10 few-shot (3 demos/task) FULL fine-tune from the Reptile init with DEMONSTRATION-UNIFORM
+# sampling (v3 + [dataloader_train].episode_balanced_sampling = true).
 # Drives examples/toml/sft_config/action_policy_libero_10_edge_reptileinit.toml. See docs/action_reptile_meta.md.
 #
 # Required env vars:
@@ -13,11 +14,12 @@
 # Usage:
 #   NPROC_PER_NODE=4 sr 4 48 examples/launch_sft_action_policy_libero_10_edge_reptileinit.sh
 
-TOML_FILE="${TOML_FILE:-examples/toml/sft_config/action_policy_libero_10_edge_reptileinit_v10.toml}"
+TOML_FILE="${TOML_FILE:-examples/toml/sft_config/action_policy_libero_10_edge_reptileinit_v43.toml}"
 export LIBERO_ROOT="${LIBERO_ROOT:-}"
 export REPTILE_CKPT_PATH="${REPTILE_CKPT_PATH:-}"
 export META_ACTION_INIT_PATH="${META_ACTION_INIT_PATH:-}"
-export MASTER_PORT=50020
+: "${MASTER_PORT:=50063}"   # v43: distinct from the other reptileinit launchers
+export MASTER_PORT
 # _sft_launcher_common.sh validates BASE_CHECKPOINT_PATH / defaults WAN_VAE_PATH when this is set; the TOML itself
 # reads REPTILE_CKPT_PATH.
 : "${BASE_CHECKPOINT_PATH:=${REPTILE_CKPT_PATH}}"

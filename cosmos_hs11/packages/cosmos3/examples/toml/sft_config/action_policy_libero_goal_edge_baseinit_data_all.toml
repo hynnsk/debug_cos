@@ -1,0 +1,86 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# cosmos_hs11 -- FRESH Cosmos3-Edge INIT -> FULL fine-tune on the WHOLE LIBERO-Goal suite (libero_goal, ALL 428 episodes),
+# validation off = the full-data UPPER BOUND for the 3-demo recipes of this suite (action_policy_libero_goal_edge_baseinit.toml
+# and action_policy_libero_goal_edge_reptileinit_v3.toml). Same experiment, trainable set, LR, head LR multiplier, EMA and
+# 2000-iteration schedule (warmup 200, cycle 2000) as the 3-demo fresh-init baseline; the changes are
+#   * [dataloader_train].episode_subset_path = "libero_goal_all_episodes.json" = ALL 428 episodes listed as a fixed subset.
+#     Listed on purpose: with the key omitted the dataset would carve out its own seeded 1 % val split (val_ratio=0.01 ->
+#     4 episodes never trained on); a fixed subset disables that, so nothing is held out.
+#   * validation OFF (run_validation=false): every episode is in the training set, so there is no held-out set and a val
+#     loss would be in-sample. Pick checkpoints by iteration (save_iter) and judge by LIBERO rollout success only.
+#     The [dataloader_val] section below does NOT turn validation on: scripts/_train.py instantiates dataloader_val
+#     unconditionally, and its experiment default is the LIBERO-10 val json, which fails LIBEROLeRobotDataset's
+#     episode -> task check against a libero_goal LIBERO_ROOT at construction. Pointing it at this suite's val json keeps
+#     the (never iterated) loader constructible.
+#   * batch: 8 GPUs (shard 8) x 256 windows/rank = global batch 2048 at grad_accum 1 (the Cosmos3 full-data layout), i.e.
+#     2000 x 2048 = ~4.1 M windows = ~91 epochs over the suite's ~45 k windows.
+#     256 windows/rank is twice the activation footprint of the 128/rank recipes. If it OOMs, keep the global batch with
+#     EXTRA_TAIL_OVERRIDES="dataloader_train.max_samples_per_batch=128 trainer.grad_accum_iter=2" (the layout of the
+#     LIBERO-10 reptileinit data_all_v3 recipe).
+# LIBERO_ROOT must point at <dir>/libero_goal.
+# Env: LIBERO_ROOT (=<dir>/libero_goal), BASE_CHECKPOINT_PATH (Cosmos3-Edge DCP dir), WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT.
+# See docs/action_reptile_meta.md, section 10b.
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_libero_edge"
+project      = "cosmos3_action_libero"
+group        = "edge_libero_goal_alldata"
+name         = "edge_libero_goal_all428_fullft_baseinit"
+wandb_mode   = "offline"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+lora_enabled = false            # full fine-tune, no adapters
+
+[model.ema]
+enabled         = true
+rate            = 0.1
+iteration_shift = 0
+
+[model.parallelism]
+data_parallel_shard_degree     = 8      # 8-GPU run: NPROC_PER_NODE=8 sr 8 48 ... (global batch = 256 windows/rank x 8 ranks = 2048)
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 5.0e-05          # full-FT LR of the recipe (Cosmos3 keeps 5e-5 from global batch 256 to 2048)
+
+[optimizer.lr_multipliers]
+action2llm            = 5.0   # fresh-head boost of the hs08 fresh-init baseline (= the experiment default)
+llm2action            = 5.0
+action_modality_embed = 5.0
+
+[scheduler]
+cycle_lengths = [2000]        # linear decay to 0 at max_iter
+warm_up_steps = [200]
+
+[trainer]
+max_iter        = 2000
+logging_iter    = 20
+grad_accum_iter = 1              # global 2048 = 256 windows/rank x 8 ranks (OOM fallback: 128/rank x accum 2, see header)
+run_validation          = false  # data_all: every episode is trained on -> no held-out set, no validation
+run_validation_on_start = false
+
+[dataloader_train]
+max_samples_per_batch = 256       # per rank; x 8 ranks = global batch 2048
+episode_subset_path   = "libero_goal_all_episodes.json"                 # data_all: ALL 428 episodes (fixed subset -> no seeded val carve-out)
+
+[dataloader_val]
+max_samples_per_batch = 16
+episode_subset_path   = "libero_goal_val_5ep_per_task_seed42_excl3ep.json"  # unused (validation off); see header -- only keeps the val loader constructible for this suite
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"   # mid-trained Cosmos3-Edge DCP dir (NOT a Reptile iteration dir)
+save_iter = 2000                                 # only the final checkpoint; lower it (e.g. 500) to keep intermediate ones for rollout eval
+# No keys_to_skip_loading / meta_action_init_* here on purpose: the experiment default skips the LIBERO action heads of the
+# base DCP (fresh heads), which is what the 5x head LR multiplier above is for.
