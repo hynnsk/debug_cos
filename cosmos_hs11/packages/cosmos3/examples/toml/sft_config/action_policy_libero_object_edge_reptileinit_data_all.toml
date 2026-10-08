@@ -1,0 +1,105 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# cosmos_hs11 -- REPTILE INIT -> FULL fine-tune on the WHOLE LIBERO-Object suite (libero_object, ALL 454 episodes), validation off.
+# "data_all" variant of the user's standard 2-GPU Reptile-init recipe (action_policy_libero_10_edge_reptileinit_v4_my.toml) for
+# this suite, laid out exactly like the LIBERO-10 full-data Reptile run of 2026-09-30 (edge_libero10_all379_fullft_reptileinit:
+# shard 2 x 128 windows/rank x grad_accum 1 = global batch 256, 2000 iterations, warmup 200, lr 5e-5, heads 1x, save every 500).
+# Launcher: examples/launch_sft_action_policy_libero_object_edge_reptileinit_data_all.sh (port 50037); run it like the other
+# reptileinit launchers:
+#   export LIBERO_ROOT=$COSMOS_STORAGE/data/LIBERO_LeRobot_v3/libero_object
+#   export REPTILE_CKPT_PATH=<reptile job>/checkpoints/iter_000001000  META_ACTION_INIT_PATH=<reptile job>/meta_action_init_iter_001000.pt
+#   NPROC_PER_NODE=2 sr 2 48 --exclude haring examples/launch_sft_action_policy_libero_object_edge_reptileinit_data_all.sh
+# Init (same wiring as every reptileinit recipe):
+#   [checkpoint].load_path             = REPTILE_CKPT_PATH (<reptile job>/checkpoints/iter_XXXXXXXXX -- the dir holding model/)
+#                                        -> moe_gen, time_embedder, vae2llm, llm2vae, k_norm_und_for_gen come from theta
+#   [checkpoint].keys_to_skip_loading  = "net_ema." (the Reptile DCP has no EMA) + the LIBERO action heads (fresh, then overwritten)
+#   [checkpoint].meta_action_init_path = META_ACTION_INIT_PATH (<reptile job>/meta_action_init_iter_XXXXXX.pt)
+#                                        -> the meta action heads are copied from the scratch row into the LIBERO row (5)
+# Data / validation (the two changes w.r.t. the 3-demo recipe):
+#   * [dataloader_train].episode_subset_path = "libero_object_all_episodes.json" = ALL 454 episodes listed as a fixed subset.
+#     Listed on purpose: with the key omitted the dataset would carve out its own seeded 1 % val split (val_ratio=0.01 ->
+#     4 episodes never trained on); a fixed subset disables that, so nothing is held out.
+#   * validation OFF (run_validation=false): every episode is in the training set, so a val loss would be in-sample. Pick
+#     checkpoints by iteration (save_iter 500 -> 500/1000/1500/2000) and judge by LIBERO rollout success only. The
+#     [dataloader_val] section below does NOT turn validation on: scripts/_train.py instantiates dataloader_val
+#     unconditionally, and its experiment default is the LIBERO-10 val json, which fails LIBEROLeRobotDataset's
+#     episode -> task check against a libero_object LIBERO_ROOT at construction. Pointing it at this suite's val json keeps
+#     the (never iterated) loader constructible.
+# Schedule is deliberately the same as the 3-demo runs (2000 x 256 = 512 k windows): 30 demos = ~70 epochs, all 454 episodes =
+# ~8.5 epochs over the suite's ~60 k windows, so few-shot vs. all-data is an equal-compute comparison (~1 day on 2 GPUs, like the
+# user's 3-demo runs). For a longer full-data schedule raise trainer.max_iter AND scheduler.cycle_lengths together (e.g. 6000 / [6000]).
+# NOTE: the fresh-init upper bound action_policy_libero_object_edge_baseinit_data_all.toml is laid out for 8 GPUs (shard 8 x 256 =
+# global 2048, heads 5x); to compare init effects at equal batch, run that one with
+#   EXTRA_TAIL_OVERRIDES="model.config.parallelism.data_parallel_shard_degree=2 dataloader_train.max_samples_per_batch=128"
+# on 2 GPUs (or this recipe with shard 8 / 256 per rank on 8 GPUs).
+# LIBERO_ROOT must point at <dir>/libero_object.
+# Env: LIBERO_ROOT (=<dir>/libero_object), REPTILE_CKPT_PATH, META_ACTION_INIT_PATH, WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT.
+# See docs/action_reptile_meta.md, section 7 (LIBERO-10 data_all) and 10b (suite baselines incl. baseinit_data_all).
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_libero_edge"
+project      = "cosmos3_action_libero"
+group        = "edge_libero_object_alldata"
+name         = "edge_libero_object_all454_fullft_reptileinit_lr5x"
+wandb_mode   = "offline"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+lora_enabled = false            # full mode: theta lives in the DCP weights themselves, no adapters
+
+[model.ema]
+enabled         = true
+rate            = 0.1
+iteration_shift = 0
+
+[model.parallelism]
+data_parallel_shard_degree     = 8      # 2-GPU run (NPROC_PER_NODE 2, sr 2 48): global batch 128 windows/rank x 2 ranks -> 256. Keep this comment free of "=<digits>": _sft_launcher_common.sh reads the LAST "=<number>" on this line as the shard degree
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 5.0e-05          # full-FT LR of the recipe
+
+[optimizer.lr_multipliers]
+action2llm            = 5.0   # 5x in the fresh-head baseline; heads are meta-initialized here -> 1x (as in v4_my and the LIBERO-10 data_all run)
+llm2action            = 5.0
+action_modality_embed = 5.0
+
+[scheduler]
+cycle_lengths = [2000]        # linear decay to 0 at max_iter
+warm_up_steps = [200]
+
+[trainer]
+max_iter        = 2000
+logging_iter    = 20
+grad_accum_iter = 1              # global 256 = 128 windows/rank x 2 ranks
+run_validation          = false  # data_all: every episode is trained on -> no held-out set, no validation
+run_validation_on_start = false
+
+[dataloader_train]
+max_samples_per_batch = 256       # per rank; x 2 ranks -> global batch 256 (no "=<digits>" in this comment, see [model.parallelism])
+episode_subset_path   = "libero_object_all_episodes.json"                 # data_all: ALL 454 episodes (fixed subset -> no seeded val carve-out)
+
+[dataloader_val]
+max_samples_per_batch = 16
+episode_subset_path   = "libero_object_val_5ep_per_task_seed42_excl3ep.json"  # unused (validation off); see header -- only keeps the val loader constructible for this suite
+
+[checkpoint]
+load_path = "${oc.env:REPTILE_CKPT_PATH}"   # <reptile job>/checkpoints/iter_XXXXXXXXX (NOT the base Cosmos3-Edge dir)
+save_iter = 2000                                # 500/1000/1500/2000 for rollout eval (no val loss to pick by)
+# The Reptile DCP has no EMA; the action heads are skipped (fresh) and then overwritten by the meta heads below.
+keys_to_skip_loading = ["net_ema.", "action2llm", "llm2action", "action_modality_embed"]
+meta_action_init_path                   = "${oc.env:META_ACTION_INIT_PATH}"
+meta_action_init_domain_id              = 5      # EMBODIMENT_TO_DOMAIN_ID["libero"]
+meta_action_init_include_modality_embed = true
+meta_action_init_include_lora           = false  # full mode: no adapters
+meta_action_init_include_time_embedder  = false  # already in the DCP weights

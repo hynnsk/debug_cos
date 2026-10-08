@@ -1,0 +1,82 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# cosmos_hs11 -- FRESH Cosmos3-Edge INIT -> FULL fine-tune. LIBERO-Spatial (libero_spatial suite) few-shot post-training
+# (3 demos/task = 30 episodes) with the ORIGINAL Cosmos3 recipe (experiment action_policy_libero_edge), started from the
+# mid-trained Cosmos3-Edge checkpoint (BASE_CHECKPOINT_PATH): the fresh-init BASELINE of
+# action_policy_libero_spatial_edge_reptileinit_v3.toml. Same trainable set, LR, schedule, batch, EMA and held-out validation as
+# that recipe; the ONLY differences are
+#   * the init: [checkpoint].load_path = the base Cosmos3-Edge DCP, no meta_action_init_*; keys_to_skip_loading stays at the
+#     experiment default, so the LIBERO action heads start fresh (exactly the cosmos_hs08 fresh-init baseline);
+#   * the action-head LR multiplier: 5x fresh-head boost of the hs08 baseline (the reptileinit recipe uses 1x because its
+#     heads are meta-initialized).
+# 2 GPUs (shard 2) x 128 windows = global batch 256, warmup 200, cycle 2000, 2000 iterations, held-out val every 200
+# (2000 x 256 = 512 k windows = ~153 epochs over the subset's 3357 windows).
+# LIBERO_ROOT must point at <dir>/libero_spatial; the fixed train/val episode subsets are the libero_spatial_* jsons (seed 42).
+# Env: LIBERO_ROOT (=<dir>/libero_spatial), BASE_CHECKPOINT_PATH (Cosmos3-Edge DCP dir), WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT.
+# See docs/action_reptile_meta.md, section 10b.
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_libero_edge"
+project      = "cosmos3_action_libero"
+group        = "edge_libero_spatial_fewshot"
+name         = "edge_libero_spatial_3ep_fullft_baseinit_v8"
+wandb_mode   = "offline"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+lora_enabled = false            # full fine-tune, no adapters
+
+[model.ema]
+enabled         = true
+rate            = 0.1
+iteration_shift = 0
+
+[model.parallelism]
+data_parallel_shard_degree     = 2      # 2-GPU run: NPROC_PER_NODE=2 sr 2 48 ... (global batch = 128 windows/rank x 2 ranks = 256)
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 5.0e-05          # full-FT LR of the recipe
+
+[optimizer.lr_multipliers]
+action2llm            = 5.0   # fresh-head boost of the hs08 fresh-init baseline (= the experiment default); 1x in the reptileinit recipe
+llm2action            = 5.0
+action_modality_embed = 5.0
+
+[scheduler]
+cycle_lengths = [1000]        # linear decay to 0 at max_iter (matches the cosmos_hs08 baseline)
+warm_up_steps = [100]
+
+[trainer]
+max_iter        = 1000
+logging_iter    = 20
+grad_accum_iter = 1              # global 256 = 128 windows/rank x 2 ranks
+# held-out validation (same windows as the reptileinit v3 recipe of this suite)
+run_validation          = true
+run_validation_on_start = true   # iteration 0 = the base Cosmos3-Edge model with fresh action heads, before any update
+validation_iter         = 200
+max_val_iter            = 16     # x 16 windows/rank x 2 ranks = 512 windows per pass (same windows every time)
+
+[dataloader_train]
+max_samples_per_batch = 64       # per rank; x 2 ranks = global batch 256
+episode_subset_path   = "libero_spatial_3ep_per_task_v3.json"        # 3 demos/task x 10 tasks = 30 episodes (libero_spatial)
+
+[dataloader_val]
+max_samples_per_batch = 16
+episode_subset_path   = "libero_spatial_val_5ep_per_task_seed42_excl3ep.json"  # 5 held-out demos/task, disjoint from train (libero_spatial)
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"   # mid-trained Cosmos3-Edge DCP dir (NOT a Reptile iteration dir)
+save_iter = 2000
+# No keys_to_skip_loading / meta_action_init_* here on purpose: the experiment default skips the LIBERO action heads of the
+# base DCP (fresh heads), which is what the 5x head LR multiplier above is for.

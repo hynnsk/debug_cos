@@ -1,0 +1,208 @@
+{
+  "suite": "libero_spatial",
+  "libero_root": "/gallery_moma/hyunseok.seong/project/cosmos_storage/data/LIBERO_LeRobot_v3/libero_spatial",
+  "episode_subset": "/gallery_moma/hyunseok.seong/project/cosmos_hs11/packages/cosmos3/cosmos_framework/data/generator/action/episode_subsets/libero_spatial_3ep_per_task_v3.json",
+  "views": "both",
+  "stride": 1,
+  "scale": 1.0,
+  "fps": 20.0,
+  "only_episodes": [
+    99
+  ],
+  "episodes": {
+    "2": {
+      "episode_index": 2,
+      "task": "pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate",
+      "episode_length": 127,
+      "gif_frames": 127,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "utils/libero_spatial_3ep_v2_gifs/pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate/ep002.gif",
+      "bytes": 6137559,
+      "task_index": 1
+    },
+    "75": {
+      "episode_index": 75,
+      "task": "pick up the black bowl next to the cookie box and place it on the plate",
+      "episode_length": 135,
+      "gif_frames": 135,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "utils/libero_spatial_3ep_v2_gifs/pick up the black bowl next to the cookie box and place it on the plate/ep075.gif",
+      "bytes": 6491121,
+      "task_index": 0
+    },
+    "94": {
+      "episode_index": 94,
+      "task": "pick up the black bowl on the wooden cabinet and place it on the plate",
+      "episode_length": 138,
+      "gif_frames": 138,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "utils/libero_spatial_3ep_v2_gifs/pick up the black bowl on the wooden cabinet and place it on the plate/ep094.gif",
+      "bytes": 6288850,
+      "task_index": 9
+    },
+    "99": {
+      "episode_index": 99,
+      "task": "pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate",
+      "episode_length": 134,
+      "gif_frames": 134,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "utils/libero_spatial_3ep_v2_gifs/pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate/ep099.gif",
+      "bytes": 6659811,
+      "task_index": 1
+    },
+    "129": {
+      "episode_index": 129,
+      "task": "pick up the black bowl on the wooden cabinet and place it on the plate",
+      "episode_length": 130,
+      "gif_frames": 130,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "utils/libero_spatial_3ep_v2_gifs/pick up the black bowl on the wooden cabinet and place it on the plate/ep129.gif",
+      "bytes": 6231065,
+      "task_index": 9
+    },
+    "182": {
+      "episode_index": 182,
+      "task": "pick up the black bowl on the ramekin and place it on the plate",
+      "episode_length": 128,
+      "gif_frames": 128,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "utils/libero_spatial_3ep_v2_gifs/pick up the black bowl on the ramekin and place it on the plate/ep182.gif",
+      "bytes": 6379585,
+      "task_index": 2
+    },
+    "214": {
+      "episode_index": 214,
+      "task": "pick up the black bowl on the cookie box and place it on the plate",
+      "episode_length": 111,
+      "gif_frames": 111,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "utils/libero_spatial_3ep_v2_gifs/pick up the black bowl on the cookie box and place it on the plate/ep214.gif",
+      "bytes": 6088571,
+      "task_index": 5
+    },
+    "244": {
+      "episode_index": 244,
+      "task": "pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate",
+      "episode_length": 150,
+      "gif_frames": 150,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "utils/libero_spatial_3ep_v2_gifs/pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate/ep244.gif",
+      "bytes": 7045325,
+      "task_index": 1
+    }
+  },
+  "tasks": {
+    "0": {
+      "task": "pick up the black bowl next to the cookie box and place it on the plate",
+      "episodes": [
+        13,
+        48,
+        75
+      ]
+    },
+    "1": {
+      "task": "pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate",
+      "episodes": [
+        2,
+        99,
+        133
+      ]
+    },
+    "2": {
+      "task": "pick up the black bowl on the ramekin and place it on the plate",
+      "episodes": [
+        127,
+        182,
+        419
+      ]
+    },
+    "3": {
+      "task": "pick up the black bowl on the stove and place it on the plate",
+      "episodes": [
+        9,
+        64,
+        373
+      ]
+    },
+    "4": {
+      "task": "pick up the black bowl between the plate and the ramekin and place it on the plate",
+      "episodes": [
+        12,
+        66,
+        134
+      ]
+    },
+    "5": {
+      "task": "pick up the black bowl on the cookie box and place it on the plate",
+      "episodes": [
+        176,
+        214,
+        339
+      ]
+    },
+    "6": {
+      "task": "pick up the black bowl next to the plate and place it on the plate",
+      "episodes": [
+        24,
+        132,
+        304
+      ]
+    },
+    "7": {
+      "task": "pick up the black bowl next to the ramekin and place it on the plate",
+      "episodes": [
+        327,
+        403,
+        427
+      ]
+    },
+    "8": {
+      "task": "pick up the black bowl from table center and place it on the plate",
+      "episodes": [
+        119,
+        217,
+        222
+      ]
+    },
+    "9": {
+      "task": "pick up the black bowl on the wooden cabinet and place it on the plate",
+      "episodes": [
+        29,
+        94,
+        129
+      ]
+    }
+  }
+}

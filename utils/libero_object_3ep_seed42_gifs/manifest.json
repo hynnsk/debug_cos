@@ -1,0 +1,513 @@
+{
+  "suite": "libero_object",
+  "libero_root": "/gallery_moma/hyunseok.seong/project/cosmos_storage/data/LIBERO_LeRobot_v3/libero_object",
+  "episode_subset": "/gallery_moma/hyunseok.seong/project/cosmos_hs11/packages/cosmos3/cosmos_framework/data/generator/action/episode_subsets/libero_object_3ep_per_task_seed42.json",
+  "views": "both",
+  "stride": 1,
+  "scale": 1.0,
+  "fps": 20.0,
+  "episodes": {
+    "2": {
+      "episode_index": 2,
+      "task": "pick up the ketchup and place it in the basket",
+      "episode_length": 141,
+      "gif_frames": 141,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the ketchup and place it in the basket/ep002.gif",
+      "bytes": 8095314,
+      "task_index": 7
+    },
+    "10": {
+      "episode_index": 10,
+      "task": "pick up the milk and place it in the basket",
+      "episode_length": 143,
+      "gif_frames": 143,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the milk and place it in the basket/ep010.gif",
+      "bytes": 7791958,
+      "task_index": 5
+    },
+    "11": {
+      "episode_index": 11,
+      "task": "pick up the alphabet soup and place it in the basket",
+      "episode_length": 164,
+      "gif_frames": 164,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the alphabet soup and place it in the basket/ep011.gif",
+      "bytes": 8780298,
+      "task_index": 0
+    },
+    "41": {
+      "episode_index": 41,
+      "task": "pick up the orange juice and place it in the basket",
+      "episode_length": 127,
+      "gif_frames": 127,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the orange juice and place it in the basket/ep041.gif",
+      "bytes": 6900586,
+      "task_index": 3
+    },
+    "46": {
+      "episode_index": 46,
+      "task": "pick up the bbq sauce and place it in the basket",
+      "episode_length": 125,
+      "gif_frames": 125,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the bbq sauce and place it in the basket/ep046.gif",
+      "bytes": 7506268,
+      "task_index": 2
+    },
+    "55": {
+      "episode_index": 55,
+      "task": "pick up the cream cheese and place it in the basket",
+      "episode_length": 167,
+      "gif_frames": 167,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the cream cheese and place it in the basket/ep055.gif",
+      "bytes": 9686933,
+      "task_index": 4
+    },
+    "60": {
+      "episode_index": 60,
+      "task": "pick up the bbq sauce and place it in the basket",
+      "episode_length": 128,
+      "gif_frames": 128,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the bbq sauce and place it in the basket/ep060.gif",
+      "bytes": 7690624,
+      "task_index": 2
+    },
+    "69": {
+      "episode_index": 69,
+      "task": "pick up the alphabet soup and place it in the basket",
+      "episode_length": 160,
+      "gif_frames": 160,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the alphabet soup and place it in the basket/ep069.gif",
+      "bytes": 8803788,
+      "task_index": 0
+    },
+    "72": {
+      "episode_index": 72,
+      "task": "pick up the milk and place it in the basket",
+      "episode_length": 130,
+      "gif_frames": 130,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the milk and place it in the basket/ep072.gif",
+      "bytes": 7219409,
+      "task_index": 5
+    },
+    "120": {
+      "episode_index": 120,
+      "task": "pick up the butter and place it in the basket",
+      "episode_length": 157,
+      "gif_frames": 157,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the butter and place it in the basket/ep120.gif",
+      "bytes": 9018597,
+      "task_index": 6
+    },
+    "133": {
+      "episode_index": 133,
+      "task": "pick up the ketchup and place it in the basket",
+      "episode_length": 141,
+      "gif_frames": 141,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the ketchup and place it in the basket/ep133.gif",
+      "bytes": 8282579,
+      "task_index": 7
+    },
+    "136": {
+      "episode_index": 136,
+      "task": "pick up the bbq sauce and place it in the basket",
+      "episode_length": 131,
+      "gif_frames": 131,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the bbq sauce and place it in the basket/ep136.gif",
+      "bytes": 7678743,
+      "task_index": 2
+    },
+    "139": {
+      "episode_index": 139,
+      "task": "pick up the milk and place it in the basket",
+      "episode_length": 140,
+      "gif_frames": 140,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the milk and place it in the basket/ep139.gif",
+      "bytes": 7792069,
+      "task_index": 5
+    },
+    "141": {
+      "episode_index": 141,
+      "task": "pick up the chocolate pudding and place it in the basket",
+      "episode_length": 158,
+      "gif_frames": 158,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the chocolate pudding and place it in the basket/ep141.gif",
+      "bytes": 8825378,
+      "task_index": 1
+    },
+    "146": {
+      "episode_index": 146,
+      "task": "pick up the chocolate pudding and place it in the basket",
+      "episode_length": 168,
+      "gif_frames": 168,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the chocolate pudding and place it in the basket/ep146.gif",
+      "bytes": 9113560,
+      "task_index": 1
+    },
+    "149": {
+      "episode_index": 149,
+      "task": "pick up the salad dressing and place it in the basket",
+      "episode_length": 125,
+      "gif_frames": 125,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the salad dressing and place it in the basket/ep149.gif",
+      "bytes": 7019305,
+      "task_index": 9
+    },
+    "249": {
+      "episode_index": 249,
+      "task": "pick up the salad dressing and place it in the basket",
+      "episode_length": 163,
+      "gif_frames": 163,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the salad dressing and place it in the basket/ep249.gif",
+      "bytes": 9309082,
+      "task_index": 9
+    },
+    "262": {
+      "episode_index": 262,
+      "task": "pick up the cream cheese and place it in the basket",
+      "episode_length": 146,
+      "gif_frames": 146,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the cream cheese and place it in the basket/ep262.gif",
+      "bytes": 8192775,
+      "task_index": 4
+    },
+    "308": {
+      "episode_index": 308,
+      "task": "pick up the butter and place it in the basket",
+      "episode_length": 164,
+      "gif_frames": 164,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the butter and place it in the basket/ep308.gif",
+      "bytes": 9553968,
+      "task_index": 6
+    },
+    "313": {
+      "episode_index": 313,
+      "task": "pick up the ketchup and place it in the basket",
+      "episode_length": 194,
+      "gif_frames": 194,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the ketchup and place it in the basket/ep313.gif",
+      "bytes": 11167401,
+      "task_index": 7
+    },
+    "334": {
+      "episode_index": 334,
+      "task": "pick up the tomato sauce and place it in the basket",
+      "episode_length": 142,
+      "gif_frames": 142,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the tomato sauce and place it in the basket/ep334.gif",
+      "bytes": 7830013,
+      "task_index": 8
+    },
+    "352": {
+      "episode_index": 352,
+      "task": "pick up the orange juice and place it in the basket",
+      "episode_length": 153,
+      "gif_frames": 153,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the orange juice and place it in the basket/ep352.gif",
+      "bytes": 8588872,
+      "task_index": 3
+    },
+    "360": {
+      "episode_index": 360,
+      "task": "pick up the salad dressing and place it in the basket",
+      "episode_length": 120,
+      "gif_frames": 120,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the salad dressing and place it in the basket/ep360.gif",
+      "bytes": 6622868,
+      "task_index": 9
+    },
+    "376": {
+      "episode_index": 376,
+      "task": "pick up the butter and place it in the basket",
+      "episode_length": 143,
+      "gif_frames": 143,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the butter and place it in the basket/ep376.gif",
+      "bytes": 8147437,
+      "task_index": 6
+    },
+    "387": {
+      "episode_index": 387,
+      "task": "pick up the cream cheese and place it in the basket",
+      "episode_length": 144,
+      "gif_frames": 144,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the cream cheese and place it in the basket/ep387.gif",
+      "bytes": 8144086,
+      "task_index": 4
+    },
+    "402": {
+      "episode_index": 402,
+      "task": "pick up the tomato sauce and place it in the basket",
+      "episode_length": 136,
+      "gif_frames": 136,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the tomato sauce and place it in the basket/ep402.gif",
+      "bytes": 7653179,
+      "task_index": 8
+    },
+    "411": {
+      "episode_index": 411,
+      "task": "pick up the orange juice and place it in the basket",
+      "episode_length": 145,
+      "gif_frames": 145,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the orange juice and place it in the basket/ep411.gif",
+      "bytes": 8112904,
+      "task_index": 3
+    },
+    "426": {
+      "episode_index": 426,
+      "task": "pick up the alphabet soup and place it in the basket",
+      "episode_length": 146,
+      "gif_frames": 146,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the alphabet soup and place it in the basket/ep426.gif",
+      "bytes": 8169838,
+      "task_index": 0
+    },
+    "430": {
+      "episode_index": 430,
+      "task": "pick up the chocolate pudding and place it in the basket",
+      "episode_length": 149,
+      "gif_frames": 149,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the chocolate pudding and place it in the basket/ep430.gif",
+      "bytes": 8502561,
+      "task_index": 1
+    },
+    "450": {
+      "episode_index": 450,
+      "task": "pick up the tomato sauce and place it in the basket",
+      "episode_length": 132,
+      "gif_frames": 132,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_object_3ep_seed42_gifs/pick up the tomato sauce and place it in the basket/ep450.gif",
+      "bytes": 7483902,
+      "task_index": 8
+    }
+  },
+  "tasks": {
+    "0": {
+      "task": "pick up the alphabet soup and place it in the basket",
+      "episodes": [
+        11,
+        69,
+        426
+      ]
+    },
+    "1": {
+      "task": "pick up the chocolate pudding and place it in the basket",
+      "episodes": [
+        141,
+        146,
+        430
+      ]
+    },
+    "2": {
+      "task": "pick up the bbq sauce and place it in the basket",
+      "episodes": [
+        46,
+        60,
+        136
+      ]
+    },
+    "3": {
+      "task": "pick up the orange juice and place it in the basket",
+      "episodes": [
+        41,
+        352,
+        411
+      ]
+    },
+    "4": {
+      "task": "pick up the cream cheese and place it in the basket",
+      "episodes": [
+        55,
+        262,
+        387
+      ]
+    },
+    "5": {
+      "task": "pick up the milk and place it in the basket",
+      "episodes": [
+        10,
+        72,
+        139
+      ]
+    },
+    "6": {
+      "task": "pick up the butter and place it in the basket",
+      "episodes": [
+        120,
+        308,
+        376
+      ]
+    },
+    "7": {
+      "task": "pick up the ketchup and place it in the basket",
+      "episodes": [
+        2,
+        133,
+        313
+      ]
+    },
+    "8": {
+      "task": "pick up the tomato sauce and place it in the basket",
+      "episodes": [
+        334,
+        402,
+        450
+      ]
+    },
+    "9": {
+      "task": "pick up the salad dressing and place it in the basket",
+      "episodes": [
+        149,
+        249,
+        360
+      ]
+    }
+  }
+}

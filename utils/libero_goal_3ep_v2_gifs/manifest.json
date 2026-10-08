@@ -1,0 +1,274 @@
+{
+  "suite": "libero_goal",
+  "libero_root": "/gallery_moma/hyunseok.seong/project/cosmos_storage/data/LIBERO_LeRobot_v3/libero_goal",
+  "episode_subset": "/gallery_moma/hyunseok.seong/project/cosmos_hs11/packages/cosmos3/cosmos_framework/data/generator/action/episode_subsets/libero_goal_3ep_per_task_v2.json",
+  "views": "both",
+  "stride": 1,
+  "scale": 1.0,
+  "fps": 20.0,
+  "only_episodes": "all",
+  "episodes": {
+    "26": {
+      "episode_index": 26,
+      "task": "open the middle drawer of the cabinet",
+      "episode_length": 138,
+      "gif_frames": 138,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "utils/libero_goal_3ep_v2_gifs/open the middle drawer of the cabinet/ep026.gif",
+      "bytes": 5805533,
+      "task_index": 9
+    },
+    "31": {
+      "episode_index": 31,
+      "task": "open the middle drawer of the cabinet",
+      "episode_length": 131,
+      "gif_frames": 131,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "utils/libero_goal_3ep_v2_gifs/open the middle drawer of the cabinet/ep031.gif",
+      "bytes": 5599724,
+      "task_index": 9
+    },
+    "58": {
+      "episode_index": 58,
+      "task": "open the middle drawer of the cabinet",
+      "episode_length": 141,
+      "gif_frames": 141,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "utils/libero_goal_3ep_v2_gifs/open the middle drawer of the cabinet/ep058.gif",
+      "bytes": 5802201,
+      "task_index": 9
+    },
+    "84": {
+      "episode_index": 84,
+      "task": "open the middle drawer of the cabinet",
+      "episode_length": 143,
+      "gif_frames": 143,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "utils/libero_goal_3ep_v2_gifs/open the middle drawer of the cabinet/ep084.gif",
+      "bytes": 5910983,
+      "task_index": 9
+    },
+    "111": {
+      "episode_index": 111,
+      "task": "open the middle drawer of the cabinet",
+      "episode_length": 124,
+      "gif_frames": 124,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "utils/libero_goal_3ep_v2_gifs/open the middle drawer of the cabinet/ep111.gif",
+      "bytes": 4966851,
+      "task_index": 9
+    },
+    "118": {
+      "episode_index": 118,
+      "task": "open the middle drawer of the cabinet",
+      "episode_length": 128,
+      "gif_frames": 128,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "utils/libero_goal_3ep_v2_gifs/open the middle drawer of the cabinet/ep118.gif",
+      "bytes": 5479097,
+      "task_index": 9
+    },
+    "137": {
+      "episode_index": 137,
+      "task": "open the middle drawer of the cabinet",
+      "episode_length": 137,
+      "gif_frames": 137,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "utils/libero_goal_3ep_v2_gifs/open the middle drawer of the cabinet/ep137.gif",
+      "bytes": 5486812,
+      "task_index": 9
+    },
+    "285": {
+      "episode_index": 285,
+      "task": "open the middle drawer of the cabinet",
+      "episode_length": 139,
+      "gif_frames": 139,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "utils/libero_goal_3ep_v2_gifs/open the middle drawer of the cabinet/ep285.gif",
+      "bytes": 5888884,
+      "task_index": 9
+    },
+    "308": {
+      "episode_index": 308,
+      "task": "open the middle drawer of the cabinet",
+      "episode_length": 128,
+      "gif_frames": 128,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "utils/libero_goal_3ep_v2_gifs/open the middle drawer of the cabinet/ep308.gif",
+      "bytes": 5359810,
+      "task_index": 9
+    },
+    "393": {
+      "episode_index": 393,
+      "task": "open the middle drawer of the cabinet",
+      "episode_length": 133,
+      "gif_frames": 133,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "utils/libero_goal_3ep_v2_gifs/open the middle drawer of the cabinet/ep393.gif",
+      "bytes": 5590881,
+      "task_index": 9
+    },
+    "401": {
+      "episode_index": 401,
+      "task": "open the middle drawer of the cabinet",
+      "episode_length": 121,
+      "gif_frames": 121,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "utils/libero_goal_3ep_v2_gifs/open the middle drawer of the cabinet/ep401.gif",
+      "bytes": 5139993,
+      "task_index": 9
+    },
+    "423": {
+      "episode_index": 423,
+      "task": "open the middle drawer of the cabinet",
+      "episode_length": 160,
+      "gif_frames": 160,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "utils/libero_goal_3ep_v2_gifs/open the middle drawer of the cabinet/ep423.gif",
+      "bytes": 6738370,
+      "task_index": 9
+    }
+  },
+  "tasks": {
+    "0": {
+      "task": "put the bowl on the plate",
+      "episodes": [
+        43,
+        72,
+        347
+      ]
+    },
+    "1": {
+      "task": "put the wine bottle on the rack",
+      "episodes": [
+        160,
+        163,
+        200
+      ]
+    },
+    "2": {
+      "task": "open the top drawer and put the bowl inside",
+      "episodes": [
+        70,
+        86,
+        405
+      ]
+    },
+    "3": {
+      "task": "put the cream cheese in the bowl",
+      "episodes": [
+        60,
+        319,
+        398
+      ]
+    },
+    "4": {
+      "task": "put the wine bottle on top of the cabinet",
+      "episodes": [
+        10,
+        17,
+        38
+      ]
+    },
+    "5": {
+      "task": "push the plate to the front of the stove",
+      "episodes": [
+        205,
+        210,
+        402
+      ]
+    },
+    "6": {
+      "task": "turn on the stove",
+      "episodes": [
+        11,
+        321,
+        344
+      ]
+    },
+    "7": {
+      "task": "put the bowl on the stove",
+      "episodes": [
+        165,
+        384,
+        417
+      ]
+    },
+    "8": {
+      "task": "put the bowl on top of the cabinet",
+      "episodes": [
+        286,
+        327,
+        414
+      ]
+    },
+    "9": {
+      "task": "open the middle drawer of the cabinet",
+      "episodes": [
+        26,
+        111,
+        146
+      ]
+    }
+  },
+  "extra_episodes": [
+    31,
+    58,
+    84,
+    118,
+    137,
+    285,
+    308,
+    393,
+    401,
+    423
+  ]
+}

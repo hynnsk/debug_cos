@@ -1,0 +1,25 @@
+{
+  "description": "10 extra randomly sampled candidate episodes of libero_goal task 9 ('open the middle drawer of the cabinet') for browsing; NOT part of any subset JSON. random.Random(seed=42) over the task's episodes sorted by episode_index, excluding the v2 train episodes [26, 111, 146], the episodes removed in v2 [293, 386] and the val episodes [64, 90, 254, 314, 375].",
+  "suite": "libero_goal",
+  "task_index": 9,
+  "task": "open the middle drawer of the cabinet",
+  "seed": 42,
+  "n_candidates": 33,
+  "v2_train_episodes": [
+    26,
+    111,
+    146
+  ],
+  "extra_candidates": [
+    31,
+    58,
+    84,
+    118,
+    137,
+    285,
+    308,
+    393,
+    401,
+    423
+  ]
+}
