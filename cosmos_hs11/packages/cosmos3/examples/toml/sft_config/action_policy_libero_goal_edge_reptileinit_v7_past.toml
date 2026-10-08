@@ -19,7 +19,7 @@ task         = "vfm"
 experiment   = "action_policy_libero_edge"
 project      = "cosmos3_action_libero"
 group        = "edge_libero_goal_fewshot"
-name         = "edge_libero_goal_3ep_fullft_reptile_v8"
+name         = "edge_libero_goal_3ep_fullft_reptile_past_v7"
 wandb_mode   = "offline"
 
 [model]
@@ -47,9 +47,9 @@ vae_path = "${oc.env:WAN_VAE_PATH}"
 lr = 5.0e-05          # full-FT LR of the recipe
 
 [optimizer.lr_multipliers]
-action2llm            = 2.0   # 5x in the fresh-head baseline; heads are meta-initialized here -> 1x
-llm2action            = 2.0
-action_modality_embed = 2.0
+action2llm            = 1.0   # 5x in the fresh-head baseline; heads are meta-initialized here -> 1x
+llm2action            = 1.0
+action_modality_embed = 1.0
 
 [scheduler]
 cycle_lengths = [1000]        # linear decay to 0 at max_iter (matches the cosmos_hs08 baseline)
@@ -66,7 +66,7 @@ validation_iter         = 200
 max_val_iter            = 16     # x 64 windows x 4 ranks = 4096 windows ~= half of the 50-episode val set (same windows every time)
 
 [dataloader_train]
-max_samples_per_batch = 64       # per rank; x 4 ranks = global batch 256
+max_samples_per_batch = 128       # per rank; x 4 ranks = global batch 256
 episode_subset_path   = "libero_goal_3ep_per_task_v2.json"        # 3 demos/task x 10 tasks = 30 episodes (libero_goal)
 
 [dataloader_val]

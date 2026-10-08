@@ -77,6 +77,6 @@ episode_subset_path   = "libero_goal_val_5ep_per_task_seed42_excl3ep.json"  # 5 
 
 [checkpoint]
 load_path = "${oc.env:BASE_CHECKPOINT_PATH}"   # mid-trained Cosmos3-Edge DCP dir (NOT a Reptile iteration dir)
-save_iter = 2000
+save_iter = 1000
 # No keys_to_skip_loading / meta_action_init_* here on purpose: the experiment default skips the LIBERO action heads of the
 # base DCP (fresh heads), which is what the 5x head LR multiplier above is for.

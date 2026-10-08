@@ -75,7 +75,7 @@ episode_subset_path   = "libero_spatial_val_5ep_per_task_seed42_excl3ep.json"  #
 
 [checkpoint]
 load_path = "${oc.env:REPTILE_CKPT_PATH}"   # <reptile job>/checkpoints/iter_XXXXXXXXX (NOT the base Cosmos3-Edge dir)
-save_iter = 2000
+save_iter = 1000
 # The Reptile DCP has no EMA; the action heads are skipped (fresh) and then overwritten by the meta heads below.
 keys_to_skip_loading = ["net_ema.", "action2llm", "llm2action", "action_modality_embed"]
 meta_action_init_path                   = "${oc.env:META_ACTION_INIT_PATH}"
