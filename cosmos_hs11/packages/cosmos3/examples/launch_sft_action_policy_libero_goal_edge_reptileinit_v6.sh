@@ -13,7 +13,7 @@
 # Usage:
 #   NPROC_PER_NODE=4 sr 4 48 examples/launch_sft_action_policy_libero_10_edge_reptileinit.sh
 
-TOML_FILE="${TOML_FILE:-examples/toml/sft_config/action_policy_libero_goal_edge_reptileinit_v6.toml}"
+TOML_FILE="${TOML_FILE:-examples/toml/sft_config/action_policy_libero_goal_edge_reptileinit_v6.1.toml}"
 export LIBERO_ROOT="${LIBERO_ROOT:-}"
 export REPTILE_CKPT_PATH="${REPTILE_CKPT_PATH:-}"
 export META_ACTION_INIT_PATH="${META_ACTION_INIT_PATH:-}"
