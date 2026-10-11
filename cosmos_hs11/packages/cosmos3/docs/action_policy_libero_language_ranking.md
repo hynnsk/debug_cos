@@ -101,3 +101,68 @@ passed. CUDA was unavailable, so no full-checkpoint GPU training was launched.
 A separately run existing test, `libero_sampling_toml_test.py::test_v43_routes_the_knob_and_v3_does_not`,
 fails because it assumes the v43 and v3 optimizer settings are equal. Their committed source values
 already differ (`action2llm` multiplier 1.0 versus 2.0); these original recipes were preserved.
+
+## v27: action-similarity hard negatives (2026-10-11)
+
+Closed-loop GIFs of the goal / spatial 3-demo policies show that failures are *task confusion*: the policy executes
+another task's behaviour (plate push -> bowl lift, bottle -> stove knob) or picks the wrong bowl. The uniform negative
+of v23 spends most of its margin on pairs the policy never confuses. v27 keeps the loss and draws the negative
+instruction's task from the other nine with a distribution built from the **training actions themselves**:
+
+```
+prefix_t   = first hard_negative_prefix_frames training actions (rot6d, un-normalized) of every KEPT demo of task t
+mean_t     = per-time-step mean over task t's demos (channels standardized over all demos; shorter demos stop early)
+d[i, j]    = RMS(mean_i - mean_j) over the time steps both cover and all channels
+z          = d / median_{i != j}(d)                                  (scale-free; z = 0 on the diagonal)
+p_hard(j|i)= softmax_{j != i}(-z[i, j] / hard_negative_temperature)
+p(j|i)     = (1 - hard_negative_fraction) / 9 + hard_negative_fraction * p_hard(j|i)
+```
+
+Tasks whose demonstrations START alike (the window the policy decides in while vision cannot tell the tasks apart)
+are the ones that get sampled, and the uniform floor keeps every pair in play. The weights are computed once per
+dataset at construction from the kept subset (train json for the train loader, val json for the val loader), logged
+as a matrix + top-3 table, and the per-window draw is `random.choices` over the sampler's candidate order. With
+`negative_sampling = "uniform"` (or `hard_negative_fraction = 0`) the sampler is the v23 one, bit for bit.
+
+| TOML key (`[model.language_ranking]`) | v27 | meaning |
+| --- | --- | --- |
+| `negative_sampling` | `"action_similarity"` | `"uniform"` = v23; the three knobs below are then ignored |
+| `hard_negative_fraction` | 0.7 | mixture weight of the similarity distribution (0 = uniform, 1 = similarity only) |
+| `hard_negative_temperature` | 0.5 | softmax temperature on `z` (median off-diagonal = 1); lower = sharper |
+| `hard_negative_prefix_frames` | 64 | leading frames per demo (3.2 s at 20 fps); clipped to the demo length |
+
+Recipes (three arms per suite; one knob differs per arm so the comparison stays interpretable; the uniform sibling
+is the zero point of the hardness axis). LIBERO-10 TOMLs are the v3 recipe verbatim + the section, run names differ:
+
+| arm | LIBERO-goal (v23 sibling) | LIBERO-10 (v58 sibling) | fraction / temperature | loss_weight | ports |
+| --- | --- | --- | --- | --- | --- |
+| hard negatives | `goal_edge_reptileinit_v27` | `10_edge_reptileinit_v63` | 0.7 / 0.5 | 1.0 | 50127 / 50130 |
+| strength (x5) | `goal_edge_reptileinit_v28` | `10_edge_reptileinit_v64` | 0.7 / 0.5 | 5.0 | 50128 / 50131 |
+| sharpness | `goal_edge_reptileinit_v29` | `10_edge_reptileinit_v65` | 1.0 / 0.25 | 1.0 | 50129 / 50132 |
+
+TOML prefix `examples/toml/sft_config/action_policy_libero_`, launcher prefix `examples/launch_sft_action_policy_libero_`;
+`margin` 0.1 and `hard_negative_prefix_frames` 64 everywhere. Why x5 and not x10: at 1.0 the ranking gradient is
+1/10 of the action-FM gradient (same MSE scale, 10x FM multiplier) and the hinge is bounded by the margin, so a null
+result would not separate 'wrong signal' from 'too weak'; at 10 the bounded hinge x 10 rivals the whole total loss and
+steals clip budget from the FM terms. Watch `language_ranking_margin_satisfied`: ~0 means the absolute margin is
+unattainable on near-identical prefixes (lower it, e.g. 0.05), ~1 early means the hinge is inactive. The knobs route
+`[model.language_ranking].* -> model.config.language_ranking.* -> dataloader_{train,val}...libero.dataset.language_ranking_*`
+(`LanguageRankingConfig`, `LanguageRankingTomlConfig`, `action_policy_libero_edge._libero_packing_loader`,
+`get_action_libero_sft_dataset`, `LIBEROLeRobotDataset._build_instruction_negatives`). Other suites: copy the four
+keys into their v23 TOML (the weights are computed from whichever subset the TOML names).
+
+Inspect the distribution a recipe will train with (CPU, parquet only, a few seconds):
+
+```bash
+PYTHONPATH=. python cosmos_framework/scripts/print_libero_hard_negatives.py \
+    --root $COSMOS_STORAGE/data/LIBERO_LeRobot_v3/libero_goal --episode-subset libero_goal_3ep_per_task_v2.json \
+    --fraction 0.7 --temperature 0.5 --prefix-frames 64
+```
+
+Implementation: `data/generator/action/utils/language_ranking.py` (`action_prefix_distance_matrix`,
+`hard_negative_weights`, `format_hard_negative_report`, weighted `LiberoInstructionNegatives`), the LIBERO dataset
+and its factory, the experiment config, `model_config.py`, `sft_config.py`. Tests:
+`utils/language_ranking_test.py` (weights + matrix math), `datasets/libero_hard_negatives_test.py` (synthetic
+10-task LeRobot layout through the real constructor, subset handling, validation),
+`configs/toml_config/language_ranking_toml_test.py` (v27 inheritance, routing, pydantic bounds, loader wiring).
+Not GPU-smoked.

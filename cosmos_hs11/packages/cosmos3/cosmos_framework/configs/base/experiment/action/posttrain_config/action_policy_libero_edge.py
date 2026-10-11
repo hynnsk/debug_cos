@@ -49,7 +49,16 @@ def _action_policy_libero_edge_model_config() -> dict:
     cfg["action_gen"] = True
     cfg["vision_gen"] = True
     cfg["max_action_dim"] = 64
-    cfg["language_ranking"] = dict(enabled=False, loss_weight=1.0, margin=0.1)
+    cfg["language_ranking"] = dict(
+        enabled=False,
+        loss_weight=1.0,
+        margin=0.1,
+        # cosmos_hs11 v27: "uniform" (v23) or "action_similarity" hard negatives; see LanguageRankingConfig.
+        negative_sampling="uniform",
+        hard_negative_fraction=0.0,
+        hard_negative_temperature=0.5,
+        hard_negative_prefix_frames=64,
+    )
 
     return cfg
 
@@ -115,6 +124,10 @@ def _libero_packing_loader(
                         max_action_dim="${model.config.max_action_dim}",
                         cfg_dropout_rate=cfg_dropout_rate,
                         language_ranking="${model.config.language_ranking.enabled}",
+                        language_ranking_negative_sampling="${model.config.language_ranking.negative_sampling}",
+                        language_ranking_hard_fraction="${model.config.language_ranking.hard_negative_fraction}",
+                        language_ranking_hard_temperature="${model.config.language_ranking.hard_negative_temperature}",
+                        language_ranking_hard_prefix_frames="${model.config.language_ranking.hard_negative_prefix_frames}",
                         format_prompt_as_json=True,  # structured JSON prompts (set False for plain-text)
                         tokenizer_config="${model.config.vlm_config.tokenizer}",
                     ),

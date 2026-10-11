@@ -130,11 +130,24 @@ class RectifiedFlowTrainingConfig:
 
 @attrs.define(slots=False)
 class LanguageRankingConfig:
-    """Per-sample hinge ranking of action FM errors under correct/incorrect instructions."""
+    """Per-sample hinge ranking of action FM errors under correct/incorrect instructions.
+
+    Negative instruction selection (cosmos_hs11 v27): ``negative_sampling="uniform"`` draws one of the other
+    nine LIBERO tasks uniformly (v23). ``"action_similarity"`` draws task ``j`` for a window of task ``i`` with
+    probability ``(1 - hard_negative_fraction) / 9 + hard_negative_fraction * softmax_j(-z[i, j] /
+    hard_negative_temperature)``, where ``z`` is the scale-free RMS distance between the tasks' mean training-action
+    trajectories over the first ``hard_negative_prefix_frames`` frames of the kept demonstrations (tasks whose
+    demonstrations start alike are the ones the few-shot policy confuses). The weights are computed once per
+    dataset at construction (``utils/language_ranking.py``); the loss is unchanged.
+    """
 
     enabled: bool = False
     loss_weight: float = 1.0
     margin: float = 0.1
+    negative_sampling: str = "uniform"
+    hard_negative_fraction: float = 0.0
+    hard_negative_temperature: float = 0.5
+    hard_negative_prefix_frames: int = 64
 
 
 @attrs.define(slots=False)

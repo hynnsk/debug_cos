@@ -381,6 +381,10 @@ def get_action_libero_sft_dataset(
     keep_native_video: bool = False,
     episode_balanced_sampling: bool = False,
     language_ranking: bool = False,
+    language_ranking_negative_sampling: str = "uniform",
+    language_ranking_hard_fraction: float = 0.0,
+    language_ranking_hard_temperature: float = 0.5,
+    language_ranking_hard_prefix_frames: int = 64,
 ) -> Dataset:
     """Build the LIBERO action-policy SFT dataset (GA reproduction defaults).
 
@@ -415,6 +419,10 @@ def get_action_libero_sft_dataset(
         action_stats_path=action_stats_path,
         episode_subset_path=episode_subset_path,
         language_ranking=language_ranking,
+        language_ranking_negative_sampling=language_ranking_negative_sampling,
+        language_ranking_hard_fraction=language_ranking_hard_fraction,
+        language_ranking_hard_temperature=language_ranking_hard_temperature,
+        language_ranking_hard_prefix_frames=language_ranking_hard_prefix_frames,
     )
     transform = ActionTransformPipeline(
         tokenizer_config=tokenizer_config,

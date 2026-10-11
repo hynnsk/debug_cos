@@ -35,7 +35,12 @@ import torch.nn.functional as F
 from cosmos_framework.data.generator.action.datasets.base_dataset import ActionBaseDataset
 from cosmos_framework.data.generator.action.libero_pose_utils import libero_action_dim, libero_rotation_format
 from cosmos_framework.data.generator.action.utils.action_spec import ActionSpec, Gripper, Pos, Rot, build_action_spec
-from cosmos_framework.data.generator.action.utils.language_ranking import LiberoInstructionNegatives
+from cosmos_framework.data.generator.action.utils.language_ranking import (
+    NEGATIVE_SAMPLING_MODES,
+    LiberoInstructionNegatives,
+    action_similarity_negative_weights,
+    format_hard_negative_report,
+)
 from cosmos_framework.data.generator.action.utils.pose_utils import convert_rotation
 from cosmos_framework.utils import log
 
@@ -88,6 +93,10 @@ class LIBEROLeRobotDataset(ActionBaseDataset):
         sample_stride: int = 1,
         episode_subset_path: str | None = None,
         language_ranking: bool = False,
+        language_ranking_negative_sampling: str = "uniform",
+        language_ranking_hard_fraction: float = 0.0,
+        language_ranking_hard_temperature: float = 0.5,
+        language_ranking_hard_prefix_frames: int = 64,
     ) -> None:
         """``episode_subset_path``: optional JSON (absolute path, or a bare filename
         resolved under the bundled ``episode_subsets/`` dir) listing a FIXED set of
@@ -96,7 +105,14 @@ class LIBEROLeRobotDataset(ActionBaseDataset):
         listed episodes are the whole dataset (few-shot SFT, e.g. 10 demos/task) and
         ``val_ratio``/``seed`` are not used to carve a val split out of them; only
         ``split='train'``/``'full'`` are supported. ``None`` keeps every episode
-        (minus the seeded val split) as before."""
+        (minus the seeded val split) as before.
+
+        ``language_ranking_*`` (cosmos_hs11 v27, TOML ``[model.language_ranking]``): with
+        ``negative_sampling='action_similarity'`` the ranking negative of a window is drawn
+        from the other nine tasks with probability ``(1 - hard_fraction) / 9 + hard_fraction *
+        softmax(-z / hard_temperature)``, where ``z`` is the scale-free distance between the
+        tasks' mean action trajectories over the first ``hard_prefix_frames`` frames of the KEPT
+        demonstrations (see ``utils.language_ranking``). ``'uniform'`` is the v23 behaviour."""
         if action_space != "frame_wise_relative":
             raise NotImplementedError(
                 f"This LIBERO dataset only supports action_space='frame_wise_relative', got {action_space!r}."
@@ -124,7 +140,6 @@ class LIBEROLeRobotDataset(ActionBaseDataset):
             action_normalization=None if action_normalization is None else "quantile",
             sample_stride=sample_stride,
         )
-        self._instruction_negatives = LiberoInstructionNegatives(self._tasks) if language_ranking else None
         # FPS-agnostic loader: trust the dataset's NATIVE fps for conditioning_fps /
         # prompt duration so the metadata is truthful (10 for the public
         # lerobot/libero_*, 20 for a 20 FPS conversion). Frame sampling uses each
@@ -200,6 +215,61 @@ class LIBEROLeRobotDataset(ActionBaseDataset):
             f"valid_indices={int(self._valid_cum[-1]) if self._valid_cum.size else 0} "
             f"episode_subset={str(self._episode_subset_file) if self._episode_subset_file else None}"
         )
+        self._ranking_negative_report: str | None = None
+        self._ranking_negative_distances: tuple[list[int], np.ndarray] | None = None
+        self._instruction_negatives = (
+            self._build_instruction_negatives(
+                language_ranking_negative_sampling,
+                language_ranking_hard_fraction,
+                language_ranking_hard_temperature,
+                language_ranking_hard_prefix_frames,
+                kept_counts,
+            )
+            if language_ranking
+            else None
+        )
+
+    # ---- language-ranking negatives ----------------------------------------
+
+    def _build_instruction_negatives(
+        self, mode: str, fraction: float, temperature: float, prefix_frames: int, episode_counts: np.ndarray
+    ) -> LiberoInstructionNegatives:
+        mode = str(mode).lower().strip()
+        if mode not in NEGATIVE_SAMPLING_MODES:
+            raise ValueError(
+                f"language_ranking_negative_sampling={mode!r} is not one of {NEGATIVE_SAMPLING_MODES}."
+            )
+        if mode == "uniform":
+            return LiberoInstructionNegatives(self._tasks)
+        prefix_frames = int(prefix_frames)
+        if prefix_frames < 1:
+            raise ValueError(f"language_ranking_hard_prefix_frames must be >= 1, got {prefix_frames}.")
+        # First ``prefix_frames`` TRAINING actions (rot6d, un-normalized) of every kept demonstration, by task.
+        prefixes: dict[int, list[np.ndarray]] = {int(t): [] for t in self._tasks}
+        for start, count in zip(self._ep_starts.tolist(), np.asarray(episode_counts).tolist()):
+            n = min(prefix_frames, int(count))
+            if n < 1:
+                continue
+            raw = self._row_action[start : start + n]
+            prefixes[int(self._row_task[start])].append(self._build_frame_wise_action(raw).numpy())
+        weights, order, distances = action_similarity_negative_weights(prefixes, float(fraction), float(temperature))
+        self._ranking_negative_distances = (order, distances)
+        self._ranking_negative_report = format_hard_negative_report(order, distances, weights, self._tasks)
+        log.info(
+            f"LIBERO language-ranking hard negatives: action_similarity over the first {prefix_frames} frames of "
+            f"{sum(len(v) for v in prefixes.values())} kept demonstrations, hard_fraction={fraction}, "
+            f"temperature={temperature}\n{self._ranking_negative_report}"
+        )
+        return LiberoInstructionNegatives(self._tasks, weights=weights)
+
+    @property
+    def ranking_negative_report(self) -> str | None:
+        """Distance matrix + top negatives per task (``None`` unless action-similarity negatives are active)."""
+        return self._ranking_negative_report
+
+    @property
+    def instruction_negatives(self) -> LiberoInstructionNegatives | None:
+        return self._instruction_negatives
 
     # ---- spec / dims -------------------------------------------------------
 

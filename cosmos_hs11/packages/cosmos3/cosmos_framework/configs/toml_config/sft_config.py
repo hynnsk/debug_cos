@@ -11,7 +11,7 @@ override list, ``PATH_REMAPS``, etc.) lives in ``toml_config_helper.py``.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 import tomllib
 from pydantic import BaseModel, ConfigDict, Field
@@ -305,6 +305,26 @@ class LanguageRankingTomlConfig(BaseModel):
     enabled: Optional[bool] = None
     loss_weight: Optional[float] = Field(default=None, ge=0.0, allow_inf_nan=False)
     margin: Optional[float] = Field(default=None, ge=0.0, allow_inf_nan=False)
+    # cosmos_hs11 v27 hard negatives (LanguageRankingConfig): how the negative instruction's task is drawn.
+    negative_sampling: Optional[Literal["uniform", "action_similarity"]] = Field(
+        default=None, description="'uniform' (v23) or 'action_similarity' (prefix-trajectory hard negatives)."
+    )
+    hard_negative_fraction: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+        description="Mixture weight of the similarity-based distribution vs uniform (0 = uniform, 1 = similarity only).",
+    )
+    hard_negative_temperature: Optional[float] = Field(
+        default=None,
+        gt=0.0,
+        allow_inf_nan=False,
+        description="Softmax temperature on the normalized distance (median off-diagonal = 1); lower = sharper.",
+    )
+    hard_negative_prefix_frames: Optional[int] = Field(
+        default=None, ge=1, description="Leading frames of each demonstration that define the task trajectory."
+    )
 
 
 class RepaTomlConfig(BaseModel):
