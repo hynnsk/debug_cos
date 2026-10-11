@@ -129,6 +129,15 @@ class RectifiedFlowTrainingConfig:
 
 
 @attrs.define(slots=False)
+class LanguageRankingConfig:
+    """Per-sample hinge ranking of action FM errors under correct/incorrect instructions."""
+
+    enabled: bool = False
+    loss_weight: float = 1.0
+    margin: float = 0.1
+
+
+@attrs.define(slots=False)
 class RepaConfig:
     """V-JEPA 2.1 representation alignment (REPA) on the MoT generation pathway.
 
@@ -408,6 +417,7 @@ class OmniMoTModelConfig:
 
     # V-JEPA 2.1 representation alignment loss (off by default).
     repa: RepaConfig = RepaConfig()
+    language_ranking: LanguageRankingConfig = LanguageRankingConfig()
 
     # Optional SIGReg anti-collapse regularizer on MoT visual tokens (off by default).
     sigreg: SigRegConfig = SigRegConfig()

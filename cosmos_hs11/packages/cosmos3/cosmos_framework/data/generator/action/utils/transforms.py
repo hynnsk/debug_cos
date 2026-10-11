@@ -22,7 +22,6 @@ from collections.abc import Mapping
 import torch
 import torchvision.transforms.functional as transforms_F
 
-from cosmos_framework.utils import log
 from cosmos_framework.data.generator.action.action_caption_attribute_adapter import (
     append_action_caption_semantics,
 )
@@ -32,13 +31,15 @@ from cosmos_framework.data.generator.action.utils.action_processing import (
     ActionProcessor,
 )
 from cosmos_framework.data.generator.action.utils.json_formatter import ActionPromptJsonFormatter
+from cosmos_framework.data.generator.action.utils.language_ranking import tokenize_negative_instruction
 from cosmos_framework.data.generator.action.utils.viewpoint_utils import ViewpointTextInfo
 from cosmos_framework.data.generator.augmentors.duration_fps_text_timestamps import DurationFPSTextTimeStamps
 from cosmos_framework.data.generator.augmentors.idle_frames_text_info import IdleFramesTextInfo
 from cosmos_framework.data.generator.augmentors.resolution_text_info import ResolutionTextInfo
 from cosmos_framework.data.generator.augmentors.text_tokenizer import TextTokenizerTransform
-from cosmos_framework.data.generator.utils import VIDEO_RES_SIZE_INFO
 from cosmos_framework.data.generator.sequence_packing import SequencePlan
+from cosmos_framework.data.generator.utils import VIDEO_RES_SIZE_INFO
+from cosmos_framework.utils import log
 from cosmos_framework.utils.generator.data_utils import get_vision_data_resolution
 
 ACTION_MODE_DESCRIPTIONS: dict[str, str] = {
@@ -797,8 +798,18 @@ class ActionTransformPipeline:
         data_dict.pop("action_caption_attributes", None)
 
         # 8. Tokenize caption text (if enabled).
+        negative_instruction = data_dict.pop("ranking_negative_instruction", None)
+        if negative_instruction is not None:
+            if self.text_tokenizer is None:
+                raise ValueError("Language ranking requires a text tokenizer")
+            data_dict["negative_text_token_ids"] = tokenize_negative_instruction(
+                data_dict[self.caption_key], negative_instruction, self.text_tokenizer
+            )
         if self.text_tokenizer is not None:
             data_dict = self.text_tokenizer(data_dict)
+        if negative_instruction is not None:
+            # Preserve the original BC/CFG behavior, but do not rank an empty positive instruction.
+            data_dict["ranking_valid"] = bool(data_dict[self.caption_key])
 
         # 9. Build a ``SequencePlan`` from the ``"mode"`` key (if present).
         video = data_dict.get("video")

@@ -22,7 +22,12 @@ from cosmos_framework.model._base import ImaginaireModel
 from cosmos_framework.utils import distributed, log
 from cosmos_framework.utils.callback import Callback
 
-_DEFAULT_KEYS = ("flow_matching_loss_action", "flow_matching_loss_vision")
+_DEFAULT_KEYS = (
+    "flow_matching_loss_action", "flow_matching_loss_vision",
+    "language_ranking_loss", "language_ranking_weighted_loss",
+    "language_ranking_positive_error", "language_ranking_negative_error",
+    "language_ranking_gap", "language_ranking_margin_satisfied", "language_ranking_valid_fraction",
+)
 
 
 class ValLossBreakdownCallback(Callback):

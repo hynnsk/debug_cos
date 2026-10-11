@@ -32,9 +32,10 @@ import pyarrow.parquet as pq
 import torch
 import torch.nn.functional as F
 
-from cosmos_framework.data.generator.action.utils.action_spec import ActionSpec, Gripper, Pos, Rot, build_action_spec
 from cosmos_framework.data.generator.action.datasets.base_dataset import ActionBaseDataset
 from cosmos_framework.data.generator.action.libero_pose_utils import libero_action_dim, libero_rotation_format
+from cosmos_framework.data.generator.action.utils.action_spec import ActionSpec, Gripper, Pos, Rot, build_action_spec
+from cosmos_framework.data.generator.action.utils.language_ranking import LiberoInstructionNegatives
 from cosmos_framework.data.generator.action.utils.pose_utils import convert_rotation
 from cosmos_framework.utils import log
 
@@ -86,6 +87,7 @@ class LIBEROLeRobotDataset(ActionBaseDataset):
         seed: int = 0,
         sample_stride: int = 1,
         episode_subset_path: str | None = None,
+        language_ranking: bool = False,
     ) -> None:
         """``episode_subset_path``: optional JSON (absolute path, or a bare filename
         resolved under the bundled ``episode_subsets/`` dir) listing a FIXED set of
@@ -122,6 +124,7 @@ class LIBEROLeRobotDataset(ActionBaseDataset):
             action_normalization=None if action_normalization is None else "quantile",
             sample_stride=sample_stride,
         )
+        self._instruction_negatives = LiberoInstructionNegatives(self._tasks) if language_ranking else None
         # FPS-agnostic loader: trust the dataset's NATIVE fps for conditioning_fps /
         # prompt duration so the metadata is truthful (10 for the public
         # lerobot/libero_*, 20 for a 20 FPS conversion). Frame sampling uses each
@@ -359,6 +362,8 @@ class LIBEROLeRobotDataset(ActionBaseDataset):
         ai_caption = random.choice([p.strip() for p in task.split(" | ") if p.strip()] or [task])
 
         extras: dict[str, Any] = {}
+        if self._instruction_negatives is not None:
+            extras["ranking_negative_instruction"] = self._instruction_negatives.sample(int(self._row_task[start]))
         if self._camera_mode == "concat_view":
             extras["additional_view_description"] = (
                 "The left half shows the third-person view; the right half shows the wrist-mounted camera."

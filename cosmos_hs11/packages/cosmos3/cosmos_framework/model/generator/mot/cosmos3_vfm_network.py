@@ -1274,6 +1274,8 @@ class Cosmos3VFMNetwork(PreTrainedModel):
         capture_sigreg: bool = False,
         repa_aux: dict | None = None,
         repa_aux_only: bool = False,
+        ranking_negative: PackedSequence | None = None,
+        ranking_action_only: bool = False,
     ) -> dict:
         """
         Forward pass for Cosmos3VFMNetwork.
@@ -1295,6 +1297,8 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             repa_aux: Independent masked-video pack, teacher holder and target mask. Its prefix forward
                 executes inside this root forward so the projector remains under the root FSDP unit.
             repa_aux_only: Internal prefix call; stop at the captured block and skip all output decoders.
+            ranking_negative: Same noised samples with alternative instructions. Runs under this root FSDP forward.
+            ranking_action_only: Internal negative branch; decode only actions.
 
         Returns:
             dict with keys:
@@ -1311,6 +1315,15 @@ class Cosmos3VFMNetwork(PreTrainedModel):
         # assert self.training, "Cosmos3VFMNetwork only supports training mode"
 
         aux_outputs = {}
+        if ranking_negative is not None:
+            if memory is not None or ranking_action_only or repa_aux_only:
+                raise ValueError("Language ranking does not support persistent memory or recursive auxiliary calls")
+            negative = self.forward(
+                packed_seq=ranking_negative,
+                video_temporal_causal=video_temporal_causal,
+                ranking_action_only=True,
+            )
+            aux_outputs["ranking_preds_action"] = negative["preds_action"]
         if repa_aux is not None:
             if repa_aux_only or memory is not None:
                 raise ValueError("Masked prediction does not support recursion or persistent memory")
@@ -1324,7 +1337,7 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             )
             if aux.get("repa_empty", True):
                 raise ValueError("Masked prediction produced no aligned visual tokens")
-            aux_outputs = dict(
+            aux_outputs.update(
                 jepa_pred=aux["repa_pred"],
                 jepa_target=aux["repa_target"],
                 jepa_counts=aux["repa_num_tokens_per_sample"],
@@ -1593,6 +1606,10 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             )
 
         if repa_aux_only:
+            return output_dict
+
+        if ranking_action_only:
+            self._decode_action(packed_seq, last_hidden_state, output_dict)
             return output_dict
 
         # SIGReg receives visual tokens only: no text, action, sound or LiDAR rows enter this tensor.

@@ -297,6 +297,16 @@ class BackboneConfig(BaseModel):
     )
 
 
+class LanguageRankingTomlConfig(BaseModel):
+    """LIBERO action-language ranking; routed to model.config.language_ranking.*."""
+
+    model_config = _PYDANTIC_MODEL_CONFIG
+
+    enabled: Optional[bool] = None
+    loss_weight: Optional[float] = Field(default=None, ge=0.0, allow_inf_nan=False)
+    margin: Optional[float] = Field(default=None, ge=0.0, allow_inf_nan=False)
+
+
 class RepaTomlConfig(BaseModel):
     """V-JEPA 2.1 representation-alignment (REPA) loss knobs. VFM only; lands at ``model.config.repa.*``
     (``cosmos_framework/configs/base/defaults/model_config.py::RepaConfig``). Omitted fields keep the
@@ -533,6 +543,7 @@ class ModelConfig(BaseModel):
     tokenizer: ModelTokenizerConfig = Field(default_factory=ModelTokenizerConfig)
     backbone: BackboneConfig = Field(default_factory=BackboneConfig)
     repa: RepaTomlConfig = Field(default_factory=RepaTomlConfig)
+    language_ranking: LanguageRankingTomlConfig = Field(default_factory=LanguageRankingTomlConfig)
     sigreg: SigRegTomlConfig = Field(default_factory=SigRegTomlConfig)
 
 

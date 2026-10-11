@@ -49,6 +49,7 @@ def _action_policy_libero_edge_model_config() -> dict:
     cfg["action_gen"] = True
     cfg["vision_gen"] = True
     cfg["max_action_dim"] = 64
+    cfg["language_ranking"] = dict(enabled=False, loss_weight=1.0, margin=0.1)
 
     return cfg
 
@@ -113,6 +114,7 @@ def _libero_packing_loader(
                         resolution=None,
                         max_action_dim="${model.config.max_action_dim}",
                         cfg_dropout_rate=cfg_dropout_rate,
+                        language_ranking="${model.config.language_ranking.enabled}",
                         format_prompt_as_json=True,  # structured JSON prompts (set False for plain-text)
                         tokenizer_config="${model.config.vlm_config.tokenizer}",
                     ),

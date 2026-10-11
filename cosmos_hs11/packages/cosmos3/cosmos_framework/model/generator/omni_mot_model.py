@@ -43,6 +43,7 @@ from cosmos_framework.model.generator.algorithm.loss.flow_matching import (
     ActionSlotLossStats,
     compute_flow_matching_loss,
 )
+from cosmos_framework.model.generator.algorithm.loss.language_ranking import action_language_ranking_loss
 from cosmos_framework.model.generator.algorithm.loss.load_balancing import compute_load_balancing_loss
 from cosmos_framework.model.generator.diffusion.rectified_flow import RectifiedFlow
 from cosmos_framework.model.generator.diffusion.samplers.edm import EDMSampler
@@ -70,16 +71,10 @@ from cosmos_framework.model.generator.repa.adapters import (
     repa_relation_loss,
     repa_sample_sigmas,
     repa_spatial_normalized_cosine_loss,
-    select_repa_samples,
     repa_temporal_difference_cosine_loss,
+    select_repa_samples,
 )
 from cosmos_framework.model.generator.repa.alignment import RepaTeacherTokens
-from cosmos_framework.model.generator.repa.view_layouts import (
-    compose_view_grids,
-    crop_and_resize_views,
-    resolve_view_layout,
-    validate_repa_view_layouts,
-)
 from cosmos_framework.model.generator.repa.masked_prediction import (
     auxiliary_weight,
     masked_prediction_loss,
@@ -88,6 +83,12 @@ from cosmos_framework.model.generator.repa.masked_prediction import (
 )
 from cosmos_framework.model.generator.repa.sigreg import sigreg_loss
 from cosmos_framework.model.generator.repa.teachers import build_repa_teacher, resolve_repa_teacher_spec
+from cosmos_framework.model.generator.repa.view_layouts import (
+    compose_view_grids,
+    crop_and_resize_views,
+    resolve_view_layout,
+    validate_repa_view_layouts,
+)
 from cosmos_framework.model.generator.tokenizers.interface import VideoTokenizerInterface
 from cosmos_framework.model.generator.upsampler.prompts import build_messages, clean_response
 from cosmos_framework.model.generator.utils.data_and_condition import (
@@ -1357,6 +1358,21 @@ class OmniMoTModel(ImaginaireModel):
         # later removes or truncates items before sequence packing.
         vae_pixel_shapes = get_vae_pixel_shapes(gen_data_clean.raw_state_vision)
         gen_data_clean, memory_info = self.memory_init_training(gen_data_clean, data_batch, input_text_indexes)
+        ranking_cfg = getattr(self.config, "language_ranking", None)
+        if ranking_cfg is not None and ranking_cfg.enabled:
+            if not all(plan.has_text and plan.has_action and plan.has_vision for plan in sequence_plans):
+                raise ValueError("Language ranking requires a LIBERO batch with text, vision and actions")
+            if gen_data_clean.num_vision_items_per_sample is not None and any(
+                count != 1 for count in gen_data_clean.num_vision_items_per_sample
+            ):
+                raise ValueError("Language ranking currently requires one vision item per LIBERO sample")
+            if "negative_text_token_ids" not in data_batch or "ranking_valid" not in data_batch:
+                raise ValueError("Language ranking requires the LIBERO loader's negative instructions and validity masks")
+            # memory_info is part of the CP owner payload, keeping the pair on the same sample after broadcast.
+            memory_info["ranking_negative_text_indexes"] = self._load_and_tokenize_text_data(
+                {"text_token_ids": data_batch["negative_text_token_ids"]}, iteration
+            )
+            memory_info["ranking_valid"] = [bool(torch.as_tensor(v).item()) for v in data_batch["ranking_valid"]]
 
         # image_size[i] may be (1, 4) from IterativeJointDataLoader or (4,) from custom_collate_fn.
         if "image_size" in data_batch:
@@ -1744,6 +1760,24 @@ class OmniMoTModel(ImaginaireModel):
         # Move packed sequence to CUDA
         packed_sequence.to_cuda()
 
+        ranking_negative = None
+        ranking_cfg = getattr(self.config, "language_ranking", None)
+        if ranking_cfg is not None and ranking_cfg.enabled:
+            if "ranking_negative_text_indexes" not in memory_info:
+                raise ValueError("Language ranking metadata is missing from the prepared training inputs")
+            ranking_negative = self._pack_input_sequence(
+                sequence_plans,
+                memory_info["ranking_negative_text_indexes"],
+                gen_data_clean,
+                timesteps_vision.cpu(),
+                skip_text_tokens=memory_info["skip_text"],
+                initial_mrope_temporal_offset=memory_info["initial_temporal_offset"],
+            )
+            # Reuse the *exact* interpolated video/action tensors; do not sample noise a second time.
+            self._replace_clean_with_noised(ranking_negative, gen_data_noised)
+            ranking_negative.action.timesteps = packed_sequence.action.timesteps
+            ranking_negative.to_cuda()
+
         # REPA: frozen teacher (V-JEPA 2.1 / DINOv2) tokens of the predicted frames (per camera view), consumed
         # inside the net forward. Either computed here from the raw batch or handed in pre-computed (Reptile inner loop).
         repa_teacher_tokens = self._resolve_repa_teacher_tokens(data_batch, sequence_plans, repa_teacher_tokens)
@@ -1767,7 +1801,10 @@ class OmniMoTModel(ImaginaireModel):
             repa_teacher_tokens=repa_teacher_tokens,
             repa_aux=repa_aux,
             capture_sigreg=self.sigreg_on_residual_tokens,
+            **({"ranking_negative": ranking_negative} if ranking_negative is not None else {}),
         )
+        if ranking_negative is not None:
+            out_net["ranking_valid"] = memory_info["ranking_valid"]
 
         loss, losses_dict = self._compute_losses(
             out_net=out_net,
@@ -2256,6 +2293,30 @@ class OmniMoTModel(ImaginaireModel):
                 device=self.tensor_kwargs_fp32["device"],
             )
             total_loss = total_loss * sample_level_scale.to(dtype=total_loss.dtype)
+
+        # Paired action errors are evaluated in fp32, independently of the main FM loss weights.
+        ranking_cfg = getattr(self.config, "language_ranking", None)
+        if ranking_cfg is not None and ranking_cfg.enabled:
+            if "ranking_preds_action" not in out_net:
+                raise ValueError("Language ranking is enabled but the negative action predictions are missing")
+            ranking_loss, ranking_metrics = action_language_ranking_loss(
+                positive=out_net["preds_action"],
+                negative=out_net["ranking_preds_action"],
+                target=gen_data_noised.vt_target_action,
+                condition_mask=data_batch_packed.action.condition_mask,
+                valid_samples=out_net["ranking_valid"],
+                margin=ranking_cfg.margin,
+                raw_action_dim=data_batch_packed.action.raw_action_dim,
+                action_valid_mask=data_batch_packed.action.action_valid_mask,
+            )
+            weighted_ranking = ranking_cfg.loss_weight * ranking_loss
+            if rf_cfg.sample_level_loss_averaging:
+                weighted_ranking = weighted_ranking * self._sample_level_loss_scale(
+                    is_image_batch, len(out_net["preds_action"]), ranking_loss.device
+                )
+            total_loss = total_loss + weighted_ranking
+            losses_dict.update(ranking_metrics)
+            losses_dict["language_ranking_weighted_loss"] = weighted_ranking.detach()
 
         # 1b. V-JEPA 2.1 representation alignment (REPA) over the predicted video tokens (``proj`` = REPA MLP or,
         # with ``repa.projector_type="linear"``, a single Linear; the teacher is frozen and the adapter (variants
@@ -6049,6 +6110,7 @@ class OmniMoTModel(ImaginaireModel):
         repa_teacher_tokens: RepaTeacherTokens | torch.Tensor | list[torch.Tensor] | None = None,
         repa_aux: dict | None = None,
         capture_sigreg: bool = False,
+        ranking_negative: PackedSequence | None = None,
     ) -> dict:
         """
         Runs the MoT network on a packed multi-modal sequence to predict velocity (v) targets.
@@ -6078,6 +6140,8 @@ class OmniMoTModel(ImaginaireModel):
             net_kwargs["repa_aux"] = repa_aux
         if capture_sigreg:
             net_kwargs["capture_sigreg"] = True
+        if ranking_negative is not None:
+            net_kwargs["ranking_negative"] = ranking_negative
         out_net = net(
             packed_seq=data_batch_packed,
             memory=memory,
@@ -6097,6 +6161,7 @@ class OmniMoTModel(ImaginaireModel):
             "jepa_target",
             "jepa_mask",
             "jepa_counts",
+            "ranking_preds_action",
         ):
             if key in out_net:
                 output_dict[key] = out_net[key]

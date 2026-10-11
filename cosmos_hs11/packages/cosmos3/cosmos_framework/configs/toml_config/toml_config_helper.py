@@ -18,7 +18,6 @@ from __future__ import annotations
 
 from typing import Any
 
-
 # Maps ``job.task`` to the base Hydra config that ``make_config()`` lives in.
 TASK_TO_BASE_CONFIG: dict[str, str] = {
     "vfm": "cosmos_framework/configs/base/config.py",
@@ -94,6 +93,7 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         ("model", "tokenizer"): None,                                          # blocks model.tokenizer.*
         ("model", "repa"): None,                                               # VFM-only REPA (V-JEPA) loss knobs
         ("model", "sigreg"): None,                                             # VFM-only visual-token SIGReg knobs
+        ("model", "language_ranking"): None,                                   # VFM-only action-language ranking
         ("dataloader_train", "seed"): None,
         ("dataloader_train", "episode_balanced_sampling"): None,                # VFM/LIBERO-only knob
         ("optimizer", "eps"): None,                                            # VLM_OPTIMIZER_KWARGS has no eps field

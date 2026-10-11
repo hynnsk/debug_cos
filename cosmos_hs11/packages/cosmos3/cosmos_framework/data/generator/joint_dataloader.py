@@ -16,9 +16,6 @@ import torch
 import webdataset
 from torch.utils.data.dataloader import default_collate
 
-from cosmos_framework.utils.lazy_config import instantiate
-from cosmos_framework.utils import log
-from cosmos_framework.utils.generator.cost_model.budget import IterationTimeBudget, IterationTimeBudgetConfig
 from cosmos_framework.data.generator.drop_sample_contract import DROP_SAMPLE_KEY, DROP_SAMPLE_REASON_KEY
 from cosmos_framework.data.generator.token_mix_control import TokenMixControlConfig, TokenMixController
 from cosmos_framework.model.generator.tokenizers.uniae.frame_math import (
@@ -26,7 +23,10 @@ from cosmos_framework.model.generator.tokenizers.uniae.frame_math import (
     get_uniae_latent_num_frames,
     normalize_uniae_chunk_frames,
 )
+from cosmos_framework.utils import log
+from cosmos_framework.utils.generator.cost_model.budget import IterationTimeBudget, IterationTimeBudgetConfig
 from cosmos_framework.utils.generator.data_utils import read_positive_int_metadata
+from cosmos_framework.utils.lazy_config import instantiate
 
 _TIMING_KEYS = {"_sample_time", "_aug_time", "_pre_aug_time", "_aug_step_times"}
 _BATCH_TIMING_KEYS = {
@@ -152,6 +152,7 @@ def custom_collate_fn(batch):
     """
     list_collate_keys = {
         "text_token_ids",
+        "negative_text_token_ids",
         "images",
         "video",
         "video_native",  # native-resolution frames for the V-JEPA REPA teacher (one [C,T,H,W] tensor per sample)
@@ -1014,7 +1015,7 @@ class JointDataLoader(webdataset.WebLoader):
     # Keys where each sample may hold multiple tensors (e.g. multiple video
     # clips in a packed sequence).  Kept as single-element lists per sample
     # via v[i:i+1] so that _update_output_batch yields list[list[Tensor]].
-    _MULTI_ITEM_KEYS = {"text_token_ids", "images", "video", "action", "action_raw", "sound"}
+    _MULTI_ITEM_KEYS = {"text_token_ids", "negative_text_token_ids", "images", "video", "action", "action_raw", "sound"}
 
     def _get_next_sample(self, index_id: int) -> dict:
         """Pop the next single-sample dict from the buffer for the given dataloader.
