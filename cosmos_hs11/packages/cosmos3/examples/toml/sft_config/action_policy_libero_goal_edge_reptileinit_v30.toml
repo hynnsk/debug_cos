@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# LIBERO-goal: copied from action_policy_libero_goal_edge_reptileinit_v23.toml (= v13 + paired action-language ranking).
+# v29 = v27 with hard_negative_fraction 1.0 / temperature 0.25 (no uniform floor, ~only the 1-2 closest tasks): the sharpness arm.
+# v27 = v23 + ACTION-SIMILARITY HARD NEGATIVES: the negative instruction of a window is drawn from the other 9 tasks
+# with probability (1 - hard_negative_fraction)/9 + hard_negative_fraction * softmax(-z / hard_negative_temperature),
+# where z is the scale-free distance between the tasks' mean training-action trajectories over the first
+# hard_negative_prefix_frames frames of the 30 kept demos (tasks whose demos START alike = the confused pairs).
+# Optimizer, schedule, batch, checkpoint and the ranking loss itself are unchanged from v23.
+# LIBERO_ROOT must contain this suite only (10 tasks). See docs/action_policy_libero_language_ranking.md (v27 section).
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_libero_edge"
+project      = "cosmos3_action_libero"
+group        = "edge_libero_goal_fewshot"
+name         = "edge_libero_goal_3ep_fullft_reptile_v30_ranking_hardneg_sharp"
+wandb_mode   = "offline"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+lora_enabled = false            # full mode: theta lives in the DCP weights themselves, no adapters
+
+[model.ema]
+enabled         = true
+rate            = 0.1
+iteration_shift = 0
+
+[model.parallelism]
+data_parallel_shard_degree     = 2
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 5.0e-05          # full-FT LR of the recipe
+
+[optimizer.lr_multipliers]
+action2llm            = 10.0   # inherited from the source recipe
+llm2action            = 10.0
+action_modality_embed = 10.0
+
+[scheduler]
+cycle_lengths = [1000]        # linear decay to 0 at max_iter (matches the cosmos_hs08 baseline)
+warm_up_steps = [100]
+
+[trainer]
+max_iter        = 1000
+logging_iter    = 20
+grad_accum_iter = 1
+# held-out validation
+run_validation          = true
+run_validation_on_start = true   # iteration 0 = the Reptile-initialized model before any update
+validation_iter         = 200
+max_val_iter            = 16
+
+[dataloader_train]
+max_samples_per_batch = 64
+episode_subset_path   = "libero_goal_3ep_per_task_v2.json"        # 3 demos/task x 10 tasks = 30 episodes (libero_goal)
+
+[dataloader_val]
+max_samples_per_batch = 16
+episode_subset_path   = "libero_goal_val_5ep_per_task_seed42_excl3ep.json"  # 5 held-out demos/task, disjoint from train (libero_goal)
+
+[checkpoint]
+load_path = "${oc.env:REPTILE_CKPT_PATH}"   # <reptile job>/checkpoints/iter_XXXXXXXXX (NOT the base Cosmos3-Edge dir)
+save_iter = 1000
+# The Reptile DCP has no EMA; the action heads are skipped (fresh) and then overwritten by the meta heads below.
+keys_to_skip_loading = ["net_ema.", "action2llm", "llm2action", "action_modality_embed"]
+meta_action_init_path                   = "${oc.env:META_ACTION_INIT_PATH}"
+meta_action_init_domain_id              = 5      # EMBODIMENT_TO_DOMAIN_ID["libero"]
+meta_action_init_include_modality_embed = true
+meta_action_init_include_lora           = false  # full mode: no adapters
+meta_action_init_include_time_embedder  = false  # already in the DCP weights
+
+# E_pos/E_neg: per-sample fp32 MSE over noisy, valid action elements.
+# Added directly to the existing total loss, independently of the action FM multiplier.
+[model.language_ranking]
+enabled = true
+loss_weight = 5.0
+margin = 0.05
+# --- v27 hard negatives (all four knobs are routed to model.config.language_ranking.* and from there to the dataset) ---
+negative_sampling           = "action_similarity"   # "uniform" = v23 (the three knobs below are then ignored)
+hard_negative_fraction      = 1.0     # v29: similarity-based only, no uniform floor (v27 = 0.7)
+hard_negative_temperature   = 0.25    # v29: sharper softmax on z (v27 = 0.5)
+hard_negative_prefix_frames = 64      # leading frames per demo (3.2 s at 20 fps) that define the task's start trajectory

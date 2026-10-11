@@ -90,7 +90,7 @@ meta_action_init_include_time_embedder  = false  # already in the DCP weights
 [model.language_ranking]
 enabled = true
 loss_weight = 1.0
-margin = 0.1
+margin = 0.05
 # --- action-similarity hard negatives (all four knobs are routed to model.config.language_ranking.* and from there to the dataset) ---
 negative_sampling           = "action_similarity"   # "uniform" = v58 (the three knobs below are then ignored)
 hard_negative_fraction      = 1.0     # mixture weight of the similarity distribution vs uniform (0 = uniform, 1 = similarity only)
