@@ -441,3 +441,28 @@ LIBERO_ROOT=$S/data/LIBERO_LeRobot_v3/libero_goal NPROC_PER_NODE=2 sr 2 48 examp
 # full-data upper bound (8 GPUs)
 LIBERO_ROOT=$S/data/LIBERO_LeRobot_v3/libero_goal NPROC_PER_NODE=8 sr 8 48 examples/launch_sft_action_policy_libero_goal_edge_baseinit_data_all.sh
 ```
+
+## 10c. 1-demo-per-task recipes for all four suites (2026-10-12)
+
+A harder few-shot setting: ONE demonstration per task (10 episodes). The episode of every task is drawn with
+`random.Random(42)` from the task's three episodes of the final 3-demo subset of that suite (never from the whole
+dataset), so the 1-demo training set is a strict subset of the 3-demo one. Generator:
+`cosmos_framework/scripts/make_libero_1ep_from_3ep_subset.py --root <dir>/libero_<suite> --parent <3ep json> -o <out>`;
+the output records `based_on` and `v1_selection` (candidates + chosen per task).
+
+| suite | parent (3-demo) json | 1-demo json | val json |
+| --- | --- | --- | --- |
+| libero_10 | `libero_10_3ep_per_task_seed42.json` | `libero_10_1ep_per_task_v1.json` | `libero_10_val_5ep_per_task_seed42_excl3ep.json` |
+| libero_goal | `libero_goal_3ep_per_task_v2.json` | `libero_goal_1ep_per_task_v1.json` | `libero_goal_val_5ep_per_task_seed42_excl3ep.json` |
+| libero_object | `libero_object_3ep_per_task_seed42.json` | `libero_object_1ep_per_task_v1.json` | `libero_object_val_5ep_per_task_seed42_excl3ep.json` |
+| libero_spatial | `libero_spatial_3ep_per_task_v3.json` | `libero_spatial_1ep_per_task_v1.json` | `libero_spatial_val_5ep_per_task_seed42_excl3ep.json` |
+
+Recipes (`examples/toml/sft_config/action_policy_1ep_libero_<suite>_edge_{baseline,reptileinit}_v1.toml`, launchers
+`examples/launch_sft_1ep_libero_<suite>_edge_{baseline,reptileinit}_v1.sh`) are copies of the goal v7 pair
+(`action_policy_libero_goal_edge_{baseinit,reptileinit}_v7.toml`): 1000 iterations, warmup 100, cycle 1000, shard 2 x 128
+= 256, EMA, held-out val every 200; baseline = base Cosmos3-Edge DCP + fresh heads (5x head LR), reptileinit =
+REPTILE_CKPT_PATH + META_ACTION_INIT_PATH (2x head LR). Only group/name and the two subset jsons differ. 1000 x 256
+windows is ~200+ epochs over the ~1.1 k windows of 10 demos (vs ~75 over 30 demos), so expect stronger memorization.
+Ports 50140-50147 (baseline/reptileinit per suite in the order 10, goal, object, spatial); every launcher checks the
+LIBERO_ROOT basename against its suite. GIFs of the 40 selected demos: `~/project/utils/libero_1ep_v1_gifs/<suite>/`.
+Tests: `configs/toml_config/libero_1ep_toml_test.py`. Not GPU-smoked.

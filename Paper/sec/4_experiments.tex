@@ -1,0 +1,141 @@
+\section{Experiments}
+\label{sec:exp}
+
+\subsection{Setup}
+\label{sec:setup}
+
+\paragraph{Benchmark}
+We evaluate on the four LIBERO suites~\cite{liu2023libero}, each with 10 language-conditioned manipulation tasks: LIBERO-Spatial (same objects, different layouts), LIBERO-Object (different objects, same layout), LIBERO-Goal (same scene and objects, different goals), and LIBERO-10 (long-horizon, two-stage tasks).
+We use the 20\,Hz LeRobot release of the demonstrations~\cite{cadene2024lerobot}, which contains 379, 428, 432, and 454 successful demonstrations for LIBERO-10, -Goal, -Spatial, and -Object.
+
+\paragraph{Few-shot protocol}
+For every suite we select three demonstrations per task with a fixed random seed, 30 demonstrations in total, and keep this selection fixed for all methods.
+Five further demonstrations per task, disjoint from the training set, are held out to monitor the validation loss; they are never used for training or for checkpoint selection, and we always evaluate the final checkpoint of each run.
+
+\paragraph{Models}
+\basept post-trains the mid-trained \base checkpoint with the standard recipe; this is the baseline of \cref{fig:teaser}.
+\metapt post-trains from our meta pre-trained checkpoint $\thmeta$ as described in \cref{sec:downstream}.
+The two runs of a suite share every setting, including the training subset and the seed, and differ only in the initialization and in the learning-rate multiplier of the action head ($5\times$ for the fresh head, $1\times$ for the meta-learned head).
+
+\paragraph{Post-training details}
+The policy observes the third-person and the wrist camera at $256{\times}256$, concatenated side by side, and the instruction, and generates the next 16 frames together with a 16-step chunk of 10-D actions (relative end-effector translation, 6-D rotation, and gripper), normalized with the quantile statistics of the suite.
+We use AdamW with learning rate $5{\times}10^{-5}$, weight decay 0.05, $\beta=(0.9,0.99)$, 200 warm-up steps and linear decay to zero at 2000 steps, batches of 256 windows, an exponential moving average of the weights, bf16 compute with fp32 master weights, and FSDP over two 48\,GB GPUs; the instruction is dropped for 10\% of the samples.
+
+\paragraph{Meta pre-training details}
+We run $N{=}1000$ meta-iterations over the five source embodiments with $K{=}32$ demonstrations and $w{=}8$ windows per demonstration (256 windows per episode), $k{=}10$ inner AdamW steps at the post-training learning rate $5{\times}10^{-5}$ and weight decay 0.05, two warm-up steps, gradient clipping at 1.0, and a fresh optimizer state per episode; $\epsilon$ decays linearly from 0.5 to 0.05.
+The run takes 1.5--2 minutes per meta-iteration on four 48\,GB GPUs, 25--30 hours in total, with a peak memory below 30\,GB per GPU, and consumes about 32k demonstration samples, a negligible fraction of the mid-training data.
+The final $\thmeta$ is used for all experiments below.
+
+\paragraph{Evaluation}
+We run the policy closed loop in the LIBERO simulator, 50 trials per task with the benchmark's fixed initial states, \ie, 500 episodes per suite and per model.
+Each predicted 16-step action chunk is executed before the policy is queried again; actions are sampled with 30 denoising steps and without classifier-free guidance.
+Episodes time out after 520, 300, 220, and 280 control steps for LIBERO-10, -Goal, -Spatial, and -Object.
+We report the success rate in percent.
+With 500 Bernoulli trials the standard error at a success rate of 60\% is about 2.2 points, so differences of fewer than about four points should be read as ties.
+
+\begin{table}[t]
+  \centering
+  \footnotesize
+  \setlength{\tabcolsep}{3.2pt}
+  \begin{tabular}{lccccc}
+    \toprule
+    Model & LIBERO-10 & Goal & Spatial & Object & Avg. \\
+    \midrule
+    \textcolor{black!55}{PT, all demonstrations} & \textcolor{black!55}{87.2} & \textcolor{black!55}{97.4} & \textcolor{black!55}{97.8} & \textcolor{black!55}{98.8} & \textcolor{black!55}{95.3} \\
+    \midrule
+    PT (baseline) & 58.0 & 48.8 & 72.0 & 82.8 & 65.4 \\
+    META-PT (ours) & \textbf{69.4} & \textbf{60.8} & \textbf{72.6} & \textbf{85.2} & \textbf{72.0} \\
+    \midrule
+    $\Delta$ & +11.4 & +12.0 & +0.6 & +2.4 & +6.6 \\
+    \bottomrule
+  \end{tabular}
+  \caption{\textbf{Few-shot post-training on LIBERO (3 demonstrations per task).}
+  Success rate (\%) over 50 trials on each of the 10 tasks of a suite.
+  PT is \basept, post-trained from the mid-trained weights; META-PT is \metapt, post-trained from our meta pre-trained weights.
+  Both are post-trained with the identical recipe on the identical 30 demonstrations and differ only in the initialization.
+  The gray row is the baseline recipe trained on all demonstrations of the suite, for reference.}
+  \label{tab:main}
+\end{table}
+
+\subsection{Few-Shot Post-Training}
+\label{sec:exp_main}
+
+\cref{tab:main} reports the main result.
+Starting post-training from $\thmeta$ instead of $\theta_{\mathrm{mid}}$ improves all four suites, by 6.6 points on average.
+The gains are largest where the baseline is weakest: +11.4 points on LIBERO-10 and +12.0 points on LIBERO-Goal, roughly five standard errors each, while LIBERO-Spatial and LIBERO-Object, on which the baseline already reaches 72\% and 83\% from 30 demonstrations, improve by 0.6 and 2.4 points, within the noise of the evaluation.
+Averaged over the suites, meta pre-training closes 22\% of the gap between few-shot post-training (65.4\%) and post-training on all demonstrations (95.3\%), without touching the post-training recipe, the model, or the data; the remaining gap shows that few-shot post-training of WAMs is far from solved.
+
+\begin{table}[t]
+  \centering
+  \footnotesize
+  \setlength{\tabcolsep}{3pt}
+  \begin{tabular}{clccc}
+    \toprule
+    \# & Task (abbreviated instruction) & PT & META-PT & $\Delta$ \\
+    \midrule
+    1 & alphabet soup \& tomato sauce in basket   & 20 & \textbf{42} & +22 \\
+    2 & cream cheese \& butter in basket          & 76 & \textbf{80} & +4 \\
+    3 & turn on stove, moka pot on it             & 50 & \textbf{60} & +10 \\
+    4 & black bowl in bottom drawer, close it     & 56 & \textbf{66} & +10 \\
+    5 & white mug on left plate, other on right & 50 & \textbf{62} & +12 \\
+    6 & book in back compartment of caddy         & 74 & \textbf{78} & +4 \\
+    7 & white mug on plate, pudding to its right  & 54 & \textbf{74} & +20 \\
+    8 & alphabet soup \& cream cheese in basket   & 58 & \textbf{70} & +12 \\
+    9 & both moka pots on the stove               & 60 & \textbf{78} & +18 \\
+    10 & yellow-white mug in microwave, close it  & 82 & \textbf{84} & +2 \\
+    \midrule
+    & All tasks                                   & 58.0 & \textbf{69.4} & +11.4 \\
+    \bottomrule
+  \end{tabular}
+  \caption{\textbf{Per-task success rate (\%) on LIBERO-10 with 3 demonstrations per task}, 50 trials per task.
+  PT and META-PT denote \basept and \metapt.
+  The meta pre-trained initialization improves every task.}
+  \label{tab:pertask}
+\end{table}
+
+\paragraph{Per-task behavior}
+\cref{tab:pertask} breaks LIBERO-10 down by task.
+The improvement is not concentrated in a few tasks: all ten tasks improve, by 2 to 22 points.
+The largest gains appear on tasks with two sequential pick-and-place segments that involve visually similar containers (tasks 1, 7, and 9), where the baseline tends to complete only the first segment within the time limit, while the tasks on which the baseline is already strong (tasks 2, 6, and 10) change little.
+
+\begin{table}[t]
+  \centering
+  \footnotesize
+  \setlength{\tabcolsep}{6pt}
+  \begin{tabular}{lccc}
+    \toprule
+    Training demonstrations & PT & META-PT & $\Delta$ \\
+    \midrule
+    3 per task (30)   & 58.0 & \textbf{69.4} & +11.4 \\
+    all (379)         & 87.2 & \textbf{94.6} & +7.4 \\
+    \bottomrule
+  \end{tabular}
+  \caption{\textbf{Beyond the few-shot regime: LIBERO-10 with all demonstrations.}
+  Success rate (\%) over 500 episodes; PT and META-PT as in \cref{tab:main}.
+  Post-training from the meta pre-trained weights also improves the full-data setting, removing more than half of the remaining failures.}
+  \label{tab:fulldata}
+\end{table}
+
+\subsection{Beyond the Few-Shot Regime}
+\label{sec:exp_full}
+
+Does the meta pre-trained initialization only act as a regularizer for tiny datasets, or is it a better starting point in general?
+\cref{tab:fulldata} repeats the LIBERO-10 experiment with all 379 demonstrations and the same 2000-step schedule.
+Post-training from $\thmeta$ raises the success rate from 87.2\% to 94.6\%, \ie, the failure rate drops from 12.8\% to 5.4\%.
+The gain is smaller than in the few-shot regime, as expected when the target data can itself move the weights far, but it is well outside the evaluation noise.
+We conclude that $\thmeta$ is a better initialization for post-training in general, and that its advantage grows as the target data shrinks.
+
+\subsection{Discussion and Limitations}
+\label{sec:discussion}
+
+\paragraph{What the gains do and do not show}
+The two models of \cref{tab:main} share the training subset, the recipe, the seed, and the evaluation episodes, so the comparison is paired, but each number is a single training run evaluated on 500 episodes; we therefore do not interpret the sub-four-point differences on LIBERO-Spatial and LIBERO-Object.
+The results also do not yet separate the contribution of the Reptile rule from that of additional exposure to the five source datasets, since $\thmeta$ has seen about 32k more demonstration samples than $\theta_{\mathrm{mid}}$; a control that consumes the same episodes with plain joint training ($k{=}1$, $\epsilon{=}1$) is the natural next experiment.
+
+\paragraph{Where the remaining failures are}
+Inspecting the rollouts of the few-shot policies on LIBERO-Goal and LIBERO-Spatial, whose ten tasks share one scene, we find that most failures are not imprecise motion but the execution of a different task of the same scene, or the manipulation of the wrong instance of a repeated object.
+Three demonstrations per task appear to be enough to adapt the dynamics and the embodiment, which is what our source episodes exercise, but not to ground ten instructions in one scene.
+Meta-training episodes that contain several instructions of the same scene are a promising direction.
+
+\paragraph{Scope}
+We study one backbone and one model size, one meta pre-training budget, and simulated evaluation; the stage itself only assumes a post-training recipe and a set of source robot datasets and should transfer to other WAMs and VLAs.

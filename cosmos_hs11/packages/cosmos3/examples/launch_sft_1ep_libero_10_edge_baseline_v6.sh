@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# cosmos_hs11: libero_10 1-DEMO-per-task (10 episodes) FULL fine-tune from the mid-trained Cosmos3-Edge checkpoint = the
+# fresh-init BASELINE of launch_sft_1ep_libero_10_edge_reptileinit_v1.sh (same recipe, no Reptile warm start).
+# Copied from launch_sft_action_policy_libero_goal_edge_baseinit_v7.sh; drives examples/toml/sft_config/action_policy_1ep_libero_10_edge_baseline_v1.toml.
+# See docs/action_reptile_meta.md, section 10c.
+#
+# Required env vars:
+#   LIBERO_ROOT            local LeRobot dataset dir of THIS suite, i.e. <dir>/libero_10 (basename checked)
+# Optional env vars (defaults below; override to relocate checkpoints):
+#   BASE_CHECKPOINT_PATH   mid-trained Cosmos3-Edge DCP dir (default examples/checkpoints/Cosmos3-Edge)
+#   WAN_VAE_PATH           default examples/checkpoints/wan22_vae/Wan2.2_VAE.pth
+#   IMAGINAIRE_OUTPUT_ROOT, NPROC_PER_NODE, MASTER_PORT, EXTRA_TAIL_OVERRIDES
+# Usage (2 GPUs: shard 2 x 128 windows = global batch 256):
+#   LIBERO_ROOT=$COSMOS_STORAGE/data/LIBERO_LeRobot_v3/libero_10 \
+#   BASE_CHECKPOINT_PATH=$COSMOS_STORAGE/checkpoints/Cosmos3-Edge WAN_VAE_PATH=$COSMOS_STORAGE/checkpoints/wan22_vae/Wan2.2_VAE.pth \
+#   NPROC_PER_NODE=2 sr 2 48 examples/launch_sft_1ep_libero_10_edge_baseline_v1.sh
+
+TOML_FILE="${TOML_FILE:-examples/toml/sft_config/action_policy_1ep_libero_10_edge_baseline_v6.toml}"
+export LIBERO_ROOT="${LIBERO_ROOT:-}"
+: "${BASE_CHECKPOINT_PATH:=examples/checkpoints/Cosmos3-Edge}"
+: "${MASTER_PORT:=50145}"   # distinct per suite/recipe so concurrent jobs can share a node (1ep v1 recipes: 50140-50147)
+export MASTER_PORT
+
+EXTRA_DATASET_CHECK='[[ -f "$LIBERO_ROOT/meta/info.json" ]] || { echo "ERROR: LIBERO_ROOT must be a local LeRobot dir containing meta/info.json (got: '\''$LIBERO_ROOT'\'')." >&2; exit 1; }; [[ "$(basename "${LIBERO_ROOT%/}")" == "libero_10" ]] || { echo "ERROR: this launcher trains the libero_10 suite (its episode-subset jsons are suite specific) but LIBERO_ROOT is '\''$LIBERO_ROOT'\''. Point LIBERO_ROOT at <dir>/libero_10." >&2; exit 1; }'
+
+# Extra Hydra overrides from the environment (space-separated string), e.g. EXTRA_TAIL_OVERRIDES="trainer.max_iter=5".
+TAIL_OVERRIDES=(
+    ${EXTRA_TAIL_OVERRIDES:-}
+)
+
+source "$(dirname "${BASH_SOURCE[0]}")/_sft_launcher_common.sh"

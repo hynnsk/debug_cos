@@ -1,0 +1,110 @@
+\section{Method}
+\label{sec:method}
+
+\input{fig/method}
+
+We first describe the world action model and its post-training recipe (\cref{sec:prelim}), then define the few-shot post-training problem (\cref{sec:problem}), and finally present the \method stage (\cref{sec:meta}) and how post-training uses its output (\cref{sec:downstream}).
+\cref{fig:method} gives an overview.
+
+\subsection{Preliminaries: World Action Model and Post-Training}
+\label{sec:prelim}
+
+\paragraph{Model}
+\base~\cite{cosmos3} is a mixture-of-transformers model~\cite{liang2024mot} with two 28-layer towers (hidden size 2048) coupled by joint attention: a \emph{reasoner} tower that processes the text instruction and the conditioning tokens autoregressively, and a \emph{generator} tower that denoises video latents and action tokens with a rectified-flow objective~\cite{lipman2023flow,liu2023rectified}.
+Video is tokenized by a causal spatio-temporal VAE~\cite{wan2025}.
+Actions are mapped to a unified representation (relative end-effector translation, a 6-D rotation~\cite{zhou2019rot6d}, and a gripper state per arm), zero-padded to a fixed width, and projected into and out of the token stream by embodiment-specific \emph{action heads}: one row per embodiment of an input projection, an output projection, and a modality embedding.
+In world-action mode the model conditions on the current observation and the instruction and jointly generates the next 16 video frames and the corresponding 16-step action chunk.
+
+\paragraph{Objective}
+For a dataset $\calD$ of windows (an observation, an instruction, 16 future frames, and 16 actions), the training loss is
+\begin{equation}
+  \calL(\theta;\calD) = \lambda_v\,\calL_{\mathrm{video}}(\theta;\calD) + \lambda_a\,\calL_{\mathrm{action}}(\theta;\calD),
+  \label{eq:loss}
+\end{equation}
+two flow-matching losses on the video latents and the action tokens, with $\lambda_v=\lambda_a=10$ in the recipe we inherit.
+
+\paragraph{Post-training recipe}
+Given a target dataset $\calD_\calT$, post-training minimizes \cref{eq:loss} over a trainable subset $\theta$ of the weights: the generator tower, its timestep embedding and latent projections, and the action head of the target embodiment, 1.42B parameters in total, while the reasoner tower and the tokenizers stay frozen.
+The target embodiment is new, so its action-head row is initialized randomly and trained with a $5\times$ learning-rate multiplier~\cite{cosmos3}.
+We write $\PT_T(\theta_0;\calD_\calT)$ for the weights after $T$ steps of this recipe (AdamW~\cite{kingma2015adam}, learning rate $5{\times}10^{-5}$ with warm-up and linear decay, batches of 256 windows, $T{=}2000$) from the initialization $\theta_0$.
+The standard pipeline uses the mid-trained weights, $\theta_0=\theta_{\mathrm{mid}}$.
+
+\subsection{Few-Shot Post-Training}
+\label{sec:problem}
+
+We consider the regime in which $\calD_\calT$ holds only $n$ demonstrations per task; we use $n{=}3$, \ie, 30 demonstrations and about 7.6k training windows per LIBERO suite for 1.42B trainable parameters.
+We deliberately keep the recipe fixed, so that the only free variable is the initialization, and ask: which $\theta_0$ maximizes the closed-loop performance of $\PT_T(\theta_0;\calD_\calT)$ when $\calD_\calT$ is small?
+\cref{fig:teaser} shows that $\theta_{\mathrm{mid}}$ is a poor answer.
+Mid-training minimizes $\E_{e}[\calL(\theta;\calD_e)]$ over a mixture of embodiments $e$, \ie, it looks for one set of weights that is good for all of them at once.
+Few-shot post-training needs something else: weights from which a short optimization on a \emph{new} embodiment lands in a good region.
+The two coincide only if the per-embodiment solutions lie close to the joint solution.
+We hypothesize that they do not, and that this mismatch, together with the randomly initialized action head, is what makes post-training from $\theta_{\mathrm{mid}}$ data hungry.
+
+\subsection{Few-Shot Meta Pre-Training}
+\label{sec:meta}
+
+We therefore add a stage that directly optimizes $\theta$ for being a good starting point of $\PT$ on an unseen embodiment, using source embodiments as stand-ins for the target.
+The procedure is summarized in \cref{alg:reptile}.
+
+\begin{algorithm}[t]
+\caption{\Method with Reptile}
+\label{alg:reptile}
+\begin{algorithmic}[1]
+\Require mid-trained weights $\theta_{\mathrm{mid}}$; source datasets $\{\calD_e\}_{e=1}^{E}$; post-training step $\PT$; $K$, $w$, $k$, $N$; schedule $\epsilon_1\ge\dots\ge\epsilon_N$
+\State $\theta\gets\theta_{\mathrm{mid}}$; initialize the shared action head randomly
+\For{$i=1,\dots,N$}
+  \State sample $e\sim\Unif\{1,\dots,E\}$ and $K$ demonstrations of $\calD_e$
+  \State $\calS_e\gets$ $w$ windows from each demonstration
+  \State $\tilde\theta_e\gets\PT_k(\theta;\calS_e)$ \Comment{$k$ steps of the post-training recipe, fresh optimizer state}
+  \State $\theta\gets\theta+\epsilon_i\,(\tilde\theta_e-\theta)$
+\EndFor
+\State \Return $\thmeta=\theta$ \Comment{trainable set and shared action head}
+\end{algorithmic}
+\end{algorithm}
+
+\paragraph{Source episodes}
+We use five robot datasets that are part of the mid-training mixture, each recorded with a different embodiment: RT-1 (Google Robot)~\cite{brohan2023rt1}, BridgeData~V2 (WidowX)~\cite{walke2023bridge}, the UR-5e and the Franka subsets of RoboMIND~\cite{wu2024robomind}, and the bimanual YAM data of MolmoAct~\cite{lee2025molmoact}, whose 20-D actions exercise the padded action representation.
+Every source is read through the same windowing and transformation pipeline as the target, so meta-training samples have exactly the format that post-training samples have.
+An episode samples an embodiment $e\sim\Unif\{1,\dots,5\}$ and $K$ demonstrations of $e$, and takes $w$ windows from each of them, giving a support set $\calS_e$ of $Kw$ windows.
+Sampling whole demonstrations rather than windows matters: the downstream data consists of a few complete trajectories, and the support set should have the same structure, a few trajectories with many windows each.
+
+\paragraph{Shared action head}
+The target embodiment arrives without an action head.
+To meta-learn the head as well, all source embodiments share one spare action-head row during meta pre-training, initialized from scratch like the downstream head.
+At post-training time this row is copied into the row of the target embodiment, so the target head starts from a meta-learned initialization instead of a random one; accordingly, it is trained with the base learning rate instead of the $5\times$ multiplier.
+
+\paragraph{Inner loop: the post-training recipe}
+From the current weights $\theta$, the inner loop runs $k$ steps of exactly the post-training optimizer on $\calS_e$: the same trainable set, the loss of \cref{eq:loss} with the same $\lambda_v,\lambda_a$, AdamW with the same learning rate and weight decay, the same gradient clipping, and a short warm-up; the optimizer state is reset at every episode.
+We write $\tilde\theta_e=\PT_k(\theta;\calS_e)$.
+Each inner step covers the whole support set, so $k$ steps correspond to $k$ passes over the $K$ demonstrations, a miniature of the downstream regime, in which 2000 steps cover the 30 demonstrations about 70 times.
+
+\paragraph{Outer update}
+Reptile~\cite{nichol2018reptile} then interpolates between the current and the adapted weights,
+\begin{equation}
+  \theta\leftarrow\theta+\epsilon\,(\tilde\theta_e-\theta),
+  \label{eq:reptile}
+\end{equation}
+with $\epsilon$ annealed linearly from 0.5 to 0.05 over the $N$ episodes.
+A fixed point of \cref{eq:reptile} is a point whose expected displacement under $k$-step adaptation vanishes, \ie, a centroid of the per-embodiment $k$-step solutions, from which the adaptation to each embodiment is short.
+Nichol \etal~\cite{nichol2018reptile} further show that for $k>1$ the expected update contains, besides the average gradient, a term that increases the inner product between the gradients of different minibatches of the same task.
+In our setting that term rewards weights for which fitting a few windows of an embodiment also reduces the loss on its remaining windows, which is precisely the generalization that few-shot post-training requires.
+
+\paragraph{Why Reptile}
+Three properties make Reptile the right tool at this scale.
+\emph{(i) Long inner horizon.}
+The downstream adaptation is 2000 optimizer steps.
+First-order MAML, whose meta-gradient is the query-set gradient at the adapted point, is optimized for the short inner horizon it is trained with; in preliminary experiments with a 5-step inner loop it produced initializations whose offset from $\theta_{\mathrm{mid}}$ the 2000-step post-training neither used nor undid.
+Reptile has no query set, and its $k$ is limited only by compute.
+\emph{(ii) Memory.}
+\cref{eq:reptile} needs one extra copy of the trainable parameters and nothing else; the model's own FSDP-sharded fp32 parameters~\cite{zhao2023fsdp} are the fast weights, and the standard trainer, optimizer, activation checkpointing, and checkpoint code run the inner loop unchanged.
+This is what makes meta-training the entire 1.42B-parameter trainable set affordable on four 48\,GB GPUs, whereas an inner loop with per-step fast weights or a query gradient at the adapted point would not fit.
+\emph{(iii) Compatibility.}
+The outer update is a convex combination of weights, so $\theta$ remains a valid checkpoint of the unchanged architecture at every iteration and is loaded by the post-training recipe without modification.
+Meta-training the whole trainable set rather than only the heads is important: in preliminary experiments, meta-learning only the action heads (an ANIL-style variant~\cite{raghu2020anil}) gave at most marginal gains (62.6\% versus 58.0\% on LIBERO-10, within evaluation noise), because full-parameter post-training then overwrites the small meta-learned subset.
+
+\subsection{Post-Training from the Meta Pre-Trained Weights}
+\label{sec:downstream}
+
+Post-training from $\thmeta$ differs from the baseline in exactly two places: the trainable set is loaded from $\thmeta$ instead of $\theta_{\mathrm{mid}}$, and the target action-head row is initialized from the shared meta-learned head and trained with a $1\times$ instead of a $5\times$ learning-rate multiplier.
+The frozen reasoner tower and tokenizers, the data pipeline, the loss, the optimizer, the schedule, the number of steps, and the inference procedure are unchanged.
+The same $\thmeta$ is used for every target suite and every data budget in \cref{sec:exp}; meta pre-training is a one-time cost of about 120 GPU-hours that is amortized over all downstream targets.

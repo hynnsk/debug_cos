@@ -1,0 +1,9 @@
+\begin{abstract}
+World action models (WAMs) that jointly generate future video and robot actions are pre-trained on web-scale video and cross-embodiment robot data, and are then post-trained on demonstrations of a target robot and environment.
+This recipe works well when hundreds of demonstrations are available, but we show that it degrades sharply in the practical regime where only a handful of demonstrations per task can be collected: post-training the mid-trained \base model on three demonstrations per task reduces the LIBERO success rate from 87--99\% to 49--83\%.
+We argue that mid-training on a multi-embodiment mixture is not the same as learning to \emph{adapt} from few demonstrations, and we close this gap with a \method stage inserted between mid-training and post-training.
+Using only the robot datasets already present in mid-training, the stage repeatedly simulates few-shot post-training---$k$ optimizer steps of the exact post-training recipe on $K$ demonstrations of one source embodiment---and moves the weights toward the adapted solution with the first-order Reptile update.
+Because the update is a plain interpolation in parameter space, all 1.4B trainable parameters of the post-training recipe can be meta-trained on four commodity GPUs with the standard sharded training stack, and the resulting checkpoint is a drop-in replacement for the mid-trained weights: the post-training recipe itself is unchanged.
+With three demonstrations per task, the meta pre-trained initialization improves the success rate on LIBERO-10, -Goal, -Spatial, and -Object from 58.0/48.8/72.0/82.8\% to 69.4/60.8/72.6/85.2\%, improving every one of the ten LIBERO-10 tasks.
+The benefit is not limited to the few-shot regime: with all demonstrations, LIBERO-10 improves from 87.2\% to 94.6\%.
+\end{abstract}

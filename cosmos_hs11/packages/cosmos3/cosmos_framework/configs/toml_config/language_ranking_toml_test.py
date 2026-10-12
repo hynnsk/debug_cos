@@ -101,43 +101,38 @@ def test_launcher_ports_are_distinct():
 _HARD_KEYS = ("negative_sampling", "hard_negative_fraction", "hard_negative_temperature", "hard_negative_prefix_frames")
 
 
-# (suite, version) -> (uniform sibling version, fraction, temperature, loss_weight, launcher port)
+# (suite, version) -> (uniform sibling version, launcher port). The knob VALUES are read from the TOML (the user tunes
+# them in place), so the test pins the structure: sibling + [model.language_ranking] + run name, routing, launcher, port.
 _HARD_FAMILY = {
-    ("goal", "v27"): ("v23", 0.7, 0.5, 1.0, 50127),
-    ("goal", "v28"): ("v23", 0.7, 0.5, 5.0, 50128),
-    ("goal", "v29"): ("v23", 1.0, 0.25, 1.0, 50129),
-    ("10", "v63"): ("v58", 0.7, 0.5, 1.0, 50130),
-    ("10", "v64"): ("v58", 0.7, 0.5, 5.0, 50131),
-    ("10", "v65"): ("v58", 1.0, 0.25, 1.0, 50132),
+    ("goal", "v27"): ("v23", 50127),
+    ("goal", "v28"): ("v23", 50128),
+    ("goal", "v29"): ("v23", 50129),
+    ("10", "v63"): ("v58", 50130),
+    ("10", "v64"): ("v58", 50131),
+    ("10", "v65"): ("v58", 50132),
 }
 
 
 @pytest.mark.parametrize("suite,version", sorted(_HARD_FAMILY))
 def test_hard_negative_recipes_are_the_uniform_sibling_plus_the_knobs_and_route_them(suite, version):
-    sibling_version, fraction, temperature, loss_weight, port = _HARD_FAMILY[(suite, version)]
+    sibling_version, port = _HARD_FAMILY[(suite, version)]
     directory = ROOT / "examples/toml/sft_config"
     raw = tomllib.loads((directory / f"action_policy_libero_{suite}_edge_reptileinit_{version}.toml").read_text())
     sibling = tomllib.loads((directory / f"action_policy_libero_{suite}_edge_reptileinit_{sibling_version}.toml").read_text())
     ranking = raw["model"]["language_ranking"]
-    assert ranking["enabled"] is True and ranking["margin"] == 0.1
+    assert ranking["enabled"] is True
     assert ranking["negative_sampling"] == "action_similarity"
-    assert ranking["hard_negative_fraction"] == fraction
-    assert ranking["hard_negative_temperature"] == temperature
-    assert ranking["hard_negative_prefix_frames"] == 64
-    assert ranking["loss_weight"] == loss_weight
+    assert 0.0 <= ranking["hard_negative_fraction"] <= 1.0 and ranking["hard_negative_temperature"] > 0
+    assert ranking["hard_negative_prefix_frames"] == 64 and ranking["margin"] > 0 and ranking["loss_weight"] > 0
     stripped = copy.deepcopy(raw)
-    stripped["model"]["language_ranking"] = {
-        **{k: v for k, v in ranking.items() if k not in _HARD_KEYS}, "loss_weight": sibling["model"]["language_ranking"]["loss_weight"]
-    }
+    stripped["model"]["language_ranking"] = sibling["model"]["language_ranking"]
     stripped["job"]["name"] = sibling["job"]["name"]
-    assert stripped == sibling  # nothing but the ranking knobs and the run name differs from the uniform sibling
+    assert stripped == sibling  # nothing but the ranking section and the run name differs from the uniform sibling
     SFTExperimentConfig.model_validate(raw)
     overrides = build_hydra_overrides(raw)
     assert "model.config.language_ranking.negative_sampling=action_similarity" in overrides
-    assert f"model.config.language_ranking.hard_negative_fraction={fraction}" in overrides
-    assert f"model.config.language_ranking.hard_negative_temperature={temperature}" in overrides
-    assert "model.config.language_ranking.hard_negative_prefix_frames=64" in overrides
-    assert f"model.config.language_ranking.loss_weight={loss_weight}" in overrides
+    for key in ("hard_negative_fraction", "hard_negative_temperature", "hard_negative_prefix_frames", "loss_weight", "margin"):
+        assert f"model.config.language_ranking.{key}={ranking[key]}" in overrides
     assert not any("hard_negative" in o or "negative_sampling" in o for o in build_hydra_overrides(sibling))
     launcher = (ROOT / f"examples/launch_sft_action_policy_libero_{suite}_edge_reptileinit_{version}.sh").read_text()
     assert f"action_policy_libero_{suite}_edge_reptileinit_{version}.toml" in launcher
@@ -152,13 +147,19 @@ def test_run_names_in_the_family_are_distinct():
     assert len(names) == len(_HARD_FAMILY)
 
 
-def test_no_other_recipe_sets_the_hard_negative_knobs():
-    family = {f"action_policy_libero_{s}_edge_reptileinit_{v}" for s, v in _HARD_FAMILY}
+def test_every_recipe_with_hard_negative_knobs_is_a_valid_enabled_ranking_recipe():
+    """User variants (v30, v66, ...) may add the knobs freely; each must validate, enable ranking and use a known mode."""
+    seen = 0
     for p in sorted((ROOT / "examples/toml/sft_config").glob("*.toml")):
-        if p.stem in family:
+        raw = tomllib.loads(p.read_text())
+        ranking = raw.get("model", {}).get("language_ranking", {})
+        if not (set(ranking) & set(_HARD_KEYS)):
             continue
-        ranking = tomllib.loads(p.read_text()).get("model", {}).get("language_ranking", {})
-        assert not (set(ranking) & set(_HARD_KEYS)), p.name
+        seen += 1
+        assert ranking.get("enabled") is True, p.name
+        assert ranking.get("negative_sampling") in ("uniform", "action_similarity"), p.name
+        SFTExperimentConfig.model_validate(raw)
+    assert seen >= len(_HARD_FAMILY)
 
 
 def test_hard_negative_validation_and_defaults():

@@ -1,0 +1,52 @@
+%% Additional packages and macros for this paper (loaded before hyperref).
+
+\usepackage{booktabs}
+\usepackage{multirow}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc,shapes.misc}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+%% Tighter captions and figure spacing
+\setlength{\abovecaptionskip}{4pt}
+\setlength{\belowcaptionskip}{0pt}
+\setlength{\textfloatsep}{10pt plus 2pt minus 2pt}
+\setlength{\floatsep}{8pt plus 2pt minus 2pt}
+
+%% Inline annotations
+\newcommand{\red}[1]{{\color{red}#1}}
+\newcommand{\todo}[1]{{\color{red}#1}}
+\newcommand{\TODO}[1]{\textbf{\color{red}[TODO: #1]}}
+%% Disable for camera ready / submission by uncommenting these lines:
+% \renewcommand{\TODO}[1]{}
+% \renewcommand{\todo}[1]{#1}
+
+%% Paragraph headings with a trailing period
+\renewcommand{\paragraph}[1]{\vspace{4pt}\noindent\textbf{#1.}}
+
+%% Method / model names
+\usepackage{xspace}
+\newcommand{\method}{few-shot meta pre-training\xspace}
+\newcommand{\Method}{Few-shot meta pre-training\xspace}
+\newcommand{\base}{Cosmos3-Edge\xspace}
+\newcommand{\basept}{Cosmos3-Edge-PT\xspace}
+\newcommand{\metapt}{Cosmos3-Edge-META-PT\xspace}
+\newcommand{\thmeta}{\theta_{\mathrm{meta}}}
+
+%% Math
+\DeclareMathOperator*{\argmin}{arg\,min}
+\DeclareMathOperator*{\argmax}{arg\,max}
+\DeclareMathOperator{\Unif}{Unif}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\calL}{\mathcal{L}}
+\newcommand{\calD}{\mathcal{D}}
+\newcommand{\calE}{\mathcal{E}}
+\newcommand{\calS}{\mathcal{S}}
+\newcommand{\calT}{\mathcal{T}}
+\newcommand{\calA}{\mathcal{A}}
+\newcommand{\PT}{\mathrm{PT}}

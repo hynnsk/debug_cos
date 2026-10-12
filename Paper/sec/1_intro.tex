@@ -1,0 +1,47 @@
+\section{Introduction}
+\label{sec:intro}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{fig/fig1_data_scarcity.pdf}
+  \caption{\textbf{Few-shot post-training collapses.}
+  Closed-loop success rate of the mid-trained \base world action model after post-training on all demonstrations of each LIBERO suite (blue; 379--454 demonstrations, about 40 per task) and on three demonstrations per task (orange; 30 per suite), with the post-training recipe otherwise identical.
+  The same recipe loses 16 to 49 points when demonstrations are scarce.
+  Every bar is 50 trials on each of the 10 tasks of a suite.}
+  \label{fig:teaser}
+\end{figure}
+
+Robot learning is converging on a two-stage recipe.
+A large model is first pre-trained on web-scale video and on cross-embodiment robot data, and is then \emph{post-trained} on demonstrations collected with the target robot in the target environment.
+World action models (WAMs), which generate future video and robot actions jointly within one network~\cite{du2023unipi,wu2024gr1,zhu2025uwm,cen2025worldvla,cosmos3}, are the latest instance of this recipe: the video objective provides a dense, embodiment-agnostic training signal, and the action objective turns the same network into a policy.
+When the post-training set is large, the recipe is remarkably effective.
+On the four LIBERO suites~\cite{liu2023libero}, post-training the mid-trained \base WAM~\cite{cosmos3} on all available demonstrations reaches 87--99\% success (\cref{fig:teaser}, blue).
+
+Demonstrations, however, are the most expensive ingredient of this pipeline.
+Every new robot, workcell, or task requires a person to teleoperate it, and in many deployments only a handful of demonstrations per task is affordable.
+We therefore ask how the standard recipe behaves when the post-training set is small, and define a \emph{few-shot post-training} protocol: three demonstrations per task, \ie, 30 demonstrations per LIBERO suite, with the post-training recipe otherwise unchanged.
+The answer is sobering.
+Success drops by 16 to 49 points (\cref{fig:teaser}, orange), to 58.0\% on LIBERO-10 and 48.8\% on LIBERO-Goal.
+A world model that has been trained on millions of robot and human videos cannot turn 30 demonstrations into a reliable policy.
+
+Why does so much prior knowledge help so little?
+Post-training updates 1.4B parameters of the generator tower and the action heads on roughly 7.6k training windows, and the action head of the new embodiment is initialized from scratch.
+More fundamentally, mid-training optimizes the weights for the \emph{joint} objective over a mixture of embodiments, and nothing in that objective asks the weights to be a good \emph{starting point} for a short fine-tune on an embodiment outside the mixture.
+Being good at many embodiments and being quick to adapt to a new one are different properties.
+This distinction is the premise of gradient-based meta-learning~\cite{finn2017maml,nichol2018reptile}, which so far has been applied to small policies on a few tasks of one robot rather than to billion-parameter world models.
+
+We bring this idea to WAMs with a \method stage inserted between mid-training and post-training (\cref{fig:method}).
+The stage uses no new data: it draws episodes from five robot datasets that are already part of the mid-training mixture, each recorded with a different embodiment.
+In every episode it simulates the downstream problem, $K$ demonstrations of one source embodiment and $k$ steps of the exact post-training optimizer, loss, and trainable set, and then moves the weights a fraction of the way toward the adapted solution: the Reptile update~\cite{nichol2018reptile}.
+Reptile is well matched to this scale.
+Its update is first-order and needs neither a query set nor a second forward pass at the adapted point, so the model's own sharded parameters serve as the fast weights, the standard FSDP training stack~\cite{zhao2023fsdp} runs the inner loop unchanged, and the only extra state is one copy of the trainable parameters.
+The resulting checkpoint $\thmeta$ is a drop-in replacement for the mid-trained weights, and we post-train from it with the unchanged recipe.
+
+On the four LIBERO suites with three demonstrations per task, post-training from $\thmeta$ instead of the mid-trained weights raises the success rate from 58.0/48.8/72.0/82.8\% to 69.4/60.8/72.6/85.2\% and improves every one of the ten LIBERO-10 tasks.
+The initialization also helps when data is plentiful: with all LIBERO-10 demonstrations the success rate rises from 87.2\% to 94.6\%.
+In summary, our contributions are:
+\begin{itemize}
+  \item We identify and quantify the few-shot post-training problem of WAMs with a three-demonstrations-per-task protocol on the four LIBERO suites, on which the standard recipe loses 16--49 points.
+  \item We propose \method, a Reptile-based stage between mid-training and post-training that optimizes the entire trainable set of the post-training recipe for few-shot adaptation, needs no additional data, and leaves the architecture and the post-training recipe unchanged.
+  \item We show consistent gains on all four suites in the few-shot regime (+6.6 points on average, up to +12.0) and a +7.4 point gain with full data.
+\end{itemize}

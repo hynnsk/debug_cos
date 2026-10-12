@@ -1,0 +1,214 @@
+{
+  "suite": "libero_10",
+  "libero_root": "/gallery_moma/hyunseok.seong/project/cosmos_storage/data/LIBERO_LeRobot_v3/libero_10",
+  "episode_subset": "/gallery_moma/hyunseok.seong/project/cosmos_hs11/packages/cosmos3/cosmos_framework/data/generator/action/episode_subsets/libero_10_1ep_per_task_v1.json",
+  "views": "both",
+  "stride": 1,
+  "scale": 1.0,
+  "fps": 20.0,
+  "only_episodes": "all",
+  "episodes": {
+    "3": {
+      "episode_index": 3,
+      "task": "put the yellow and white mug in the microwave and close it",
+      "episode_length": 285,
+      "gif_frames": 285,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_1ep_v1_gifs/libero_10/put the yellow and white mug in the microwave and close it/ep003.gif",
+      "bytes": 11788849,
+      "task_index": 5
+    },
+    "7": {
+      "episode_index": 7,
+      "task": "put both the alphabet soup and the cream cheese box in the basket",
+      "episode_length": 272,
+      "gif_frames": 272,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_1ep_v1_gifs/libero_10/put both the alphabet soup and the cream cheese box in the basket/ep007.gif",
+      "bytes": 13472872,
+      "task_index": 9
+    },
+    "64": {
+      "episode_index": 64,
+      "task": "pick up the book and place it in the back compartment of the caddy",
+      "episode_length": 189,
+      "gif_frames": 189,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_1ep_v1_gifs/libero_10/pick up the book and place it in the back compartment of the caddy/ep064.gif",
+      "bytes": 8462464,
+      "task_index": 4
+    },
+    "88": {
+      "episode_index": 88,
+      "task": "put the white mug on the left plate and put the yellow and white mug on the right plate",
+      "episode_length": 269,
+      "gif_frames": 269,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_1ep_v1_gifs/libero_10/put the white mug on the left plate and put the yellow and white mug on the right plate/ep088.gif",
+      "bytes": 12747824,
+      "task_index": 2
+    },
+    "113": {
+      "episode_index": 113,
+      "task": "put the white mug on the plate and put the chocolate pudding to the right of the plate",
+      "episode_length": 247,
+      "gif_frames": 247,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_1ep_v1_gifs/libero_10/put the white mug on the plate and put the chocolate pudding to the right of the plate/ep113.gif",
+      "bytes": 12449237,
+      "task_index": 6
+    },
+    "117": {
+      "episode_index": 117,
+      "task": "put both the cream cheese box and the butter in the basket",
+      "episode_length": 258,
+      "gif_frames": 258,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_1ep_v1_gifs/libero_10/put both the cream cheese box and the butter in the basket/ep117.gif",
+      "bytes": 12412862,
+      "task_index": 7
+    },
+    "156": {
+      "episode_index": 156,
+      "task": "put both the alphabet soup and the tomato sauce in the basket",
+      "episode_length": 255,
+      "gif_frames": 255,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_1ep_v1_gifs/libero_10/put both the alphabet soup and the tomato sauce in the basket/ep156.gif",
+      "bytes": 12723939,
+      "task_index": 1
+    },
+    "314": {
+      "episode_index": 314,
+      "task": "put both moka pots on the stove",
+      "episode_length": 383,
+      "gif_frames": 383,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_1ep_v1_gifs/libero_10/put both moka pots on the stove/ep314.gif",
+      "bytes": 15914324,
+      "task_index": 8
+    },
+    "319": {
+      "episode_index": 319,
+      "task": "put the black bowl in the bottom drawer of the cabinet and close it",
+      "episode_length": 237,
+      "gif_frames": 237,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_1ep_v1_gifs/libero_10/put the black bowl in the bottom drawer of the cabinet and close it/ep319.gif",
+      "bytes": 11079335,
+      "task_index": 3
+    },
+    "361": {
+      "episode_index": 361,
+      "task": "turn on the stove and put the moka pot on it",
+      "episode_length": 301,
+      "gif_frames": 301,
+      "gif_fps": 20.0,
+      "gif_size_hw": [
+        256,
+        512
+      ],
+      "gif": "/gallery_moma/hyunseok.seong/project/utils/libero_1ep_v1_gifs/libero_10/turn on the stove and put the moka pot on it/ep361.gif",
+      "bytes": 14906689,
+      "task_index": 0
+    }
+  },
+  "tasks": {
+    "0": {
+      "task": "turn on the stove and put the moka pot on it",
+      "episodes": [
+        361
+      ]
+    },
+    "1": {
+      "task": "put both the alphabet soup and the tomato sauce in the basket",
+      "episodes": [
+        156
+      ]
+    },
+    "2": {
+      "task": "put the white mug on the left plate and put the yellow and white mug on the right plate",
+      "episodes": [
+        88
+      ]
+    },
+    "3": {
+      "task": "put the black bowl in the bottom drawer of the cabinet and close it",
+      "episodes": [
+        319
+      ]
+    },
+    "4": {
+      "task": "pick up the book and place it in the back compartment of the caddy",
+      "episodes": [
+        64
+      ]
+    },
+    "5": {
+      "task": "put the yellow and white mug in the microwave and close it",
+      "episodes": [
+        3
+      ]
+    },
+    "6": {
+      "task": "put the white mug on the plate and put the chocolate pudding to the right of the plate",
+      "episodes": [
+        113
+      ]
+    },
+    "7": {
+      "task": "put both the cream cheese box and the butter in the basket",
+      "episodes": [
+        117
+      ]
+    },
+    "8": {
+      "task": "put both moka pots on the stove",
+      "episodes": [
+        314
+      ]
+    },
+    "9": {
+      "task": "put both the alphabet soup and the cream cheese box in the basket",
+      "episodes": [
+        7
+      ]
+    }
+  }
+}

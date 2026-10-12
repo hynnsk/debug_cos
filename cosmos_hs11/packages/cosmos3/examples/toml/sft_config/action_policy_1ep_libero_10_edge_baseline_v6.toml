@@ -1,0 +1,74 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# cosmos_hs11 1-DEMO recipe (libero_10, baseline v1): copied from action_policy_libero_goal_edge_baseinit_v7.toml -- same optimizer, schedule (1000 iters,
+# warmup 100, cycle 1000), batch (shard 2 x 128 = 256), EMA, validation and init (FRESH Cosmos3-Edge init (base DCP, fresh LIBERO action heads, 5x head LR));
+# ONLY the training subset changed: libero_10_1ep_per_task_v1.json = ONE demo per task (10 episodes), each drawn from
+# the task's 3 demos of the 3-demo subset (see cosmos_framework/scripts/make_libero_1ep_from_3ep_subset.py), i.e. a strict
+# subset of the 3-demo training set; val = the suite's 5-demo/task held-out json. 1000 x 256 windows ~ 200+ epochs over
+# ~1.1 k windows. LIBERO_ROOT must point at <dir>/libero_10. See docs/action_reptile_meta.md, section 10c.
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_libero_edge"
+project      = "cosmos3_action_libero"
+group        = "edge_libero10_fewshot"
+name         = "edge_libero10_1ep_fullft_baseinit_v6"
+wandb_mode   = "offline"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+lora_enabled = false            # full fine-tune, no adapters
+
+[model.ema]
+enabled         = true
+rate            = 0.1
+iteration_shift = 0
+
+[model.parallelism]
+data_parallel_shard_degree     = 2      # 2-GPU run: NPROC_PER_NODE=2 sr 2 48 ... (global batch = 128 windows/rank x 2 ranks = 256)
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 5.0e-05          # full-FT LR of the recipe
+
+[optimizer.lr_multipliers]
+action2llm            = 5.0   # fresh-head boost of the hs08 fresh-init baseline (= the experiment default); 1x in the reptileinit recipe
+llm2action            = 5.0
+action_modality_embed = 5.0
+
+[scheduler]
+cycle_lengths = [2000]        # linear decay to 0 at max_iter (matches the cosmos_hs08 baseline)
+warm_up_steps = [200]
+
+[trainer]
+max_iter        = 2000
+logging_iter    = 20
+grad_accum_iter = 1              # global 256 = 128 windows/rank x 2 ranks
+# held-out validation (same windows as the reptileinit v3 recipe of this suite)
+run_validation          = true
+run_validation_on_start = true   # iteration 0 = the base Cosmos3-Edge model with fresh action heads, before any update
+validation_iter         = 200
+max_val_iter            = 16     # x 16 windows/rank x 2 ranks = 512 windows per pass (same windows every time)
+
+[dataloader_train]
+max_samples_per_batch = 64       # per rank; x 2 ranks = global batch 256
+episode_subset_path   = "libero_10_1ep_per_task_v1.json"        # 1 demo/task x 10 tasks = 10 episodes (libero_10), each from the 3-demo subset
+
+[dataloader_val]
+max_samples_per_batch = 16
+episode_subset_path   = "libero_10_val_5ep_per_task_seed42_excl3ep.json"  # 5 held-out demos/task, disjoint from train (libero_10)
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"   # mid-trained Cosmos3-Edge DCP dir (NOT a Reptile iteration dir)
+save_iter = 2000
+# No keys_to_skip_loading / meta_action_init_* here on purpose: the experiment default skips the LIBERO action heads of the
+# base DCP (fresh heads), which is what the 5x head LR multiplier above is for.
