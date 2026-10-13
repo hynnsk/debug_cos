@@ -1,0 +1,79 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# cosmos_hs11 1-DEMO recipe (libero_object, reptileinit v1): copied from action_policy_libero_goal_edge_reptileinit_v7.toml -- same optimizer, schedule (1000 iters,
+# warmup 100, cycle 1000), batch (shard 2 x 128 = 256), EMA, validation and init (REPTILE init (REPTILE_CKPT_PATH DCP + META_ACTION_INIT_PATH heads, 2x head LR));
+# ONLY the training subset changed: libero_object_1ep_per_task_v1.json = ONE demo per task (10 episodes), each drawn from
+# the task's 3 demos of the 3-demo subset (see cosmos_framework/scripts/make_libero_1ep_from_3ep_subset.py), i.e. a strict
+# subset of the 3-demo training set; val = the suite's 5-demo/task held-out json. 1000 x 256 windows ~ 200+ epochs over
+# ~1.1 k windows. LIBERO_ROOT must point at <dir>/libero_object. See docs/action_reptile_meta.md, section 10c.
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_libero_edge"
+project      = "cosmos3_action_libero"
+group        = "edge_libero_object_fewshot"
+name         = "edge_libero_object_1ep_fullft_reptile_v2"
+wandb_mode   = "offline"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+lora_enabled = false            # full mode: theta lives in the DCP weights themselves, no adapters
+
+[model.ema]
+enabled         = true
+rate            = 0.1
+iteration_shift = 0
+
+[model.parallelism]
+data_parallel_shard_degree     = 2      # 4-GPU run: NPROC_PER_NODE=4 sr 4 48 ...
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 5.0e-05          # full-FT LR of the recipe
+
+[optimizer.lr_multipliers]
+action2llm            = 10.0   # 5x in the fresh-head baseline; heads are meta-initialized here -> 1x
+llm2action            = 10.0
+action_modality_embed = 10.0
+
+[scheduler]
+cycle_lengths = [500]        # linear decay to 0 at max_iter (matches the cosmos_hs08 baseline)
+warm_up_steps = [50]
+
+[trainer]
+max_iter        = 500
+logging_iter    = 20
+grad_accum_iter = 1              # global 256 = 64 windows/rank x 4 ranks (2-GPU alternative: shard 2, bs 64, accum 2)
+# held-out validation
+run_validation          = true
+run_validation_on_start = true   # iteration 0 = the Reptile-initialized model before any update
+validation_iter         = 200
+max_val_iter            = 16     # x 64 windows x 4 ranks = 4096 windows ~= half of the 50-episode val set (same windows every time)
+
+[dataloader_train]
+max_samples_per_batch = 128       # per rank; x 4 ranks = global batch 256
+episode_subset_path   = "libero_object_1ep_per_task_v1.json"        # 1 demo/task x 10 tasks = 10 episodes (libero_object), each from the 3-demo subset
+
+[dataloader_val]
+max_samples_per_batch = 16
+episode_subset_path   = "libero_object_val_5ep_per_task_seed42_excl3ep.json"  # 5 held-out demos/task, disjoint from train (libero_object)
+
+[checkpoint]
+load_path = "${oc.env:REPTILE_CKPT_PATH}"   # <reptile job>/checkpoints/iter_XXXXXXXXX (NOT the base Cosmos3-Edge dir)
+save_iter = 500
+# The Reptile DCP has no EMA; the action heads are skipped (fresh) and then overwritten by the meta heads below.
+keys_to_skip_loading = ["net_ema.", "action2llm", "llm2action", "action_modality_embed"]
+meta_action_init_path                   = "${oc.env:META_ACTION_INIT_PATH}"
+meta_action_init_domain_id              = 5      # EMBODIMENT_TO_DOMAIN_ID["libero"]
+meta_action_init_include_modality_embed = true
+meta_action_init_include_lora           = false  # full mode: no adapters
+meta_action_init_include_time_embedder  = false  # already in the DCP weights

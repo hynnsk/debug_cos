@@ -21,7 +21,7 @@
 TOML_FILE="${TOML_FILE:-examples/toml/sft_config/action_policy_1ep_libero_object_edge_baseline_v1.toml}"
 export LIBERO_ROOT="${LIBERO_ROOT:-}"
 : "${BASE_CHECKPOINT_PATH:=examples/checkpoints/Cosmos3-Edge}"
-: "${MASTER_PORT:=50144}"   # distinct per suite/recipe so concurrent jobs can share a node (1ep v1 recipes: 50140-50147)
+: "${MASTER_PORT:=50149}"   # distinct per suite/recipe so concurrent jobs can share a node (1ep v1 recipes: 50140-50147)
 export MASTER_PORT
 
 EXTRA_DATASET_CHECK='[[ -f "$LIBERO_ROOT/meta/info.json" ]] || { echo "ERROR: LIBERO_ROOT must be a local LeRobot dir containing meta/info.json (got: '\''$LIBERO_ROOT'\'')." >&2; exit 1; }; [[ "$(basename "${LIBERO_ROOT%/}")" == "libero_object" ]] || { echo "ERROR: this launcher trains the libero_object suite (its episode-subset jsons are suite specific) but LIBERO_ROOT is '\''$LIBERO_ROOT'\''. Point LIBERO_ROOT at <dir>/libero_object." >&2; exit 1; }'

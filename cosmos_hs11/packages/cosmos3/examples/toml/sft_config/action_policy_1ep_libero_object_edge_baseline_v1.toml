@@ -46,11 +46,11 @@ llm2action            = 5.0
 action_modality_embed = 5.0
 
 [scheduler]
-cycle_lengths = [1000]        # linear decay to 0 at max_iter (matches the cosmos_hs08 baseline)
-warm_up_steps = [100]
+cycle_lengths = [500]        # linear decay to 0 at max_iter (matches the cosmos_hs08 baseline)
+warm_up_steps = [50]
 
 [trainer]
-max_iter        = 1000
+max_iter        = 500
 logging_iter    = 20
 grad_accum_iter = 1              # global 256 = 128 windows/rank x 2 ranks
 # held-out validation (same windows as the reptileinit v3 recipe of this suite)
@@ -60,7 +60,7 @@ validation_iter         = 200
 max_val_iter            = 16     # x 16 windows/rank x 2 ranks = 512 windows per pass (same windows every time)
 
 [dataloader_train]
-max_samples_per_batch = 128       # per rank; x 2 ranks = global batch 256
+max_samples_per_batch = 64       # per rank; x 2 ranks = global batch 256
 episode_subset_path   = "libero_object_1ep_per_task_v1.json"        # 1 demo/task x 10 tasks = 10 episodes (libero_object), each from the 3-demo subset
 
 [dataloader_val]
@@ -69,6 +69,6 @@ episode_subset_path   = "libero_object_val_5ep_per_task_seed42_excl3ep.json"  # 
 
 [checkpoint]
 load_path = "${oc.env:BASE_CHECKPOINT_PATH}"   # mid-trained Cosmos3-Edge DCP dir (NOT a Reptile iteration dir)
-save_iter = 1000
+save_iter = 500
 # No keys_to_skip_loading / meta_action_init_* here on purpose: the experiment default skips the LIBERO action heads of the
 # base DCP (fresh heads), which is what the 5x head LR multiplier above is for.

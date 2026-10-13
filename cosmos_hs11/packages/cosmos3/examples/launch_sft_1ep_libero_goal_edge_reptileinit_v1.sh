@@ -19,7 +19,7 @@ TOML_FILE="${TOML_FILE:-examples/toml/sft_config/action_policy_1ep_libero_goal_e
 export LIBERO_ROOT="${LIBERO_ROOT:-}"
 export REPTILE_CKPT_PATH="${REPTILE_CKPT_PATH:-}"
 export META_ACTION_INIT_PATH="${META_ACTION_INIT_PATH:-}"
-: "${MASTER_PORT:=50143}"   # distinct per suite/recipe (1ep v1 recipes: 50140-50147)
+: "${MASTER_PORT:=50144}"   # distinct per suite/recipe (1ep v1 recipes: 50140-50147)
 export MASTER_PORT
 # _sft_launcher_common.sh validates BASE_CHECKPOINT_PATH / defaults WAN_VAE_PATH when this is set; the TOML itself
 # reads REPTILE_CKPT_PATH.
