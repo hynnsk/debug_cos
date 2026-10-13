@@ -215,6 +215,37 @@ per-demonstration and per-task sample counts equal. Knob = `get_action_libero_sf
 experiment default is False, so no other recipe changes. Validation keeps the window-uniform held-out pass. Tests:
 `datasets/action_sft_dataset_test.py`, `toml_config/libero_sampling_toml_test.py`.
 
+## 7c. v4.1-v4.3: grouped meta-episodes, embodiment weights, no inner-loop CFG dropout (2026-10-13)
+
+Why: the v4 init adapts fast on LIBERO-goal/spatial/10 but *loses* on LIBERO-object (base 90.2 -> Reptile 85, failures =
+grasping another object). A v4 meta-episode is `k_shot` demonstrations drawn uniformly over one embodiment, and in three of
+the five sources the instruction carries no information beyond the scene (bridge: ~1 demo per unique sentence;
+robomind_franka: 2 bread sentences; yam: 1 sentence per repo), so the inner loop never has to read the instruction to fit
+the support set. The object suite is the opposite regime: one scene family, ten nouns, three demos each. Three knobs,
+all in `[custom.meta]` and all off in v4 (v4 is untouched):
+
+| key | v4 | meaning |
+| --- | --- | --- |
+| `grouped_episode_fraction` | 0.0 | probability that an episode is **grouped**: `tasks_per_episode` tasks x `k_shot / tasks_per_episode` demos of ONE embodiment instead of the uniform draw. 0 = the original sampler bit for bit (the coin is only tossed when > 0). |
+| `tasks_per_episode` | unset | tasks per grouped episode; must divide `k_shot`. Tasks with fewer than `d` usable demos are skipped; if fewer than T tasks qualify (franka has 2) the missing slots are filled uniformly, so a support set is always `k_shot` distinct demos. |
+| `cfg_dropout_rate` | 0.1 (experiment default) | inner-loop text dropout. 0.0 = the instruction is never dropped while shaping the init; post-training keeps its own 0.1 for CFG. |
+| `[custom.meta.embodiment_weights]` | uniform | `p(embodiment)` per episode (already existed). |
+
+| recipe | `[custom.meta]` additions on top of v4 | run name | port |
+| --- | --- | --- | --- |
+| `action_reptile_meta_edge_v4.1` | `cfg_dropout_rate 0.0`, `grouped_episode_fraction 0.5`, `tasks_per_episode 8` (8 x 4 = 32) | `edge_reptile_v4.1_my_4gpu_grouped_nocfg` | 50096 |
+| `action_reptile_meta_edge_v4.2` | `cfg_dropout_rate 0.0`, weights fractal .3 / bridge .25 / robomind_ur .25 / franka .1 / yam .1 | `edge_reptile_v4.2_my_4gpu_embw_nocfg` | 50097 |
+| `action_reptile_meta_edge_v4.3` | `cfg_dropout_rate 0.0` | `edge_reptile_v4.3_my_4gpu_nocfg` | 50098 |
+
+Launchers `examples/launch_reptile_meta_edge_v4.{1,2,3}.sh` (= the v4 launcher with the TOML and port swapped). The
+trainer logs `grouped_fraction` (share of grouped episodes in the meta step) and `num_support_tasks` (distinct tasks per
+support set; ~32 for a uniform fractal/bridge episode, 8 for a grouped one), and the sampler's constructor log line states
+the grouped geometry. Implementation: `EpisodicEmbodimentSampler(tasks_per_episode, grouped_episode_fraction)` +
+`_grouped_support` in `meta/episodic_sampler.py`, `SAMPLER_OVERRIDE_KEYS`, the edge/nano experiment LazyCalls,
+`MetaEpisodeSpec.grouped`. Tests: `meta/episodic_sampler_test.py` (fraction 0 == original stream, T x d structure, uniform
+fill, mixing, validation) and `toml_config/reptile_toml_test.py` (v4 + keys only, routing onto the loader config, launchers,
+ports). Not GPU-smoked.
+
 ## 8. Post-training variants on the Reptile init: DINOv2 REPA and masked V-JEPA 2.1
 
 Both add an auxiliary representation objective to the plain `action_policy_libero_10_edge_reptileinit.toml` recipe; the

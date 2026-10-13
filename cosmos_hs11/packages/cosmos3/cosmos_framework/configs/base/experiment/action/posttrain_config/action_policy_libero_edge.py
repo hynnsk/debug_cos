@@ -58,6 +58,10 @@ def _action_policy_libero_edge_model_config() -> dict:
         hard_negative_fraction=0.0,
         hard_negative_temperature=0.5,
         hard_negative_prefix_frames=64,
+        # cosmos_hs11 v24 family: loss-side knobs (asymmetric gradient, relative margin, self-paced hinge); all off.
+        negative_grad_scale=1.0,
+        margin_mode="absolute",
+        self_paced_fraction=0.0,
     )
 
     return cfg

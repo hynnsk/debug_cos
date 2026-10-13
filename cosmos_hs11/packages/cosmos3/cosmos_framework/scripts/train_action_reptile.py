@@ -589,6 +589,9 @@ def launch(config: Config, cfg: ReptileTrainConfig, args: argparse.Namespace) ->
             disp = state.displacement_norms_by_group()
             ep_record = {
                 "embodiment": ep["embodiment"],
+                # cosmos_hs11 v4.1 grouped episodes (spec summary; absent in synthetic test episodes)
+                "grouped": bool((ep.get("spec") or {}).get("grouped", False)),
+                "num_support_tasks": float(len((ep.get("spec") or {}).get("support_tasks", []))),
                 "support_loss_first": _reduce_mean([inner_losses[0]]),
                 "support_loss_last": _reduce_mean([inner_losses[-1]]),
                 "inner_grad_norm": _mean(inner_gnorms),
@@ -660,6 +663,9 @@ def launch(config: Config, cfg: ReptileTrainConfig, args: argparse.Namespace) ->
                 if torch.cuda.is_available()
                 else 0.0,
                 "embodiments": [e["embodiment"] for e in per_ep],
+                # cosmos_hs11 v4.1: share of grouped episodes in this meta step and distinct tasks per support set
+                "grouped_fraction": _mean([float(e["grouped"]) for e in per_ep]),
+                "num_support_tasks": _mean([e["num_support_tasks"] for e in per_ep]),
             }
             if not (math.isnan(record["query_loss"]) or math.isnan(record["query_loss_zero_shot"])):
                 record["query_loss_gain"] = record["query_loss_zero_shot"] - record["query_loss"]

@@ -166,3 +166,50 @@ and its factory, the experiment config, `model_config.py`, `sft_config.py`. Test
 10-task LeRobot layout through the real constructor, subset handling, validation),
 `configs/toml_config/language_ranking_toml_test.py` (v27 inheritance, routing, pydantic bounds, loader wiring).
 Not GPU-smoked.
+
+## v24 family: asymmetric gradient, relative margin, self-paced hinge (2026-10-13)
+
+Closed-loop results of the uniform-negative recipes (50 trials/task, one seed): goal and spatial gain on top of the
+Reptile init, LIBERO-10 drops (69.6 -> 64.8) and object drops (85 -> 82) with the dominant object failure being
+"grasps another object". Two properties of the absolute hinge are suspected: the model can satisfy it by making the
+wrong-instruction prediction worse (noise through the text pathway into the action head), and windows whose motion does
+not depend on the instruction (lift / transport / release: 87 % of object chunks have a near-identical chunk in another
+task) can never reach an absolute gap, so the hinge never switches off there. Three optional, loss-side modifications
+address this; negatives stay uniform and the forward pass is unchanged
+(`model/generator/algorithm/loss/language_ranking.py`):
+
+```
+E_neg_g   = s * E_neg + (1 - s) * sg(E_neg)                      # negative_grad_scale s: 1 = original, 0 = positive-only
+margin_i  = margin                      (margin_mode = "absolute")
+          = margin * sg(E_pos_i)        (margin_mode = "relative":  E_neg >= (1 + margin) * E_pos)
+hinge_i   = relu(margin_i - (E_neg_g_i - E_pos_i))
+L_rank    = sum_i(hinge_i * valid_i * sel_i) / (B * q)          # self_paced_fraction q: sel = easiest ceil(q * n_valid)
+                                                                #   valid samples by detached gap_i - margin_i; q = 0 -> sel = valid, / B
+```
+
+| TOML key (`[model.language_ranking]`) | default | meaning |
+| --- | --- | --- |
+| `negative_grad_scale` | 1.0 | gradient scale through `E_neg`; the loss value is unchanged. 0.0 = positive-only (the hinge can only lower `E_pos`). |
+| `margin_mode` | `"absolute"` | `"relative"` scales `margin` by the sample's own detached `E_pos`. |
+| `self_paced_fraction` | 0.0 | 0 = off; otherwise only this fraction of the valid samples with the largest detached `gap - margin_i` is ranked, normalized by `batch * fraction`. |
+
+New metrics: `language_ranking_effective_margin` (mean `margin_i` over valid samples) and
+`language_ranking_selected_fraction` (selected / valid; 1.0 when self-pacing is off). `margin_satisfied` uses `margin_i`.
+
+Recipes: the uniform sibling verbatim (object v23 / LIBERO-10 v58) + run name + the knobs. All four arms use
+`negative_grad_scale = 0.2` (asymmetric; set 0.0 for positive-only), `loss_weight = 1.0`:
+
+| arm | object | LIBERO-10 | margin_mode / margin | self_paced_fraction | ports |
+| --- | --- | --- | --- | --- | --- |
+| asymmetric gradient only | `object_edge_reptileinit_v24` | `10_edge_reptileinit_v75` | absolute / 0.1 | 0 | 50224 / 50175 |
+| + relative margin | `object_edge_reptileinit_v25` | `10_edge_reptileinit_v76` | relative / 0.3 | 0 | 50225 / 50176 |
+| + self-paced hinge | `object_edge_reptileinit_v26` | `10_edge_reptileinit_v77` | absolute / 0.1 | 0.5 | 50226 / 50177 |
+| + both | `object_edge_reptileinit_v27` | `10_edge_reptileinit_v78` | relative / 0.3 | 0.5 | 50227 / 50178 |
+
+Relative margin 0.3 matches the absolute 0.1 at the Reptile init's val action error (~0.33) and then shrinks with it.
+Self-paced 0.5 keeps every batch's easier half; watch `language_ranking_selected_fraction` (0.5 by construction) together
+with `margin_satisfied` and `gap`: if the selected half saturates while `gap` of the rest stays ~0, the excluded windows
+are the instruction-independent ones. The knobs route like the others
+(`LanguageRankingTomlConfig` -> `model.config.language_ranking.*` -> `LanguageRankingConfig` -> `_compute_losses`).
+Tests: `loss/language_ranking_test.py` (value/gradient of each knob, production assembly) and
+`configs/toml_config/language_ranking_toml_test.py` (sibling + knobs structure, routing, launchers, ports). Not GPU-smoked.

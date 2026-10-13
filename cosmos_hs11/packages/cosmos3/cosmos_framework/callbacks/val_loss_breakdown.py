@@ -27,6 +27,7 @@ _DEFAULT_KEYS = (
     "language_ranking_loss", "language_ranking_weighted_loss",
     "language_ranking_positive_error", "language_ranking_negative_error",
     "language_ranking_gap", "language_ranking_margin_satisfied", "language_ranking_valid_fraction",
+    "language_ranking_effective_margin", "language_ranking_selected_fraction",  # cosmos_hs11 v24 family
 )
 
 

@@ -26,6 +26,13 @@ RECIPES = [
     ("10", "v63", "10", "v3"),
     ("10", "v64", "10", "v3"),
     ("10", "v65", "10", "v3"),
+    # loss-side knobs (cosmos_hs11 v24 family): LIBERO-10 = v58 + knobs (= v3 + section). The object arms (v24-v27)
+    # are checked against their sibling v23 in _LOSS_FAMILY below: object v3's optimizer was edited after v23 was
+    # copied (lr_multipliers 2.0 vs 10.0), so the source-equality assertion already fails for object v23 itself.
+    ("10", "v75", "10", "v3"),
+    ("10", "v76", "10", "v3"),
+    ("10", "v77", "10", "v3"),
+    ("10", "v78", "10", "v3"),
 ]
 
 
@@ -88,11 +95,12 @@ def test_loader_enables_negative_sampling_for_train_and_validation():
 
 
 def test_launcher_ports_are_distinct():
+    recipes = sorted({(suite, version) for suite, version, _, _ in RECIPES} | set(_HARD_FAMILY) | set(_LOSS_FAMILY))
     ports = []
-    for suite, version, _, _ in RECIPES:
+    for suite, version in recipes:
         shell = (ROOT / f"examples/launch_sft_action_policy_libero_{suite}_edge_reptileinit_{version}.sh").read_text()
         ports.append(re.search(r"MASTER_PORT:=(\d+)", shell).group(1))
-    assert len(set(ports)) == len(RECIPES)
+    assert len(set(ports)) == len(recipes)
 
 
 # ---------------------------------------------------------------------------------------------------------------
@@ -208,3 +216,83 @@ def test_experiment_routes_the_hard_negative_knobs_to_both_loaders():
         assert dataset.language_ranking_hard_fraction == 0.7
         assert dataset.language_ranking_hard_temperature == 0.25
         assert dataset.language_ranking_hard_prefix_frames == 32
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# cosmos_hs11 v24 family: asymmetric gradient / relative margin / self-paced hinge (loss-side knobs)
+# ---------------------------------------------------------------------------------------------------------------
+_LOSS_KEYS = ("negative_grad_scale", "margin_mode", "self_paced_fraction")
+
+# (suite, version) -> (uniform sibling, port, negative_grad_scale, margin_mode, margin, self_paced_fraction)
+_LOSS_FAMILY = {
+    ("object", "v24"): ("v23", 50224, 0.2, "absolute", 0.1, 0.0),
+    ("object", "v25"): ("v23", 50225, 0.2, "relative", 0.3, 0.0),
+    ("object", "v26"): ("v23", 50226, 0.2, "absolute", 0.1, 0.5),
+    ("object", "v27"): ("v23", 50227, 0.2, "relative", 0.3, 0.5),
+    ("10", "v75"): ("v58", 50175, 0.2, "absolute", 0.1, 0.0),
+    ("10", "v76"): ("v58", 50176, 0.2, "relative", 0.3, 0.0),
+    ("10", "v77"): ("v58", 50177, 0.2, "absolute", 0.1, 0.5),
+    ("10", "v78"): ("v58", 50178, 0.2, "relative", 0.3, 0.5),
+}
+
+
+@pytest.mark.parametrize("suite,version", sorted(_LOSS_FAMILY))
+def test_loss_knob_recipes_are_the_uniform_sibling_plus_the_knobs_and_route_them(suite, version):
+    sibling_version, port, scale, mode, margin, fraction = _LOSS_FAMILY[(suite, version)]
+    directory = ROOT / "examples/toml/sft_config"
+    raw = tomllib.loads((directory / f"action_policy_libero_{suite}_edge_reptileinit_{version}.toml").read_text())
+    sibling = tomllib.loads((directory / f"action_policy_libero_{suite}_edge_reptileinit_{sibling_version}.toml").read_text())
+    ranking = raw["model"]["language_ranking"]
+    assert ranking["enabled"] is True and ranking["loss_weight"] == sibling["model"]["language_ranking"]["loss_weight"]
+    assert (ranking["negative_grad_scale"], ranking["margin_mode"], ranking["margin"], ranking["self_paced_fraction"]) == (
+        scale, mode, margin, fraction
+    )
+    assert not any(k in ranking for k in _HARD_KEYS)  # negatives stay uniform: the knobs are purely loss-side
+    stripped = copy.deepcopy(raw)
+    stripped["model"]["language_ranking"] = sibling["model"]["language_ranking"]
+    stripped["job"]["name"] = sibling["job"]["name"]
+    assert stripped == sibling  # nothing but the ranking section and the run name differs from the uniform sibling
+    SFTExperimentConfig.model_validate(raw)
+    overrides = build_hydra_overrides(raw)
+    assert f"model.config.language_ranking.negative_grad_scale={scale}" in overrides
+    assert f"model.config.language_ranking.margin_mode={mode}" in overrides
+    assert f"model.config.language_ranking.self_paced_fraction={fraction}" in overrides
+    assert f"model.config.language_ranking.margin={margin}" in overrides
+    assert not any(any(k in o for k in _LOSS_KEYS) for o in build_hydra_overrides(sibling))
+    launcher = (ROOT / f"examples/launch_sft_action_policy_libero_{suite}_edge_reptileinit_{version}.sh").read_text()
+    assert f"action_policy_libero_{suite}_edge_reptileinit_{version}.toml" in launcher
+    assert f"MASTER_PORT:={port}" in launcher
+    subprocess.run(["bash", "-n", str(ROOT / f"examples/launch_sft_action_policy_libero_{suite}_edge_reptileinit_{version}.sh")], check=True)
+
+
+def test_loss_knob_family_run_names_are_distinct_and_defaults_are_off():
+    from cosmos_framework.configs.base.defaults.model_config import OmniMoTModelConfig
+
+    names = set()
+    for suite, version in _LOSS_FAMILY:
+        raw = tomllib.loads((ROOT / f"examples/toml/sft_config/action_policy_libero_{suite}_edge_reptileinit_{version}.toml").read_text())
+        names.add((raw["job"]["group"], raw["job"]["name"]))
+    assert len(names) == len(_LOSS_FAMILY)
+    defaults = OmniMoTModelConfig().language_ranking
+    assert (defaults.negative_grad_scale, defaults.margin_mode, defaults.self_paced_fraction) == (1.0, "absolute", 0.0)
+    base = dict(job=dict(task="vfm", experiment="action_policy_libero_edge"))
+    for key, bad in (("negative_grad_scale", 1.5), ("negative_grad_scale", -0.1), ("self_paced_fraction", 2.0),
+                     ("margin_mode", "scaled"), ("self_paced_fraction", float("nan"))):
+        with pytest.raises(ValidationError):
+            SFTExperimentConfig.model_validate({**base, "model": {"language_ranking": {key: bad}}})
+    cfg = OmegaConf_compose_loss_knobs()
+    assert cfg.model.config.language_ranking.margin_mode == "absolute"
+
+
+def OmegaConf_compose_loss_knobs():
+    """The experiment's structured defaults carry the knobs (Hydra rejects overrides for keys the schema lacks)."""
+    from omegaconf import OmegaConf
+
+    from cosmos_framework.configs.base.experiment.action.posttrain_config.action_policy_libero_edge import (
+        action_policy_libero_edge,
+    )
+
+    cfg = OmegaConf.create(action_policy_libero_edge, flags={"allow_objects": True})
+    for key in _LOSS_KEYS:
+        assert key in cfg.model.config.language_ranking
+    return cfg

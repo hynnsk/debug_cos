@@ -195,3 +195,67 @@ def test_synchronized_dataset_specs_identical_across_ranks_and_shards_disjoint()
     # a materialization failure is reported for the SAME spec id instead of desynchronizing the stream
     item = next(iter(ranks[0]))  # datasets == {} -> _load raises
     assert item["failed"] is True and item["spec_id"] == 0 and item["support"] == [] and "error" in item
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# cosmos_hs11 v4.1: grouped ("T tasks x d demos") meta-episodes
+# ---------------------------------------------------------------------------------------------------------------
+def _grouped_sampler(**kwargs) -> EpisodicEmbodimentSampler:
+    tables = {"many_tasks": _table(200, 40, 60), "two_tasks": _table(50, 2, 60)}  # 5 demos/task and 25 demos/task
+    return EpisodicEmbodimentSampler(
+        tables, {"many_tasks": 20, "two_tasks": 8}, k_shot=8, q_query=4, windows_per_demo=8, **kwargs
+    )
+
+
+def test_grouped_fraction_zero_reproduces_the_original_episode_stream() -> None:
+    base, off = _grouped_sampler(), _grouped_sampler(tasks_per_episode=4, grouped_episode_fraction=0.0)
+    for seed in range(20):
+        a, b = base.sample(np.random.default_rng(seed)), off.sample(np.random.default_rng(seed))
+        assert a == b and not b.grouped and b.summary()["grouped"] is False
+
+
+def test_grouped_episodes_are_tasks_times_demos_with_uniform_fill_when_tasks_are_scarce() -> None:
+    from collections import Counter
+
+    on = _grouped_sampler(tasks_per_episode=4, grouped_episode_fraction=1.0)
+    rng = np.random.default_rng(1)
+    seen = {"many_tasks": 0, "two_tasks": 0}
+    for _ in range(200):
+        spec = on.sample(rng)
+        seen[spec.embodiment] += 1
+        assert spec.grouped and spec.summary()["grouped"] is True
+        support_eps = {d.episode_index for d in spec.support}
+        assert len(spec.support) == 8 and len(support_eps) == 8  # always k_shot distinct demonstrations
+        assert not (support_eps & {d.episode_index for d in spec.query}) and len(spec.query) == 4
+        counts = Counter(d.task_index for d in spec.support)
+        if spec.embodiment == "many_tasks":
+            assert sorted(counts.values()) == [2, 2, 2, 2]  # 4 tasks x 2 demos, every task has 5 demos
+            assert spec.summary()["num_support_tasks"] == 4
+            assert not ({d.task_index for d in spec.support} & {d.task_index for d in spec.query})  # disjoint auto
+        else:
+            assert set(counts) == {0, 1} and all(c >= 2 for c in counts.values())  # 2 x 2 grouped + 4 uniform fill
+        for demo in spec.support:
+            assert len(demo.window_indices) == 8
+    assert min(seen.values()) > 0
+
+
+def test_grouped_fraction_mixes_episode_kinds_and_bad_settings_fail() -> None:
+    mixed = _grouped_sampler(tasks_per_episode=4, grouped_episode_fraction=0.5)
+    rng = np.random.default_rng(3)
+    grouped = sum(mixed.sample(rng).grouped for _ in range(400))
+    assert abs(grouped - 200) < 50, grouped  # binomial(400, 0.5)
+    with pytest.raises(ValueError):
+        _grouped_sampler(tasks_per_episode=4, grouped_episode_fraction=1.5)
+    with pytest.raises(ValueError):
+        _grouped_sampler(grouped_episode_fraction=0.5)  # tasks_per_episode required
+    with pytest.raises(ValueError):
+        _grouped_sampler(tasks_per_episode=3, grouped_episode_fraction=0.5)  # 8 % 3 != 0
+
+
+def test_meta_sampler_config_and_override_keys_carry_the_grouped_knobs() -> None:
+    from cosmos_framework.data.generator.action.meta.episodic_sampler import MetaSamplerConfig
+    from cosmos_framework.scripts.train_action_meta import SAMPLER_OVERRIDE_KEYS
+
+    cfg = MetaSamplerConfig()
+    assert cfg.tasks_per_episode is None and cfg.grouped_episode_fraction == 0.0
+    assert {"tasks_per_episode", "grouped_episode_fraction", "cfg_dropout_rate", "embodiment_weights"} <= SAMPLER_OVERRIDE_KEYS

@@ -113,3 +113,74 @@ def test_nano_reptileinit_downstream_toml() -> None:
     base = tomllib.load(open(_TOML_DIR / "action_policy_libero_10_nano_fewshot.toml", "rb"))
     for section in ("model", "scheduler", "trainer", "dataloader_train", "dataloader_val"):
         assert raw[section] == base[section], section
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# cosmos_hs11 v4.1-v4.3: the user's v4 + [custom.meta] keys (grouped episodes / embodiment weights / no inner CFG dropout)
+# ---------------------------------------------------------------------------------------------------------------
+_V4_FAMILY = {
+    "v4.1": (50096, {"cfg_dropout_rate": 0.0, "grouped_episode_fraction": 0.5, "tasks_per_episode": 8}),
+    "v4.2": (
+        50097,
+        {
+            "cfg_dropout_rate": 0.0,
+            "embodiment_weights": {
+                "fractal": 0.3, "bridge": 0.25, "robomind_ur": 0.25, "robomind_franka": 0.1, "molmoact2_yam": 0.1
+            },
+        },
+    ),
+    "v4.3": (50098, {"cfg_dropout_rate": 0.0}),
+}
+
+
+@pytest.mark.parametrize("version", sorted(_V4_FAMILY))
+def test_v4_family_is_v4_plus_the_custom_meta_keys_and_routes_them(version: str) -> None:
+    import copy
+    import re
+    import subprocess
+
+    port, expected = _V4_FAMILY[version]
+    base = tomllib.load(open(_TOML_DIR / "action_reptile_meta_edge_v4.toml", "rb"))
+    raw = tomllib.load(open(_TOML_DIR / f"action_reptile_meta_edge_{version}.toml", "rb"))
+    meta = dict(raw["custom"]["meta"])
+    for key, value in expected.items():
+        assert meta.pop(key) == value, key
+    assert meta == base["custom"]["meta"]  # every other [custom.meta] key is v4's
+    stripped = copy.deepcopy(raw)
+    stripped["custom"]["meta"] = base["custom"]["meta"]
+    stripped["job"]["name"] = base["job"]["name"]
+    assert stripped == base  # nothing else differs from v4
+    assert "cfg_dropout_rate" not in base["custom"]["meta"]  # v4 keeps the experiment default (0.1) -> unchanged run
+    cfg, sampler = _meta_cfg(raw)
+    for key, value in expected.items():
+        assert sampler[key] == value  # all three are loader/sampler overrides, not ReptileTrainConfig fields
+    if "grouped_episode_fraction" in expected:
+        assert sampler["k_shot"] % sampler["tasks_per_episode"] == 0
+    launcher = _TOML_DIR.parents[1] / f"launch_reptile_meta_edge_{version}.sh"
+    text = launcher.read_text()
+    assert f"action_reptile_meta_edge_{version}.toml" in text
+    assert re.search(r"MASTER_PORT:-(\d+)", text).group(1) == str(port)
+    subprocess.run(["bash", "-n", str(launcher)], check=True)
+
+
+def test_v4_family_overrides_land_on_the_reptile_loader_config() -> None:
+    """apply_sampler_overrides refuses keys the experiment's LazyCall lacks, so the fields must exist there."""
+    import cosmos_framework.configs.base.experiment.action.meta.action_reptile_meta_edge as edge_module
+    from omegaconf import OmegaConf
+
+    from cosmos_framework.scripts.train_action_meta import apply_sampler_overrides
+
+    experiment = next(
+        v for k, v in vars(edge_module).items() if k.startswith("action_reptile_meta_edge") and hasattr(v, "keys")
+        and "dataloader_train" in v
+    )
+    cfg = OmegaConf.create(experiment, flags={"allow_objects": True})
+    assert cfg.dataloader_train.grouped_episode_fraction == 0.0 and cfg.dataloader_train.tasks_per_episode is None
+    for version in _V4_FAMILY:
+        raw = tomllib.load(open(_TOML_DIR / f"action_reptile_meta_edge_{version}.toml", "rb"))
+        _, sampler = _meta_cfg(raw)
+        c = OmegaConf.create(experiment, flags={"allow_objects": True})
+        apply_sampler_overrides(c, sampler)
+        assert c.dataloader_train.cfg_dropout_rate == 0.0
+    ports = [p for p, _ in _V4_FAMILY.values()]
+    assert len(set(ports)) == len(ports)

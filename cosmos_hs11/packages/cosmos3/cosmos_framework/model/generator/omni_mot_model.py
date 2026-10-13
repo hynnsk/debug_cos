@@ -2308,6 +2308,10 @@ class OmniMoTModel(ImaginaireModel):
                 margin=ranking_cfg.margin,
                 raw_action_dim=data_batch_packed.action.raw_action_dim,
                 action_valid_mask=data_batch_packed.action.action_valid_mask,
+                # cosmos_hs11 v24 family knobs (defaults = the original hinge).
+                negative_grad_scale=getattr(ranking_cfg, "negative_grad_scale", 1.0),
+                margin_mode=getattr(ranking_cfg, "margin_mode", "absolute"),
+                self_paced_fraction=getattr(ranking_cfg, "self_paced_fraction", 0.0),
             )
             weighted_ranking = ranking_cfg.loss_weight * ranking_loss
             if rf_cfg.sample_level_loss_averaging:

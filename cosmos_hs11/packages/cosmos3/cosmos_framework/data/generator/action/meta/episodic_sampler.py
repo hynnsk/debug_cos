@@ -68,6 +68,7 @@ class MetaEpisodeSpec:
     support: list[SampledDemo]
     query: list[SampledDemo]
     disjoint_tasks: bool  # whether support/query task sets were kept disjoint for this episode
+    grouped: bool = False  # cosmos_hs11 v4.1: support = tasks_per_episode tasks x d demos (else the uniform draw)
 
     @property
     def support_indices(self) -> list[int]:
@@ -88,6 +89,8 @@ class MetaEpisodeSpec:
             "support_tasks": sorted({d.task_index for d in self.support}),
             "query_tasks": sorted({d.task_index for d in self.query}),
             "disjoint_tasks": self.disjoint_tasks,
+            "grouped": self.grouped,
+            "num_support_tasks": len({d.task_index for d in self.support}),
         }
 
 
@@ -110,6 +113,14 @@ class EpisodicEmbodimentSampler:
         min_tasks_for_disjoint: See ``disjoint_tasks``.
         min_windows_per_demo: Demonstrations with fewer valid windows are never sampled.
         embodiment_weights: Optional ``{name: weight}``; ``None`` == uniform ``p(e) = 1/E``.
+        tasks_per_episode: cosmos_hs11 v4.1 grouped episodes: the support set of a grouped episode is
+            ``tasks_per_episode`` tasks x ``k_shot // tasks_per_episode`` demonstrations of one embodiment
+            ("one scene family, several instructions, a few demos each" -- the LIBERO few-shot regime) instead
+            of ``k_shot`` demonstrations drawn uniformly over the embodiment. Required (and must divide
+            ``k_shot``) when ``grouped_episode_fraction > 0``.
+        grouped_episode_fraction: Probability that an episode is grouped (0 = never = the original sampler,
+            bit for bit; 1 = always; 0.5 = a 50:50 mix with uniform episodes). Drawn per episode from the
+            episode RNG, so every rank agrees.
     """
 
     def __init__(
@@ -124,6 +135,8 @@ class EpisodicEmbodimentSampler:
         min_tasks_for_disjoint: int = 4,
         min_windows_per_demo: int = 1,
         embodiment_weights: dict[str, float] | None = None,
+        tasks_per_episode: int | None = None,
+        grouped_episode_fraction: float = 0.0,
     ) -> None:
         if k_shot < 1 or q_query < 1:
             raise ValueError(f"k_shot and q_query must be >= 1, got {k_shot}, {q_query}")
@@ -137,6 +150,18 @@ class EpisodicEmbodimentSampler:
         self.disjoint_tasks_mode = disjoint_tasks
         self.min_tasks_for_disjoint = int(min_tasks_for_disjoint)
         self.domain_ids = dict(domain_ids)
+        # cosmos_hs11 v4.1: grouped ("T tasks x d demos") episodes
+        self.grouped_episode_fraction = float(grouped_episode_fraction)
+        if not 0.0 <= self.grouped_episode_fraction <= 1.0:
+            raise ValueError(f"grouped_episode_fraction must be in [0, 1], got {grouped_episode_fraction}")
+        self.tasks_per_episode = None if tasks_per_episode is None else int(tasks_per_episode)
+        if self.grouped_episode_fraction > 0.0:
+            if self.tasks_per_episode is None or self.tasks_per_episode < 1:
+                raise ValueError("tasks_per_episode must be >= 1 when grouped_episode_fraction > 0")
+            if self.k_shot % self.tasks_per_episode != 0:
+                raise ValueError(
+                    f"k_shot ({self.k_shot}) must be a multiple of tasks_per_episode ({self.tasks_per_episode})"
+                )
 
         self.names: list[str] = []
         self.tables: dict[str, EpisodeTable] = {}
@@ -165,6 +190,12 @@ class EpisodicEmbodimentSampler:
             + ", ".join(
                 f"{n}: {len(self.tables[n])} demos / {len(self._by_task[n])} tasks / p={p:.3f}"
                 for n, p in zip(self.names, self.probs)
+            )
+            + (
+                f" | grouped episodes: fraction={self.grouped_episode_fraction}, "
+                f"{self.tasks_per_episode} tasks x {self.k_shot // self.tasks_per_episode} demos"
+                if self.grouped_episode_fraction > 0.0
+                else ""
             )
         )
 
@@ -202,12 +233,43 @@ class EpisodicEmbodimentSampler:
             )
         return out
 
+    def _grouped_support(self, rng: np.random.Generator, name: str) -> np.ndarray:
+        """Support positions of a grouped episode: ``tasks_per_episode`` tasks x ``d = k_shot // tasks_per_episode`` demos.
+
+        Tasks are drawn uniformly among those with at least ``d`` usable demonstrations. When fewer than
+        ``tasks_per_episode`` such tasks exist (RoboMIND-Franka has 2 tasks) every eligible task contributes ``d``
+        demos and the remaining ``k_shot - T_eff * d`` slots are filled uniformly from the other demonstrations,
+        so the support set always holds exactly ``k_shot`` distinct demonstrations.
+        """
+        assert self.tasks_per_episode is not None
+        d = self.k_shot // self.tasks_per_episode
+        by_task = self._by_task[name]
+        eligible = sorted(t for t, ps in by_task.items() if len(ps) >= d)
+        t_eff = min(self.tasks_per_episode, len(eligible))
+        picks: list[int] = []
+        if t_eff > 0:
+            for c in rng.choice(len(eligible), size=t_eff, replace=False):
+                positions = np.asarray(by_task[eligible[int(c)]], dtype=np.int64)
+                picks.extend(int(p) for p in rng.choice(positions, size=d, replace=False))
+        remainder = self.k_shot - len(picks)
+        if remainder > 0:
+            taken = set(picks)
+            rest = np.asarray([p for p in range(len(self.tables[name])) if p not in taken], dtype=np.int64)
+            picks.extend(int(p) for p in rng.choice(rest, size=remainder, replace=False))
+        return np.asarray(picks, dtype=np.int64)
+
     # ---- main entry --------------------------------------------------------------
     def sample(self, rng: np.random.Generator, embodiment: str | None = None) -> MetaEpisodeSpec:
         name = embodiment or self.sample_embodiment(rng)
         table = self.tables[name]
         n = len(table)
-        support_pos = rng.choice(n, size=self.k_shot, replace=False)
+        # cosmos_hs11 v4.1: the grouped/uniform coin is only tossed when the fraction is positive, so fraction 0
+        # consumes the RNG exactly as before and reproduces the original episode stream bit for bit.
+        grouped = self.grouped_episode_fraction > 0.0 and bool(rng.random() < self.grouped_episode_fraction)
+        if grouped:
+            support_pos = self._grouped_support(rng, name)
+        else:
+            support_pos = rng.choice(n, size=self.k_shot, replace=False)
         support_tasks = {table[int(p)].task_index for p in support_pos}
         support_set = set(int(p) for p in support_pos)
 
@@ -230,6 +292,7 @@ class EpisodicEmbodimentSampler:
             support=self._demos(rng, name, [int(p) for p in support_pos], self.windows_per_demo),
             query=self._demos(rng, name, query_pos, self.query_windows_per_demo),
             disjoint_tasks=disjoint,
+            grouped=grouped,
         )
 
 
@@ -450,6 +513,8 @@ class MetaSamplerConfig:
     min_tasks_for_disjoint: int = 4
     min_windows_per_demo: int = 1
     embodiment_weights: dict[str, float] | None = None
+    tasks_per_episode: int | None = None  # cosmos_hs11 v4.1 grouped episodes (see EpisodicEmbodimentSampler)
+    grouped_episode_fraction: float = 0.0
     max_samples_per_batch: int = 40
     num_workers: int = 4
     prefetch_factor: int = 2
@@ -481,6 +546,8 @@ def build_meta_episode_loader(
     min_tasks_for_disjoint: int = 4,
     min_windows_per_demo: int = 1,
     embodiment_weights: dict[str, float] | None = None,
+    tasks_per_episode: int | None = None,
+    grouped_episode_fraction: float = 0.0,
     max_samples_per_batch: int = 40,
     num_workers: int = 4,
     prefetch_factor: int = 2,
@@ -535,6 +602,8 @@ def build_meta_episode_loader(
         min_tasks_for_disjoint=min_tasks_for_disjoint,
         min_windows_per_demo=min_windows_per_demo,
         embodiment_weights=embodiment_weights,
+        tasks_per_episode=tasks_per_episode,
+        grouped_episode_fraction=grouped_episode_fraction,
     )
     stream = MetaEpisodeIterableDataset(
         datasets,
@@ -667,6 +736,8 @@ def build_reptile_episode_loader(
     min_tasks_for_disjoint: int = 4,
     min_windows_per_demo: int = 1,
     embodiment_weights: dict[str, float] | None = None,
+    tasks_per_episode: int | None = None,
+    grouped_episode_fraction: float = 0.0,
     max_samples_per_batch: int = 32,
     num_workers: int = 4,
     prefetch_factor: int = 2,
@@ -730,6 +801,8 @@ def build_reptile_episode_loader(
         min_tasks_for_disjoint=min_tasks_for_disjoint,
         min_windows_per_demo=min_windows_per_demo,
         embodiment_weights=embodiment_weights,
+        tasks_per_episode=tasks_per_episode,
+        grouped_episode_fraction=grouped_episode_fraction,
     )
     stream = SynchronizedMetaEpisodeIterableDataset(
         datasets,

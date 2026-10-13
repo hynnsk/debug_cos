@@ -1,0 +1,89 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# LIBERO-10: copied from action_policy_libero_10_edge_reptileinit_v58.toml (uniform-negative ranking);
+# only [job].name and the [model.language_ranking] loss knobs differ. v76 = asymmetric gradient + RELATIVE margin (E_neg >= 1.3 E_pos).
+# Four-arm family: v75 asym | v76 + relative margin | v77 + self-paced | v78 both.
+# LIBERO_ROOT must contain this suite only (10 tasks). See docs/action_policy_libero_language_ranking.md (v24 section).
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_libero_edge"
+project      = "cosmos3_action_libero"
+group        = "edge_libero10_fewshot"
+name         = "edge_libero_10_3ep_fullft_reptile_v84_ranking_asym_relmargin"
+wandb_mode   = "offline"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+lora_enabled = false            # full mode: theta lives in the DCP weights themselves, no adapters
+
+[model.ema]
+enabled         = true
+rate            = 0.1
+iteration_shift = 0
+
+[model.parallelism]
+data_parallel_shard_degree     = 2
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 5.0e-05          # full-FT LR of the recipe
+
+[optimizer.lr_multipliers]
+action2llm            = 2.0   # inherited from the source recipe
+llm2action            = 2.0
+action_modality_embed = 2.0
+
+[scheduler]
+cycle_lengths = [2000]        # linear decay to 0 at max_iter (matches the cosmos_hs08 baseline)
+warm_up_steps = [200]
+
+[trainer]
+max_iter        = 2000
+logging_iter    = 20
+grad_accum_iter = 1
+# held-out validation
+run_validation          = true
+run_validation_on_start = true   # iteration 0 = the Reptile-initialized model before any update
+validation_iter         = 200
+max_val_iter            = 16
+
+[dataloader_train]
+max_samples_per_batch = 128
+episode_subset_path   = "libero_10_3ep_per_task_seed42.json"          # 3 demos/task x 10 tasks = 30 episodes
+
+[dataloader_val]
+max_samples_per_batch = 16
+episode_subset_path   = "libero_10_val_5ep_per_task_seed42_excl3ep.json"  # 5 held-out demos/task, disjoint from train
+
+[checkpoint]
+load_path = "${oc.env:REPTILE_CKPT_PATH}"   # <reptile job>/checkpoints/iter_XXXXXXXXX (NOT the base Cosmos3-Edge dir)
+save_iter = 2000
+# The Reptile DCP has no EMA; the action heads are skipped (fresh) and then overwritten by the meta heads below.
+keys_to_skip_loading = ["net_ema.", "action2llm", "llm2action", "action_modality_embed"]
+meta_action_init_path                   = "${oc.env:META_ACTION_INIT_PATH}"
+meta_action_init_domain_id              = 5      # EMBODIMENT_TO_DOMAIN_ID["libero"]
+meta_action_init_include_modality_embed = true
+meta_action_init_include_lora           = false  # full mode: no adapters
+meta_action_init_include_time_embedder  = false  # already in the DCP weights
+
+# E_pos/E_neg: per-sample fp32 MSE over noisy, valid action elements.
+# Added directly to the existing total loss, independently of the action FM multiplier.
+# v76: asymmetric gradient + RELATIVE margin (E_neg >= 1.3 E_pos). Negatives stay UNIFORM over the other 9 tasks (the sibling's sampler).
+[model.language_ranking]
+enabled = true
+loss_weight = 1.0
+margin = 0.3      # absolute: E_neg >= E_pos + margin | relative: E_neg >= (1 + margin) * E_pos
+# --- cosmos_hs11 v24-family loss knobs (all routed to model.config.language_ranking.*; defaults = original hinge) ---
+negative_grad_scale = 0.0        # gradient scale through E_neg: 1.0 = original, 0.0 = positive-only, 0.2 = asymmetric
+margin_mode         = "relative"   # "absolute" | "relative" (margin x sg(E_pos) per sample)
+self_paced_fraction = 0.0        # 0.0 = off; else only this fraction of valid samples (largest detached gap - margin_i) is ranked

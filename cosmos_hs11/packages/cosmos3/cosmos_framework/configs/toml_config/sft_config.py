@@ -325,6 +325,25 @@ class LanguageRankingTomlConfig(BaseModel):
     hard_negative_prefix_frames: Optional[int] = Field(
         default=None, ge=1, description="Leading frames of each demonstration that define the task trajectory."
     )
+    # cosmos_hs11 v24 family (object v24-v27, LIBERO-10 v75-v78): loss-side knobs, all off by default.
+    negative_grad_scale: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+        description="Gradient scale through E_neg (1 = original hinge, 0 = positive-only: no push on the wrong-instruction branch).",
+    )
+    margin_mode: Optional[Literal["absolute", "relative"]] = Field(
+        default=None,
+        description="'absolute' (E_neg >= E_pos + margin) or 'relative' (E_neg >= (1 + margin) * E_pos, margin scaled by sg(E_pos)).",
+    )
+    self_paced_fraction: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+        description="0 = off; otherwise only this fraction of the valid samples with the largest detached gap - margin_i is ranked.",
+    )
 
 
 class RepaTomlConfig(BaseModel):

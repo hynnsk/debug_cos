@@ -89,6 +89,9 @@ SAMPLER_OVERRIDE_KEYS = {
     "min_tasks_for_disjoint",
     "min_windows_per_demo",
     "embodiment_weights",
+    # cosmos_hs11 v4.1: grouped ("T tasks x d demos") meta-episodes
+    "tasks_per_episode",
+    "grouped_episode_fraction",
     "max_samples_per_batch",
     "num_workers",
     "prefetch_factor",

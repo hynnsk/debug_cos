@@ -139,6 +139,12 @@ class LanguageRankingConfig:
     trajectories over the first ``hard_negative_prefix_frames`` frames of the kept demonstrations (tasks whose
     demonstrations start alike are the ones the few-shot policy confuses). The weights are computed once per
     dataset at construction (``utils/language_ranking.py``); the loss is unchanged.
+
+    Loss-side knobs (cosmos_hs11 v24 family: object v24-v27, LIBERO-10 v75-v78; ``algorithm/loss/language_ranking.py``),
+    all off by default: ``negative_grad_scale`` scales the gradient through ``E_neg`` (1 = original, 0 = positive-only);
+    ``margin_mode="relative"`` requires ``E_neg >= (1 + margin) * E_pos`` instead of ``E_neg >= E_pos + margin``;
+    ``self_paced_fraction`` (0 = off) applies the hinge only to that fraction of the valid samples with the largest
+    detached ``gap - margin_i`` (the easiest pairs), normalized by ``batch * fraction``.
     """
 
     enabled: bool = False
@@ -148,6 +154,9 @@ class LanguageRankingConfig:
     hard_negative_fraction: float = 0.0
     hard_negative_temperature: float = 0.5
     hard_negative_prefix_frames: int = 64
+    negative_grad_scale: float = 1.0
+    margin_mode: str = "absolute"
+    self_paced_fraction: float = 0.0
 
 
 @attrs.define(slots=False)
