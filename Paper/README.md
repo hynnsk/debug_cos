@@ -25,12 +25,16 @@ for the camera-ready version.
 
 ## Where the numbers come from
 
-* Table 1, LIBERO-10 column: `cosmos_storage/outputs/eval/cosmos3_action_libero/edge_libero10_fewshot/hs08_v2_50demo_2000`
-  (58.0) and `.../edge_libero10_3ep_fullft_reptile_v4_init_50demo_2000` (69.4). Table 2 (per task) is read from the same
-  two `summary.json` files.
-* Table 1, Goal/Spatial/Object columns, the "all demonstrations" row, and Table 3 (87.2 / 94.6) are the numbers given in
-  the writing brief; they are not in `cosmos_storage/outputs/eval` on this machine and should be re-checked against the
-  runs that produced them before submission.
-* Post-training hyper-parameters: `config.yaml` of the two LIBERO-10 runs above (identical except for the init and the
-  action-head LR multiplier). Reptile hyper-parameters: `examples/toml/sft_config/action_reptile_meta_edge_v4.toml` and
-  the `edge_reptile_v4*` run logs in `cosmos_hs11`.
+* Table 1, LIBERO-10 column, and Table 2 (per task): `cosmos_storage/outputs/eval/cosmos3_action_libero/edge_libero10_fewshot/hs08_v2_50demo_2000`
+  (PT, 58.0) and `.../edge_libero10_3ep_fullft_reptile_v4_init_50demo_2000` (META-PT, 69.4), both evaluated with guidance 1.0.
+* Table 3 (control): JOINT-PT 58.2 = `.../edge_libero10_3ep_fullft_sourceinit_50demo_2000`, post-trained from
+  `cosmos3_action_meta/reptile_meta_ablation/edge_source_sft_joint_k16w16_bs256_1k_seed42` (k=1, eps=1, 1000 episodes of
+  16 demos x 16 windows).
+* Table 1 Goal/Spatial/Object columns (63.2/76.2, 74.8/78.6, 90.6/90.4), the "all demonstrations" row and Table 4
+  (87.2 / 94.6) are the numbers given in the writing brief (2026-10-14); they are not in `cosmos_storage/outputs/eval` on this
+  machine. The paper states that META-PT uses ranking policy learning (RPL, the v23 `[model.language_ranking]` objective)
+  on Goal and Spatial only; confirm which arms used RPL and whether their evaluation used classifier-free guidance.
+* Post-training hyper-parameters: `config.yaml` of the two LIBERO-10 runs above. Meta pre-training hyper-parameters:
+  `cosmos3_action_meta/reptile_meta/edge_reptile_v4_my/config.yaml` (K=32, w=8, k=10, eps 0.5->0.05, 1000 episodes).
+  RPL hyper-parameters: `examples/toml/sft_config/action_policy_libero_goal_edge_reptileinit_v23.toml` and
+  `docs/action_policy_libero_language_ranking.md` in `cosmos_hs11`.

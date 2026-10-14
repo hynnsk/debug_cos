@@ -1,4 +1,4 @@
-\begin{thebibliography}{54}
+\begin{thebibliography}{55}
 \providecommand{\natexlab}[1]{#1}
 \providecommand{\url}[1]{\texttt{#1}}
 \expandafter\ifx\csname urlstyle\endcsname\relax
@@ -120,6 +120,11 @@ Kourosh Hakhamaneshi, Ruihan Zhao, Pieter Abbeel, Sergey Levine, and Ofir
 \newblock In \emph{International Conference on Learning Representations
   (ICLR)}, 2022.
 
+\bibitem[Ho and Salimans(2022)]{ho2022cfg}
+Jonathan Ho and Tim Salimans.
+\newblock Classifier-free diffusion guidance.
+\newblock \emph{arXiv preprint arXiv:2207.12598}, 2022.
+
 \bibitem[Hospedales et~al.(2022)Hospedales, Antoniou, Micaelli, and
   Storkey]{hospedales2021survey}
 Timothy Hospedales, Antreas Antoniou, Paul Micaelli, and Amos Storkey.
@@ -182,12 +187,6 @@ Moo~Jin Kim, Chelsea Finn, and Percy Liang.
 \newblock Fine-tuning vision-language-action models: Optimizing speed and
   success.
 \newblock \emph{arXiv preprint arXiv:2502.19645}, 2025.
-
-\bibitem[Kingma and Ba(2015)]{kingma2015adam}
-Diederik~P. Kingma and Jimmy Ba.
-\newblock Adam: A method for stochastic optimization.
-\newblock In \emph{International Conference on Learning Representations
-  (ICLR)}, 2015.
 
 \bibitem[Lee et~al.(2025)Lee, Duan, Fang, Deng, Liu, Li, Fang, Zhang, Wang,
   Lee, et~al.]{lee2025molmoact}
@@ -298,6 +297,15 @@ Alex Nichol, Joshua Achiam, and John Schulman.
 \newblock $\pi_{0.5}$: A vision-language-action model with open-world
   generalization.
 \newblock \emph{arXiv preprint arXiv:2504.16054}, 2025.
+
+\bibitem[Radford et~al.(2021)Radford, Kim, Hallacy, Ramesh, Goh, Agarwal,
+  Sastry, Askell, Mishkin, Clark, Krueger, and Sutskever]{radford2021clip}
+Alec Radford, Jong~Wook Kim, Chris Hallacy, Aditya Ramesh, Gabriel Goh,
+  Sandhini Agarwal, Girish Sastry, Amanda Askell, Pamela Mishkin, Jack Clark,
+  Gretchen Krueger, and Ilya Sutskever.
+\newblock Learning transferable visual models from natural language
+  supervision.
+\newblock In \emph{International Conference on Machine Learning (ICML)}, 2021.
 
 \bibitem[Raghu et~al.(2020)Raghu, Raghu, Bengio, and Vinyals]{raghu2020anil}
 Aniruddh Raghu, Maithra Raghu, Samy Bengio, and Oriol Vinyals.

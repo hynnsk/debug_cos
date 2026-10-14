@@ -11,17 +11,17 @@
   lab/.style={font=\tiny, black!75, inner sep=1pt},
 ]
 % ---- pipeline row -------------------------------------------------------
-\node[stage] (mid) at (0,0) {\textbf{Mid-training}\\ web video +\\ cross-embodiment\\ robot data\\[1pt] $\Rightarrow\theta_{\mathrm{mid}}$};
-\node[ours, right=0.38 of mid] (meta) {\textbf{\Method}\\ \textbf{(ours)}\\ 5 source embodiments,\\ no new data\\[1pt] $\theta_{\mathrm{mid}}\Rightarrow\thmeta$};
-\node[stage, right=0.38 of meta] (post) {\textbf{Post-training}\\ target robot,\\ 3 demos / task,\\ unchanged recipe\\[1pt] $\thmeta\Rightarrow$ policy};
-\draw[arr] (mid) -- (meta);
+\node[stage] (pre) at (0,0) {\textbf{Pre-training}\\ web video +\\ cross-embodiment\\ robot data\\[1pt] $\Rightarrow\theta_{\mathrm{pre}}$};
+\node[ours, right=0.38 of pre] (meta) {\textbf{\Method}\\ \textbf{(ours)}\\ episodes from\\ source embodiments\\[1pt] $\theta_{\mathrm{pre}}\Rightarrow\thmeta$};
+\node[stage, right=0.38 of meta] (post) {\textbf{Post-training}\\ target robot,\\ few demos / task\\ (+ ranking loss)\\[1pt] $\thmeta\Rightarrow$ policy};
+\draw[arr] (pre) -- (meta);
 \draw[arr] (meta) -- (post);
 
 % ---- zoom box: one meta-iteration -------------------------------------
-\path let \p1=(mid.west), \p2=(post.east) in node[draw=cvprblue!70, rounded corners=2pt, line width=0.5pt, fill=cvprblue!3, anchor=north west, inner sep=0pt, minimum width={\x2-\x1}, minimum height=2.8cm] (zoom) at ($(mid.south west)+(0,-0.42)$) {};
+\path let \p1=(pre.west), \p2=(post.east) in node[draw=cvprblue!70, rounded corners=2pt, line width=0.5pt, fill=cvprblue!3, anchor=north west, inner sep=0pt, minimum width={\x2-\x1}, minimum height=2.8cm] (zoom) at ($(pre.south west)+(0,-0.42)$) {};
 \draw[cvprblue!70, line width=0.5pt] (meta.south west) -- ($(zoom.north west)!0.28!(zoom.north east)$);
 \draw[cvprblue!70, line width=0.5pt] (meta.south east) -- ($(zoom.north west)!0.72!(zoom.north east)$);
-\node[lab, cvprblue, anchor=north west, font=\tiny\bfseries] at ($(zoom.north west)+(0.08,-0.05)$) {One meta-iteration};
+\node[lab, cvprblue, anchor=north west, font=\tiny\bfseries] at ($(zoom.north west)+(0.08,-0.05)$) {One episode};
 
 % parameter-space sketch (left)
 \begin{scope}[shift={($(zoom.west)+(0.75,-0.12)$)}]
@@ -39,14 +39,14 @@
 
 % recipe text (right)
 \node[anchor=north west, align=left, text width=3.8cm, inner sep=2pt] at ($(zoom.north west)+(3.45,-0.3)$) {%
-  1.\ sample embodiment $e$, $K{=}32$ demos, $w{=}8$ windows each\\[1pt]
-  2.\ $\tilde\theta_e\leftarrow$ $k{=}10$ steps of the \emph{post-training} optimizer on them (same loss, learning rate, trainable set; shared action head)\\[1pt]
-  3.\ $\theta\leftarrow\theta+\epsilon\,(\tilde\theta_e-\theta)$ with \mbox{$\epsilon\colon 0.5\to0.05$}%
+  1.\ sample an embodiment $e$ and a few of its demonstrations ($K$ demos, $w$ windows each)\\[1pt]
+  2.\ $\tilde\theta_e\leftarrow$ $k$ fine-tuning steps on them (action objective, shared action head)\\[1pt]
+  3.\ $\theta\leftarrow\theta+\epsilon\,(\tilde\theta_e-\theta)$%
 };
 \end{tikzpicture}
 \caption{\textbf{Overview.}
-We insert a \method stage between mid-training and post-training.
-Each meta-iteration simulates few-shot post-training on one source embodiment ($K$ demonstrations, $k$ steps of the unchanged post-training recipe; dashed arrows to the adapted weights $\tilde\theta_e$) and moves the weights a fraction $\epsilon$ toward the adapted solution (blue arrow).
-The result $\thmeta$ is loaded by the post-training recipe exactly like the mid-trained checkpoint.}
+We insert a \Method stage between pre-training and post-training.
+Each episode simulates few-shot post-training on one source embodiment (a few demonstrations, $k$ fine-tuning steps; dashed arrows to the fine-tuned weights $\tilde\theta_e$) and moves the weights a fraction $\epsilon$ toward the adapted solution (blue arrow).
+The result $\thmeta$ is loaded by the post-training recipe exactly like the pre-trained checkpoint; post-training can additionally use the ranking loss of \cref{sec:rpl}.}
 \label{fig:method}
 \end{figure}

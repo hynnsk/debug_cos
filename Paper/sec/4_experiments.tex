@@ -9,29 +9,35 @@ We evaluate on the four LIBERO suites~\cite{liu2023libero}, each with 10 languag
 We use the 20\,Hz LeRobot release of the demonstrations~\cite{cadene2024lerobot}, which contains 379, 428, 432, and 454 successful demonstrations for LIBERO-10, -Goal, -Spatial, and -Object.
 
 \paragraph{Few-shot protocol}
-For every suite we select three demonstrations per task with a fixed random seed, 30 demonstrations in total, and keep this selection fixed for all methods.
+Our main experiments use $n{=}3$ demonstrations per task.
+For every suite we select them with a fixed random seed, 30 demonstrations in total, and keep this selection fixed for all methods.
 Five further demonstrations per task, disjoint from the training set, are held out to monitor the validation loss; they are never used for training or for checkpoint selection, and we always evaluate the final checkpoint of each run.
 
 \paragraph{Models}
-\basept post-trains the mid-trained \base checkpoint with the standard recipe; this is the baseline of \cref{fig:teaser}.
-\metapt post-trains from our meta pre-trained checkpoint $\thmeta$ as described in \cref{sec:downstream}.
-The two runs of a suite share every setting, including the training subset and the seed, and differ only in the initialization and in the learning-rate multiplier of the action head ($5\times$ for the fresh head, $1\times$ for the meta-learned head).
+\textbf{PT} (\basept) post-trains the pre-trained \base checkpoint with the standard recipe; this is the baseline of \cref{fig:teaser}.
+\textbf{META-PT} (\metapt) post-trains from our meta pre-trained checkpoint $\thmeta$ as described in \cref{sec:downstream}; on LIBERO-Goal and LIBERO-Spatial, whose ten tasks share one scene, post-training additionally uses \RPL (\cref{sec:rpl}).
+\textbf{JOINT-PT} is the control of \cref{sec:exp_control}: it post-trains from weights that were trained on the same source episodes as $\thmeta$ by ordinary joint training instead of \method.
+All runs of a suite share every setting, including the training subset and the seed, and differ only in the initialization, the action-head learning rate noted below, and the ranking loss where stated.
 
-\paragraph{Post-training details}
-The policy observes the third-person and the wrist camera at $256{\times}256$, concatenated side by side, and the instruction, and generates the next 16 frames together with a 16-step chunk of 10-D actions (relative end-effector translation, 6-D rotation, and gripper), normalized with the quantile statistics of the suite.
-We use AdamW with learning rate $5{\times}10^{-5}$, weight decay 0.05, $\beta=(0.9,0.99)$, 200 warm-up steps and linear decay to zero at 2000 steps, batches of 256 windows, an exponential moving average of the weights, bf16 compute with fp32 master weights, and FSDP over two 48\,GB GPUs; the instruction is dropped for 10\% of the samples.
-
-\paragraph{Meta pre-training details}
-We run $N{=}1000$ meta-iterations over the five source embodiments with $K{=}32$ demonstrations and $w{=}8$ windows per demonstration (256 windows per episode), $k{=}10$ inner AdamW steps at the post-training learning rate $5{\times}10^{-5}$ and weight decay 0.05, two warm-up steps, gradient clipping at 1.0, and a fresh optimizer state per episode; $\epsilon$ decays linearly from 0.5 to 0.05.
-The run takes 1.5--2 minutes per meta-iteration on four 48\,GB GPUs, 25--30 hours in total, with a peak memory below 30\,GB per GPU, and consumes about 32k demonstration samples, a negligible fraction of the mid-training data.
-The final $\thmeta$ is used for all experiments below.
+\paragraph{Implementation details}
+The backbone is the pre-trained \base checkpoint~\cite{cosmos3}: two towers of 28 layers with hidden size 2048, of which the post-training recipe trains the generator tower, its timestep embedding, its latent projections, and the action head, 1.42B parameters in total.
+A window consists of the current observation, the next 16 video frames at 20\,Hz, and the corresponding 16 actions; the policy observes the third-person and the wrist camera at $256{\times}256$, concatenated side by side, and predicts 10-D actions (relative end-effector translation, 6-D rotation, and gripper), normalized with the quantile statistics of the suite.
+Post-training uses $\lambda_v=\lambda_a=10$, AdamW with learning rate $5{\times}10^{-5}$, weight decay 0.05, $\beta=(0.9,0.99)$, 200 warm-up steps and linear decay to zero at $T{=}2000$ steps, batches of 256 windows, an exponential moving average of the weights, bf16 compute with fp32 master weights, and FSDP over two 48\,GB GPUs; the instruction is dropped for 10\% of the samples.
+The randomly initialized action head of PT is trained with a $5\times$ learning-rate multiplier, as in the recipe of~\cite{cosmos3}; the meta-learned head of META-PT and JOINT-PT uses the base learning rate.
+\Method uses $E{=}5$ source datasets of different embodiments that are part of the pre-training mixture: RT-1 (Google Robot)~\cite{brohan2023rt1}, BridgeData~V2 (WidowX)~\cite{walke2023bridge}, the UR-5e and the Franka subsets of RoboMIND~\cite{wu2024robomind}, and the bimanual YAM data of MolmoAct~\cite{lee2025molmoact}, whose 20-D actions exercise the padded action representation.
+We run $N{=}1000$ episodes with $K{=}32$ demonstrations and $w{=}8$ windows per demonstration (256 windows per episode) and $k{=}10$ inner steps.
+The inner optimizer is AdamW with the learning rate and weight decay of the post-training recipe, so that the inner loop resembles the downstream adaptation, with two warm-up steps, gradient clipping at 1.0, and a fresh optimizer state per episode; $\epsilon$ decays linearly from 0.5 to 0.05.
+The run takes 1.5--2 minutes per episode on four 48\,GB GPUs, 25--30 hours in total, with a peak memory below 30\,GB per GPU, and consumes about 32k demonstration samples, a negligible fraction of the pre-training data; the final $\thmeta$ is used for all experiments.
+\RPL uses margin $m{=}0.1$ and weight $\lambda_r{=}1$, with one negative instruction per window drawn uniformly from the other nine tasks of the suite.
+JOINT-PT trains the same trainable set and shared action head on the same kind of source episodes (one embodiment per episode, 256 windows from a few of its demonstrations) for the same number of episodes, with the same optimizer, learning rate, and loss, but by ordinary joint training: each episode contributes one optimizer step and the weights are simply carried over, \ie, $k{=}1$ and $\epsilon{=}1$ in \cref{alg:meta}.
+The resulting checkpoint is then post-trained exactly like META-PT.
 
 \paragraph{Evaluation}
 We run the policy closed loop in the LIBERO simulator, 50 trials per task with the benchmark's fixed initial states, \ie, 500 episodes per suite and per model.
 Each predicted 16-step action chunk is executed before the policy is queried again; actions are sampled with 30 denoising steps and without classifier-free guidance.
 Episodes time out after 520, 300, 220, and 280 control steps for LIBERO-10, -Goal, -Spatial, and -Object.
 We report the success rate in percent.
-With 500 Bernoulli trials the standard error at a success rate of 60\% is about 2.2 points, so differences of fewer than about four points should be read as ties.
+With 500 Bernoulli trials the standard error at a success rate of 70\% is about 2.0 points, so differences of fewer than about four points should be read as ties.
 
 \begin{table}[t]
   \centering
@@ -43,16 +49,16 @@ With 500 Bernoulli trials the standard error at a success rate of 60\% is about 
     \midrule
     \textcolor{black!55}{PT, all demonstrations} & \textcolor{black!55}{87.2} & \textcolor{black!55}{97.4} & \textcolor{black!55}{97.8} & \textcolor{black!55}{98.8} & \textcolor{black!55}{95.3} \\
     \midrule
-    PT (baseline) & 58.0 & 48.8 & 72.0 & 82.8 & 65.4 \\
-    META-PT (ours) & \textbf{69.4} & \textbf{60.8} & \textbf{72.6} & \textbf{85.2} & \textbf{72.0} \\
+    PT (baseline) & 58.0 & 63.2 & 74.8 & \textbf{90.6} & 71.7 \\
+    META-PT (ours) & \textbf{69.4} & \textbf{76.2} & \textbf{78.6} & 90.4 & \textbf{78.7} \\
     \midrule
-    $\Delta$ & +11.4 & +12.0 & +0.6 & +2.4 & +6.6 \\
+    $\Delta$ & +11.4 & +13.0 & +3.8 & $-$0.2 & +7.0 \\
     \bottomrule
   \end{tabular}
   \caption{\textbf{Few-shot post-training on LIBERO (3 demonstrations per task).}
   Success rate (\%) over 50 trials on each of the 10 tasks of a suite.
-  PT is \basept, post-trained from the mid-trained weights; META-PT is \metapt, post-trained from our meta pre-trained weights.
-  Both are post-trained with the identical recipe on the identical 30 demonstrations and differ only in the initialization.
+  PT is \basept, post-trained from the pre-trained weights; META-PT is \metapt, post-trained from our meta pre-trained weights (with \RPL on Goal and Spatial).
+  Both are post-trained with the identical recipe on the identical 30 demonstrations.
   The gray row is the baseline recipe trained on all demonstrations of the suite, for reference.}
   \label{tab:main}
 \end{table}
@@ -61,9 +67,10 @@ With 500 Bernoulli trials the standard error at a success rate of 60\% is about 
 \label{sec:exp_main}
 
 \cref{tab:main} reports the main result.
-Starting post-training from $\thmeta$ instead of $\theta_{\mathrm{mid}}$ improves all four suites, by 6.6 points on average.
-The gains are largest where the baseline is weakest: +11.4 points on LIBERO-10 and +12.0 points on LIBERO-Goal, roughly five standard errors each, while LIBERO-Spatial and LIBERO-Object, on which the baseline already reaches 72\% and 83\% from 30 demonstrations, improve by 0.6 and 2.4 points, within the noise of the evaluation.
-Averaged over the suites, meta pre-training closes 22\% of the gap between few-shot post-training (65.4\%) and post-training on all demonstrations (95.3\%), without touching the post-training recipe, the model, or the data; the remaining gap shows that few-shot post-training of WAMs is far from solved.
+Starting post-training from $\thmeta$ instead of $\theta_{\mathrm{pre}}$ raises the average success rate over the four suites from 71.7\% to 78.7\%.
+The gains are largest where the baseline is weakest: +11.4 points on LIBERO-10 and +13.0 points on LIBERO-Goal, five to six standard errors each, and +3.8 points on LIBERO-Spatial.
+On LIBERO-Object the two models tie (90.6\% versus 90.4\%); this suite is the easiest one, its objects differ in appearance so that the visual context resolves the task, and the baseline already comes within eight points of the full-data result from 30 demonstrations.
+Averaged over the suites, our approach closes 30\% of the gap between few-shot post-training (71.7\%) and post-training on all demonstrations (95.3\%) without touching the model or the data, and the remaining gap shows that few-shot post-training is far from solved.
 
 \begin{table}[t]
   \centering
@@ -101,6 +108,35 @@ The largest gains appear on tasks with two sequential pick-and-place segments th
 \begin{table}[t]
   \centering
   \footnotesize
+  \setlength{\tabcolsep}{5pt}
+  \begin{tabular}{llc}
+    \toprule
+    Model & Stage on the source episodes & LIBERO-10 \\
+    \midrule
+    PT        & none ($\theta_0=\theta_{\mathrm{pre}}$)       & 58.0 \\
+    JOINT-PT  & ordinary joint training ($k{=}1$, $\epsilon{=}1$) & 58.2 \\
+    META-PT   & \Method (ours)                                  & \textbf{69.4} \\
+    \bottomrule
+  \end{tabular}
+  \caption{\textbf{Meta-learning versus ordinary training on the same source data.}
+  Success rate (\%) on LIBERO-10 with 3 demonstrations per task, 500 episodes.
+  JOINT-PT and META-PT consume the same source episodes with the same trainable set, optimizer, loss, and shared action head, and are post-trained with the identical recipe; only the update rule differs.}
+  \label{tab:control}
+\end{table}
+
+\subsection{Meta-Learning versus Ordinary Training on the Source Data}
+\label{sec:exp_control}
+
+$\thmeta$ has seen source demonstrations that $\theta_{\mathrm{pre}}$ has not seen in this form, so the gains of \cref{tab:main} could in principle come from this additional exposure rather than from the meta-learning objective.
+\cref{tab:control} separates the two.
+JOINT-PT consumes the same source episodes with the same trainable set, optimizer, loss, and shared action head, but updates the weights by ordinary joint multi-embodiment training, one optimizer step per episode, instead of adapting for $k$ steps and interpolating.
+Post-training from this checkpoint reaches 58.2\% on LIBERO-10, indistinguishable from the 58.0\% of the baseline, whereas post-training from $\thmeta$ reaches 69.4\%.
+Ordinary training on the source data therefore does not improve the starting point for few-shot post-training, even though it fits the same data with the same model; the improvement comes from optimizing the weights for adaptation, which is what \Method does.
+This is also the sense in which the stage uses no new data: the same episodes, consumed in the ordinary way, give nothing.
+
+\begin{table}[t]
+  \centering
+  \footnotesize
   \setlength{\tabcolsep}{6pt}
   \begin{tabular}{lccc}
     \toprule
@@ -119,7 +155,7 @@ The largest gains appear on tasks with two sequential pick-and-place segments th
 \subsection{Beyond the Few-Shot Regime}
 \label{sec:exp_full}
 
-Does the meta pre-trained initialization only act as a regularizer for tiny datasets, or is it a better starting point in general?
+The meta pre-trained initialization could act only as a regularizer for tiny datasets, or it could be a better starting point in general.
 \cref{tab:fulldata} repeats the LIBERO-10 experiment with all 379 demonstrations and the same 2000-step schedule.
 Post-training from $\thmeta$ raises the success rate from 87.2\% to 94.6\%, \ie, the failure rate drops from 12.8\% to 5.4\%.
 The gain is smaller than in the few-shot regime, as expected when the target data can itself move the weights far, but it is well outside the evaluation noise.
@@ -129,13 +165,15 @@ We conclude that $\thmeta$ is a better initialization for post-training in gener
 \label{sec:discussion}
 
 \paragraph{What the gains do and do not show}
-The two models of \cref{tab:main} share the training subset, the recipe, the seed, and the evaluation episodes, so the comparison is paired, but each number is a single training run evaluated on 500 episodes; we therefore do not interpret the sub-four-point differences on LIBERO-Spatial and LIBERO-Object.
-The results also do not yet separate the contribution of the Reptile rule from that of additional exposure to the five source datasets, since $\thmeta$ has seen about 32k more demonstration samples than $\theta_{\mathrm{mid}}$; a control that consumes the same episodes with plain joint training ($k{=}1$, $\epsilon{=}1$) is the natural next experiment.
+The models of \cref{tab:main} share the training subset, the recipe, the seed, and the evaluation episodes, so the comparisons are paired, but each number is a single training run evaluated on 500 episodes; we therefore do not interpret the sub-four-point differences on LIBERO-Spatial and LIBERO-Object.
+The control of \cref{tab:control} matches the data and the number of episodes of \method but not the number of optimizer steps, since each episode contributes one step instead of $k$; a step-matched control is a natural addition.
 
 \paragraph{Where the remaining failures are}
 Inspecting the rollouts of the few-shot policies on LIBERO-Goal and LIBERO-Spatial, whose ten tasks share one scene, we find that most failures are not imprecise motion but the execution of a different task of the same scene, or the manipulation of the wrong instance of a repeated object.
-Three demonstrations per task appear to be enough to adapt the dynamics and the embodiment, which is what our source episodes exercise, but not to ground ten instructions in one scene.
-Meta-training episodes that contain several instructions of the same scene are a promising direction.
+This is the visual bias that motivates \RPL, and it explains why the ranking loss is most useful on these suites.
+On the long-horizon and the object suites, many windows are segments whose motion does not depend on the instruction, such as transporting or releasing an object; the absolute margin of \cref{eq:rpl} cannot be met on such windows, and in preliminary runs the ranking loss did not help there.
+A margin that adapts to the window, or negatives drawn from the tasks that the policy actually confuses, are natural refinements.
+Meta-training episodes that contain several instructions of the same scene are another direction, since our source episodes exercise the adaptation of dynamics and embodiment but not the grounding of several instructions in one scene.
 
 \paragraph{Scope}
-We study one backbone and one model size, one meta pre-training budget, and simulated evaluation; the stage itself only assumes a post-training recipe and a set of source robot datasets and should transfer to other WAMs and VLAs.
+We study one backbone and one model size, one \method budget, and simulated evaluation; the method itself only assumes a post-training recipe and a set of source robot datasets and should transfer to other WAMs and VLAs.
