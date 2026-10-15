@@ -121,3 +121,6 @@ temp/
 *.tmp
 *.temp
 core.*
+
+# ---- Paper draft (CVPR LaTeX project), kept local only -------------
+Paper/

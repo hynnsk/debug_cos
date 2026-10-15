@@ -1,8 +1,0 @@
-\section{Conclusion}
-\label{sec:conclusion}
-
-We showed that the standard post-training recipe of a pre-trained robot policy breaks down when only a few demonstrations per task are available, losing 8 to 34 points on the four LIBERO suites, and traced the problem to a mismatch between the objective of pre-training, which seeks weights that are good for a mixture of embodiments, and the need of few-shot post-training, which requires weights from which a short fine-tune on a new embodiment succeeds.
-\Method closes part of this gap with a stage that repeatedly simulates few-shot post-training on source embodiments already present in pre-training and moves the entire trainable set of the recipe toward the adapted solutions, and \Rpl counteracts the visual bias of few-shot policies by ranking the action predictions under correct and incorrect instructions.
-The stage needs no new data, runs on the unchanged sharded training stack, and produces a checkpoint that the unchanged post-training recipe consumes.
-It improves the average success rate over the four suites in the few-shot regime, every task of LIBERO-10, and the full-data setting as well, while ordinary training on the same source data gives no gain.
-Margins and negatives that adapt to the window, meta-training with multi-instruction episodes to address instruction grounding, and scaling the stage to larger backbones and to VLAs are the next steps.
