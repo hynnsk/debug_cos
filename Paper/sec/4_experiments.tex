@@ -127,7 +127,7 @@ The largest gains appear on tasks with two sequential pick-and-place segments th
 \subsection{Meta-Learning versus Ordinary Training on the Source Data}
 \label{sec:exp_control}
 
-$\thmeta$ has seen source demonstrations that $\theta_{\mathrm{pre}}$ has not seen in this form, so the gains of \cref{tab:main} could in principle come from this additional exposure rather than from the meta-learning objective.
+One could argue that the gains of \cref{tab:main} come not from the meta-learning objective but simply from an additional stage in which the model is trained once more specifically as a robot policy before post-training.
 \cref{tab:control} separates the two.
 JOINT-PT consumes the same source episodes with the same trainable set, optimizer, loss, and shared action head, but updates the weights by ordinary joint multi-embodiment training, one optimizer step per episode, instead of adapting for $k$ steps and interpolating.
 Post-training from this checkpoint reaches 58.2\% on LIBERO-10, indistinguishable from the 58.0\% of the baseline, whereas post-training from $\thmeta$ reaches 69.4\%.
