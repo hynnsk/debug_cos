@@ -12,8 +12,8 @@
 task         = "vfm"
 experiment   = "action_policy_libero_edge"
 project      = "cosmos3_action_libero"
-group        = "edge_libero_goal_fewshot"
-name         = "edge_libero_goal_1ep_fullft_reptile_v1"
+group        = "edge_libero_goal_fewshot"edge_libero_goal_1ep_fullft_reptile_v1
+name         = ""
 wandb_mode   = "offline"
 
 [model]
