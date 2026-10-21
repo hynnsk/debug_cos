@@ -213,3 +213,24 @@ are the instruction-independent ones. The knobs route like the others
 (`LanguageRankingTomlConfig` -> `model.config.language_ranking.*` -> `LanguageRankingConfig` -> `_compute_losses`).
 Tests: `loss/language_ranking_test.py` (value/gradient of each knob, production assembly) and
 `configs/toml_config/language_ranking_toml_test.py` (sibling + knobs structure, routing, launchers, ports). Not GPU-smoked.
+
+## v105-v107: ranking + DINOv2 REPA distillation on the Reptile init (2026-10-21)
+
+`action_policy_libero_10_edge_reptileinit_v105..v107.toml` = v104 (uniform negatives, relative margin 0.3) plus the
+cosmos_hs10 DINOv2 ViT-B/14 REPA term (`[model.repa]`; v105 = block 24 token cosine, v106 = block 28, v107 = block 24
+VideoREPA token-relation distillation, l1 + margin 0.1, weight 5). The two losses only coexist on experiment
+`action_policy_libero_edge_repa`: the shared model-config defaults carry both `repa` and `language_ranking`, so a
+`[model.repa]` section on the plain `action_policy_libero_edge` experiment *composes* (the model builds the REPA head)
+but the plain loaders ship no native frames (`keep_native_video=False`, the teacher has nothing to encode) and the
+optimizer allowlist / `keys_to_skip_loading` have no `repa_` entry. The REPA experiment therefore now carries the
+ranking wiring of `action_policy_libero_edge` as well -- `cfg["language_ranking"]` (enabled=False), the loader
+interpolations `language_ranking*="${model.config.language_ranking.*}"`, `episode_balanced_sampling`, and the
+`language_ranking_*` keys of the validation breakdown -- which leaves every existing REPA recipe byte-for-byte
+equivalent (the dataset defaults are the same values). The v105-v107 TOMLs set `experiment = "action_policy_libero_edge_repa"`
+and add `"repa_"` to `keys_to_skip_loading`; their launchers export `HF_HOME` (frozen `facebook/dinov2-base` from the hub
+cache) like the `*_repa_dinov2_*` launchers. Launch as before (`NPROC_PER_NODE=2 sr 2 48 examples/launch_sft_action_policy_libero_10_edge_reptileinit_v105.sh`
+with `LIBERO_ROOT`, `REPTILE_CKPT_PATH`, `META_ACTION_INIT_PATH`). Train/val logs then carry both `language_ranking_*`
+and `repa_*` metrics. Tests: `configs/toml_config/repa_ranking_toml_test.py` (routing, experiment wiring, launchers)
+and `model/generator/language_ranking_repa_integration_test.py` (paired negative branch + REPA head in ONE CPU
+training step: both terms finite, gradients reach `repa_head` and `llm2action`). `--dryrun` composition of all three
+recipes checked; not GPU-smoked.

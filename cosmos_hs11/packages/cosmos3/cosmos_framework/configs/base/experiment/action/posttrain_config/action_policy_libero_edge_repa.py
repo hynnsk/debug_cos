@@ -29,6 +29,11 @@ cosmos_hs10 representation-alignment term on the MoT generation pathway (ported 
 Data: the dataset additionally ships the un-resized uint8 frames as ``video_native`` (``keep_native_video``);
 the model canvas / VAE path is untouched. New trainable params: ``net.repa_head.*`` (``repa_`` prefix ->
 ``keys_to_select`` / ``keys_to_skip_loading``). See docs/action_policy_libero_repa_vjepa.md.
+
+cosmos_hs11 v105-v107: the action-language ranking loss of ``action_policy_libero_edge`` (``[model.language_ranking]``,
+docs/action_policy_libero_language_ranking.md) is wired here as well, OFF by default, so a recipe can combine the
+ranking hinge with the DINOv2 REPA term. With ``enabled=False`` the loaders and the model behave exactly as before
+(the dataset's ``language_ranking*`` kwargs default to the same values).
 """
 
 import copy
@@ -55,6 +60,22 @@ def _action_policy_libero_edge_repa_model_config() -> dict:
     cfg["action_gen"] = True
     cfg["vision_gen"] = True
     cfg["max_action_dim"] = 64
+    # Action-language ranking (cosmos_hs11; same block as action_policy_libero_edge). Off by default: every knob is
+    # TOML-overridable under [model.language_ranking] (schema: sft_config.py::LanguageRankingTomlConfig).
+    cfg["language_ranking"] = dict(
+        enabled=False,
+        loss_weight=1.0,
+        margin=0.1,
+        # cosmos_hs11 v27: "uniform" (v23) or "action_similarity" hard negatives; see LanguageRankingConfig.
+        negative_sampling="uniform",
+        hard_negative_fraction=0.0,
+        hard_negative_temperature=0.5,
+        hard_negative_prefix_frames=64,
+        # cosmos_hs11 v24 family: loss-side knobs (asymmetric gradient, relative margin, self-paced hinge); all off.
+        negative_grad_scale=1.0,
+        margin_mode="absolute",
+        self_paced_fraction=0.0,
+    )
 
     # V-JEPA 2.1 representation alignment. Every knob is TOML-overridable under [model.repa]
     # (schema: configs/toml_config/sft_config.py::RepaTomlConfig -> model.config.repa.*).
@@ -116,6 +137,7 @@ def _libero_packing_loader(
     max_samples_per_batch: int,
     num_workers: int,
     prefetch_factor: int,
+    episode_balanced_sampling: bool = False,
 ):
     """LIBERO-10 PackingDataLoader (+ native frames for the REPA teacher); train and val share everything but
     the episode subset / dropout / seed."""
@@ -153,10 +175,17 @@ def _libero_packing_loader(
                         val_ratio=0.01,
                         episode_subset_path=episode_subset_path,
                         iterable_shuffle=True,
+                        episode_balanced_sampling=episode_balanced_sampling,
                         episode_shuffle_seed=episode_shuffle_seed,
                         resolution=None,
                         max_action_dim="${model.config.max_action_dim}",
                         cfg_dropout_rate=cfg_dropout_rate,
+                        # Ranking negatives (cosmos_hs11): no-ops while model.config.language_ranking.enabled is False.
+                        language_ranking="${model.config.language_ranking.enabled}",
+                        language_ranking_negative_sampling="${model.config.language_ranking.negative_sampling}",
+                        language_ranking_hard_fraction="${model.config.language_ranking.hard_negative_fraction}",
+                        language_ranking_hard_temperature="${model.config.language_ranking.hard_negative_temperature}",
+                        language_ranking_hard_prefix_frames="${model.config.language_ranking.hard_negative_prefix_frames}",
                         format_prompt_as_json=True,
                         tokenizer_config="${model.config.vlm_config.tokenizer}",
                         keep_native_video=True,  # ships uint8 [3,17,256,512] as data_batch["video_native"]
@@ -267,10 +296,20 @@ action_policy_libero_edge_repa = LazyDict(
                 skip_nan_step=dict(max_consecutive_nan=100),
                 training_stats=dict(log_freq=100),
                 # val/loss_total, val/flow_matching_loss_{action,vision}, val/repa_loss, val/repa_cos_sim, val/repa_rel_loss
+                # (+ val/language_ranking_* when [model.language_ranking].enabled; absent keys are skipped)
                 val_loss_breakdown=L(ValLossBreakdownCallback)(
                     keys=[
                         "flow_matching_loss_action",
                         "flow_matching_loss_vision",
+                        "language_ranking_loss",
+                        "language_ranking_weighted_loss",
+                        "language_ranking_positive_error",
+                        "language_ranking_negative_error",
+                        "language_ranking_gap",
+                        "language_ranking_margin_satisfied",
+                        "language_ranking_valid_fraction",
+                        "language_ranking_effective_margin",
+                        "language_ranking_selected_fraction",
                         "repa_loss",
                         "repa_cos_sim",
                         "repa_rel_loss",
