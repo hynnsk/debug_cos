@@ -1,0 +1,61 @@
+# openpi_hs11 -- REPTILE meta pre-training of pi05_base over the five robot_fewshot embodiments (full-parameter theta).
+# Defaults = cosmos_hs11 action_reptile_meta_edge_v4.toml: 32 demos x 8 windows = 256 support, 8 query demos, 10 inner AdamW
+# steps over the whole support set (8 micro-batches of 32, gradients averaged), lr 5e-5 with a 2-step ramp, clip 1.0, Adam reset
+# per meta-episode, eps 0.5 -> 0.05 linearly over 1000 meta-iterations, checkpoint every 250.
+# Launch: EXP override / smoke: sr 4 48 scripts/hs11/launch_reptile_pi05_v1.sh outer.max_iter=2 checkpoint.save_interval=1 wandb.enabled=false
+# Checkpoints: checkpoints/pi05_reptile/reptile_v1/<meta-iter>/params  (-> [checkpoint].init_params of the *_reptile_v1 LIBERO TOMLs)
+
+[job]
+name         = "pi05_reptile"
+exp_name     = "reptile_v1"
+project_name = "openpi_hs11"
+
+[wandb]
+enabled = true
+mode    = "online"
+
+[model]
+action_horizon = 10            # = the downstream LIBERO recipe
+
+[checkpoint]
+init_params   = "gs://openpi-assets/checkpoints/pi05_base/params"   # cached under $OPENPI_DATA_HOME
+base_dir      = "./checkpoints"
+save_interval = 250
+keep_period   = 250
+
+[data]
+embodiments      = ["fractal", "bridge", "robomind_ur", "robomind_franka", "molmoact2_yam"]
+data_root        = ""          # "" = $ROBOT_FEWSHOT_ROOT
+assets_dir       = "./assets/pi05_reptile"   # <assets_dir>/<embodiment>/norm_stats.json
+num_workers      = 8
+prefetch_episodes = 2
+
+[sampler]
+k_shot                = 32
+windows_per_demo      = 8
+q_query               = 8
+query_windows_per_demo = 8
+disjoint_query_tasks  = false
+min_frames            = 1
+
+[inner]
+steps           = 10
+batch_size      = 32           # micro-batch; support_size / batch_size gradients are averaged into ONE step
+lr              = 5e-5
+warmup_steps    = 2
+weight_decay    = 1e-10
+clip            = 1.0
+reset_optimizer = true
+
+[outer]
+meta_lr           = 0.5
+meta_lr_min_ratio = 0.1
+max_iter          = 1000
+eval_query_every  = 5
+
+[infra]
+seed         = 42
+fsdp_devices = 0               # 0 = all GPUs of the allocation
+log_interval = 1
+overwrite    = false
+resume       = true            # an existing checkpoint dir continues from its latest step + wandb run id

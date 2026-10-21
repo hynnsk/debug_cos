@@ -1,0 +1,103 @@
+{
+  "description": "Fixed LIBERO subset: 3 randomly sampled demonstration episodes per task (random.Random(seed=42), tasks in ascending task_index order, candidates sorted by episode_index); consumed by LIBEROLeRobotDataset(episode_subset_path=...).",
+  "seed": 42,
+  "episodes_per_task": 3,
+  "n_excluded": 0,
+  "n_tasks": 10,
+  "n_episodes_total_in_dataset": 428,
+  "n_episodes": 30,
+  "tasks": {
+    "0": {
+      "task": "put the bowl on the plate",
+      "n_available": 49,
+      "episodes": [
+        43,
+        72,
+        347
+      ]
+    },
+    "1": {
+      "task": "put the wine bottle on the rack",
+      "n_available": 36,
+      "episodes": [
+        160,
+        163,
+        200
+      ]
+    },
+    "2": {
+      "task": "open the top drawer and put the bowl inside",
+      "n_available": 36,
+      "episodes": [
+        70,
+        86,
+        405
+      ]
+    },
+    "3": {
+      "task": "put the cream cheese in the bowl",
+      "n_available": 40,
+      "episodes": [
+        60,
+        319,
+        398
+      ]
+    },
+    "4": {
+      "task": "put the wine bottle on top of the cabinet",
+      "n_available": 47,
+      "episodes": [
+        10,
+        17,
+        38
+      ]
+    },
+    "5": {
+      "task": "push the plate to the front of the stove",
+      "n_available": 33,
+      "episodes": [
+        205,
+        210,
+        402
+      ]
+    },
+    "6": {
+      "task": "turn on the stove",
+      "n_available": 50,
+      "episodes": [
+        11,
+        321,
+        344
+      ]
+    },
+    "7": {
+      "task": "put the bowl on the stove",
+      "n_available": 48,
+      "episodes": [
+        165,
+        384,
+        417
+      ]
+    },
+    "8": {
+      "task": "put the bowl on top of the cabinet",
+      "n_available": 46,
+      "episodes": [
+        286,
+        327,
+        414
+      ]
+    },
+    "9": {
+      "task": "open the middle drawer of the cabinet",
+      "n_available": 43,
+      "episodes": [
+        146,
+        293,
+        386
+      ]
+    }
+  },
+  "excluded_from": [],
+  "source_root_basename": "libero_goal"
+}

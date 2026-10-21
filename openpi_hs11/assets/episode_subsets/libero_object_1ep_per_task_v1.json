@@ -1,0 +1,177 @@
+{
+  "description": "1 demonstration per task, drawn with random.Random(seed=42) from the 3 episodes each task has in libero_object_3ep_per_task_seed42.json (tasks in ascending task_index order, candidates sorted by episode_index); NOT sampled from the whole dataset, so this is a strict subset of the parent 3-demo subset. Consumed by LIBEROLeRobotDataset(episode_subset_path=...).",
+  "seed": 42,
+  "episodes_per_task": 1,
+  "n_excluded": 0,
+  "n_tasks": 10,
+  "n_episodes_total_in_dataset": 454,
+  "n_episodes": 10,
+  "tasks": {
+    "0": {
+      "task": "pick up the alphabet soup and place it in the basket",
+      "n_available": 44,
+      "episodes": [
+        426
+      ]
+    },
+    "1": {
+      "task": "pick up the chocolate pudding and place it in the basket",
+      "n_available": 50,
+      "episodes": [
+        141
+      ]
+    },
+    "2": {
+      "task": "pick up the bbq sauce and place it in the basket",
+      "n_available": 46,
+      "episodes": [
+        46
+      ]
+    },
+    "3": {
+      "task": "pick up the orange juice and place it in the basket",
+      "n_available": 45,
+      "episodes": [
+        411
+      ]
+    },
+    "4": {
+      "task": "pick up the cream cheese and place it in the basket",
+      "n_available": 45,
+      "episodes": [
+        262
+      ]
+    },
+    "5": {
+      "task": "pick up the milk and place it in the basket",
+      "n_available": 45,
+      "episodes": [
+        10
+      ]
+    },
+    "6": {
+      "task": "pick up the butter and place it in the basket",
+      "n_available": 45,
+      "episodes": [
+        120
+      ]
+    },
+    "7": {
+      "task": "pick up the ketchup and place it in the basket",
+      "n_available": 45,
+      "episodes": [
+        2
+      ]
+    },
+    "8": {
+      "task": "pick up the tomato sauce and place it in the basket",
+      "n_available": 42,
+      "episodes": [
+        450
+      ]
+    },
+    "9": {
+      "task": "pick up the salad dressing and place it in the basket",
+      "n_available": 47,
+      "episodes": [
+        149
+      ]
+    }
+  },
+  "excluded_from": [],
+  "source_root_basename": "libero_object",
+  "based_on": "libero_object_3ep_per_task_seed42.json",
+  "v1_seed": 42,
+  "v1_selection": {
+    "0": {
+      "task": "pick up the alphabet soup and place it in the basket",
+      "candidates": [
+        11,
+        69,
+        426
+      ],
+      "chosen": 426
+    },
+    "1": {
+      "task": "pick up the chocolate pudding and place it in the basket",
+      "candidates": [
+        141,
+        146,
+        430
+      ],
+      "chosen": 141
+    },
+    "2": {
+      "task": "pick up the bbq sauce and place it in the basket",
+      "candidates": [
+        46,
+        60,
+        136
+      ],
+      "chosen": 46
+    },
+    "3": {
+      "task": "pick up the orange juice and place it in the basket",
+      "candidates": [
+        41,
+        352,
+        411
+      ],
+      "chosen": 411
+    },
+    "4": {
+      "task": "pick up the cream cheese and place it in the basket",
+      "candidates": [
+        55,
+        262,
+        387
+      ],
+      "chosen": 262
+    },
+    "5": {
+      "task": "pick up the milk and place it in the basket",
+      "candidates": [
+        10,
+        72,
+        139
+      ],
+      "chosen": 10
+    },
+    "6": {
+      "task": "pick up the butter and place it in the basket",
+      "candidates": [
+        120,
+        308,
+        376
+      ],
+      "chosen": 120
+    },
+    "7": {
+      "task": "pick up the ketchup and place it in the basket",
+      "candidates": [
+        2,
+        133,
+        313
+      ],
+      "chosen": 2
+    },
+    "8": {
+      "task": "pick up the tomato sauce and place it in the basket",
+      "candidates": [
+        334,
+        402,
+        450
+      ],
+      "chosen": 450
+    },
+    "9": {
+      "task": "pick up the salad dressing and place it in the basket",
+      "candidates": [
+        149,
+        249,
+        360
+      ],
+      "chosen": 149
+    }
+  }
+}

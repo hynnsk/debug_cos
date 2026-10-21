@@ -1,0 +1,125 @@
+{
+  "description": "Fixed LIBERO subset: 5 randomly sampled demonstration episodes per task (random.Random(seed=42), tasks in ascending task_index order, candidates sorted by episode_index); 30 excluded episodes (disjoint from the given subset files); consumed by LIBEROLeRobotDataset(episode_subset_path=...).",
+  "seed": 42,
+  "episodes_per_task": 5,
+  "n_excluded": 30,
+  "n_tasks": 10,
+  "n_episodes_total_in_dataset": 428,
+  "n_episodes": 50,
+  "tasks": {
+    "0": {
+      "task": "put the bowl on the plate",
+      "n_available": 46,
+      "episodes": [
+        47,
+        87,
+        153,
+        170,
+        371
+      ]
+    },
+    "1": {
+      "task": "put the wine bottle on the rack",
+      "n_available": 33,
+      "episodes": [
+        49,
+        50,
+        105,
+        192,
+        316
+      ]
+    },
+    "2": {
+      "task": "open the top drawer and put the bowl inside",
+      "n_available": 33,
+      "episodes": [
+        4,
+        8,
+        37,
+        159,
+        169
+      ]
+    },
+    "3": {
+      "task": "put the cream cheese in the bowl",
+      "n_available": 37,
+      "episodes": [
+        12,
+        148,
+        381,
+        397,
+        408
+      ]
+    },
+    "4": {
+      "task": "put the wine bottle on top of the cabinet",
+      "n_available": 44,
+      "episodes": [
+        100,
+        133,
+        195,
+        212,
+        303
+      ]
+    },
+    "5": {
+      "task": "push the plate to the front of the stove",
+      "n_available": 30,
+      "episodes": [
+        7,
+        63,
+        365,
+        373,
+        382
+      ]
+    },
+    "6": {
+      "task": "turn on the stove",
+      "n_available": 47,
+      "episodes": [
+        81,
+        152,
+        196,
+        238,
+        406
+      ]
+    },
+    "7": {
+      "task": "put the bowl on the stove",
+      "n_available": 45,
+      "episodes": [
+        45,
+        66,
+        171,
+        237,
+        258
+      ]
+    },
+    "8": {
+      "task": "put the bowl on top of the cabinet",
+      "n_available": 43,
+      "episodes": [
+        59,
+        77,
+        211,
+        259,
+        366
+      ]
+    },
+    "9": {
+      "task": "open the middle drawer of the cabinet",
+      "n_available": 40,
+      "episodes": [
+        64,
+        90,
+        254,
+        314,
+        375
+      ]
+    }
+  },
+  "excluded_from": [
+    "libero_goal_3ep_per_task_seed42.json"
+  ],
+  "source_root_basename": "libero_goal"
+}

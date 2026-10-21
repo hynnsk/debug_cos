@@ -1,0 +1,47 @@
+# openpi_hs11 -- LIBERO post-training: libero_10, every episode of the suite, Reptile init.
+# Base recipe [job].config fixes the model (pi05, 10-step chunks, state not fed to pi05 = openpi's pi05_libero) and the
+# LIBERO_LeRobot_v3 pipeline; everything below re-states the run settings and can be overridden on the CLI
+# (scripts/train_toml.py --toml <this file> train.num_train_steps=20 wandb.enabled=false ...).
+# Launch: sr 4 48 scripts/hs11/launch_libero10_all_reptile_v1.sh    Checkpoints: checkpoints/pi05_libero_v3_libero_10_all_reptile/libero10_all_reptile_v1/<step>/
+
+[job]
+config       = "pi05_libero_v3_libero_10_all_reptile"
+exp_name     = "libero10_all_reptile_v1"
+project_name = "openpi_hs11"
+
+[wandb]
+enabled = true
+mode    = "offline"        # offline | online | disabled (WANDB_MODE); enabled=false disables logging entirely
+
+[data]
+suite          = "libero_10"
+episode_subset = ""   # all episodes
+
+[checkpoint]
+init        = "reptile"        # warm start from a Reptile theta
+init_params = "checkpoints/pi05_reptile/reptile_v1/1000/params"   # <reptile ckpt>/<meta-iter>/params; REPTILE_PARAMS env or checkpoint.init_params=... overrides
+base_dir    = "./checkpoints"
+
+[train]
+batch_size      = 64
+num_train_steps = 30000
+fsdp_devices    = 0            # 0 = shard over every GPU of the allocation
+num_workers     = 8
+save_interval   = 5000
+keep_period     = 5000
+log_interval    = 50
+seed            = 42
+ema_enabled     = true
+ema_decay       = 0.999
+overwrite       = false
+resume          = true            # an existing checkpoint dir continues from its latest step + wandb run id
+[optimizer]
+peak_lr            = 5e-5
+warmup_steps       = 10_000
+decay_steps        = 1_000_000      # pi05_libero: 10 k warmup then constant 5e-5
+decay_lr           = 5e-5
+weight_decay       = 1e-10
+clip_gradient_norm = 1.0
+
+[model]
+action_horizon = 10

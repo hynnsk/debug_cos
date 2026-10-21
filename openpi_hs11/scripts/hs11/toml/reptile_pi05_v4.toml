@@ -1,0 +1,68 @@
+# openpi_hs11 -- REPTILE meta pre-training of pi05_base, variant v4: SLOW-WEIGHTS / LOOKAHEAD-STYLE (persistent Adam, small eps).
+# Rationale: in the Cosmos3 experiments the Reptile init beat the joint-SFT control (69.4 vs 58.2 on LIBERO-10 3ep) although
+# neither "learned to adapt" (query gap < 0 in both logs) -- the measurable difference is that Reptile's damped interpolation
+# averages the single-embodiment updates instead of chasing them (less interference, flatter point). v1's Adam reset per episode
+# turns every inner loop into near sign-descent (adapt_delta ~ k * lr * sqrt(N)), which is where the random-walk noise comes from.
+# v4 keeps the Adam state across meta-episodes (the inner trajectory is a proper Adam continuation with a well-estimated second
+# moment), uses short inner loops and a small outer step, and spends the compute on 2x more meta-iterations:
+#   theta <- theta + eps * (params_5steps - theta), eps 0.10 -> 0.02, 2000 iterations = 5 x 256 x 2000 (same compute as v1).
+# This is the Lookahead optimiser (k = 5, alpha = eps) applied to multi-embodiment SFT; the momentum carried over from the previous
+# embodiment decays within ~10 Adam steps (b1 = 0.9), i.e. within one meta-episode. The warm-up ramp runs once at the start.
+# Launch: sr 4 48 scripts/hs11/launch_reptile_pi05_v4.sh      (smoke: ... outer.max_iter=2 checkpoint.save_interval=1 wandb.enabled=false)
+# Checkpoints: checkpoints/pi05_reptile/reptile_v4/<meta-iter>/params (500 / 1000 / 1500 / 2000)
+
+[job]
+name         = "pi05_reptile"
+exp_name     = "reptile_v4"
+project_name = "openpi_hs11"
+
+[wandb]
+enabled = true
+mode    = "offline"
+
+[model]
+action_horizon = 10            # = the downstream LIBERO recipe
+
+[checkpoint]
+init_params   = "gs://openpi-assets/checkpoints/pi05_base/params"   # cached under $OPENPI_DATA_HOME
+base_dir      = "./checkpoints"
+save_interval = 2000            # 4 snapshots over the 2000 meta-iterations
+keep_period   = 2000
+
+[data]
+embodiments      = ["fractal", "bridge", "robomind_ur", "robomind_franka", "molmoact2_yam"]
+data_root        = ""          # "" = $ROBOT_FEWSHOT_ROOT
+assets_dir       = "./assets/pi05_reptile"   # <assets_dir>/<embodiment>/norm_stats.json
+num_workers      = 8
+prefetch_episodes = 3
+
+[sampler]
+k_shot                 = 128   # 256 support windows from 128 distinct demos (see v2)
+windows_per_demo       = 2
+q_query                = 32    # 64 query windows (diagnostics only)
+query_windows_per_demo = 2
+disjoint_query_tasks   = true
+min_tasks_for_disjoint = 4
+min_frames             = 1
+
+[inner]
+steps           = 5            # v1: 10.  short fast-weight excursion (Lookahead k)
+batch_size      = 64           # 256 / 64 = 4 micro-batches per inner step
+lr              = 5e-5
+warmup_steps    = 2            # only ramps once: the optimiser state (and its step counter) persists across meta-episodes
+weight_decay    = 1e-10
+clip            = 1.0
+reset_optimizer = false        # v1: true.  keep Adam moments across meta-episodes -> no per-episode sign-descent restart
+
+[outer]
+meta_lr           = 0.1        # v1: 0.5.  eps 0.10 -> 0.02: slow weights move at ~10 % of the fast-weight speed
+meta_lr_min_ratio = 0.2
+max_iter          = 2000       # 5 x 256 x 2000 = 10 x 256 x 1000 -> same compute as v1 (~84 h on 4 x 48 GB)
+eval_query_every  = 1
+
+[infra]
+seed         = 42
+fsdp_devices = 0
+log_interval = 1
+overwrite    = false
+resume       = true

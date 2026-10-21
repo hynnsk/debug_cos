@@ -1,0 +1,65 @@
+# openpi_hs11 -- REPTILE meta pre-training of pi05_base, variant v5: LARGE SUPPORT, FEW CLEAN STEPS.
+# Rationale: the signal-to-noise ratio of the meta direction (params - theta) is bounded by the mini-batch gradient noise, and v1's
+# inner loop spends 10 Adam steps on the same 256 windows (memorisation, query loss worse than zero-shot). v5 halves the number
+# of inner steps and doubles the support set instead: every inner step averages the gradient over 512 windows from 256 distinct
+# demonstrations, so the 5-step displacement points along the embodiment's mean gradient rather than along the noise of one draw.
+# The per-episode displacement is ~half of v1 (5 steps), so the outer step keeps v1's eps 0.5 -> 0.05 (same net movement budget).
+# Compute: 5 steps x 512 windows x 1000 iterations = v1. Data: 288 episodes decoded per meta-episode -> watch t_data_s.
+# Launch: sr 4 48 scripts/hs11/launch_reptile_pi05_v5.sh      (smoke: ... outer.max_iter=2 checkpoint.save_interval=1 wandb.enabled=false)
+# Checkpoints: checkpoints/pi05_reptile/reptile_v5/<meta-iter>/params (250 / 500 / 750 / 1000)
+
+[job]
+name         = "pi05_reptile"
+exp_name     = "reptile_v5"
+project_name = "openpi_hs11"
+
+[wandb]
+enabled = true
+mode    = "offline"
+
+[model]
+action_horizon = 10            # = the downstream LIBERO recipe
+
+[checkpoint]
+init_params   = "gs://openpi-assets/checkpoints/pi05_base/params"   # cached under $OPENPI_DATA_HOME
+base_dir      = "./checkpoints"
+save_interval = 1000
+keep_period   = 1000
+
+[data]
+embodiments      = ["fractal", "bridge", "robomind_ur", "robomind_franka", "molmoact2_yam"]
+data_root        = ""          # "" = $ROBOT_FEWSHOT_ROOT
+assets_dir       = "./assets/pi05_reptile"   # <assets_dir>/<embodiment>/norm_stats.json
+num_workers      = 8
+prefetch_episodes = 3
+
+[sampler]
+k_shot                 = 256   # v1: 32.  512 support windows from 256 distinct demos
+windows_per_demo       = 2
+q_query                = 32    # 64 query windows (diagnostics only)
+query_windows_per_demo = 2
+disjoint_query_tasks   = true
+min_tasks_for_disjoint = 4
+min_frames             = 1
+
+[inner]
+steps           = 5            # v1: 10
+batch_size      = 64           # 512 / 64 = 8 micro-batches per inner step (gradients averaged -> one 512-window step)
+lr              = 5e-5
+warmup_steps    = 1            # 5-step loop: ramp only the first step
+weight_decay    = 1e-10
+clip            = 1.0
+reset_optimizer = true
+
+[outer]
+meta_lr           = 0.5        # = v1 (per-episode displacement is ~half of v1, so the net movement budget matches)
+meta_lr_min_ratio = 0.1
+max_iter          = 1000       # 5 x 512 x 1000 = 10 x 256 x 1000 -> same compute as v1 (~84 h on 4 x 48 GB)
+eval_query_every  = 1
+
+[infra]
+seed         = 42
+fsdp_devices = 0
+log_interval = 1
+overwrite    = false
+resume       = true
