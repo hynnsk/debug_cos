@@ -1,30 +1,34 @@
 #!/usr/bin/env bash
-# v75: DINOv2 REPA arm -> experiment action_policy_libero_edge_repa; exports HF_HOME for the frozen facebook/dinov2-base teacher.
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
-# cosmos_hs11: LIBERO-10 few-shot (3 demos/task) FULL fine-tune warm-started from a full-mode REPTILE checkpoint.
-# Drives examples/toml/sft_config/action_policy_libero_10_edge_reptileinit.toml. See docs/action_reptile_meta.md.
+# cosmos_hs11: LIBERO-GOAL few-shot (3 demos/task) FULL fine-tune from a full-mode REPTILE checkpoint + DINOv2 ViT-B/14 REPA
+# distillation -- LIBERO-Goal port of launch_sft_action_policy_libero_10_edge_reptileinit_repa_dinov2_v47.sh (VideoREPA TRD, l1 + margin 0.1, MoT block 24).
+# = launch_sft_action_policy_libero_goal_edge_reptileinit_v7.sh + the HF teacher env. Drives examples/toml/sft_config/action_policy_libero_goal_edge_reptileinit_v20.toml
+# (override with REPA_TOML_FILE). Same env as launch_sft_action_policy_libero_goal_edge_reptileinit_v7.sh plus HF_HOME (the frozen
+# teacher facebook/dinov2-base is read from $HF_HOME/hub, downloaded once if absent). See docs/action_reptile_meta.md section 8.
 #
 # Required env vars:
-#   LIBERO_ROOT            local LIBERO-10 LeRobot dataset dir, e.g. <dir>/libero_10
+#   LIBERO_ROOT            local LIBERO-Goal LeRobot dataset dir, e.g. <dir>/libero_goal
 #   REPTILE_CKPT_PATH      <reptile job>/checkpoints/iter_XXXXXXXXX  (the directory that contains model/)
 #   META_ACTION_INIT_PATH  <reptile job>/meta_action_init_iter_XXXXXX.pt (the matching action heads)
 # Optional: WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT, NPROC_PER_NODE, MASTER_PORT, EXTRA_TAIL_OVERRIDES.
 # Usage:
-#   NPROC_PER_NODE=4 sr 4 48 examples/launch_sft_action_policy_libero_10_edge_reptileinit.sh
+#   NPROC_PER_NODE=4 sr 4 48 examples/launch_sft_action_policy_libero_goal_edge_reptileinit_v20.sh
 
-TOML_FILE="${TOML_FILE:-examples/toml/sft_config/action_policy_libero_goal_edge_reptileinit_v75.toml}"
+TOML_FILE="${REPA_TOML_FILE:-${TOML_FILE:-examples/toml/sft_config/action_policy_libero_goal_edge_reptileinit_v75.toml}}"
+: "${MASTER_PORT:=50085}"   # libero_goal v17-v22 = 50082-50087; distinct from every other cosmos_hs* launcher (50004-50081)
+export MASTER_PORT
 : "${COSMOS_STORAGE:=$HOME/project/cosmos_storage}"
 export COSMOS_STORAGE
-# Frozen DINOv2 teacher (facebook/dinov2-base) is loaded from the HF hub cache; GPU nodes have no internet.
 export HF_HOME="${HF_HOME:-$COSMOS_STORAGE/hf_cache}" HF_HUB_CACHE="${HF_HUB_CACHE:-$COSMOS_STORAGE/hf_cache/hub}"
+# The packing loaders ship many tensors per batch (+ one native uint8 clip per sample for the teacher); lift the
+# 1024 soft fd limit of the compute nodes (train.py also switches to file_system tensor sharing).
 ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
 export PYTORCH_ALLOC_CONF="${PYTORCH_ALLOC_CONF:-expandable_segments:True}"
 export LIBERO_ROOT="${LIBERO_ROOT:-}"
 export REPTILE_CKPT_PATH="${REPTILE_CKPT_PATH:-}"
 export META_ACTION_INIT_PATH="${META_ACTION_INIT_PATH:-}"
-export MASTER_PORT=50529
 # _sft_launcher_common.sh validates BASE_CHECKPOINT_PATH / defaults WAN_VAE_PATH when this is set; the TOML itself
 # reads REPTILE_CKPT_PATH.
 : "${BASE_CHECKPOINT_PATH:=${REPTILE_CKPT_PATH}}"
