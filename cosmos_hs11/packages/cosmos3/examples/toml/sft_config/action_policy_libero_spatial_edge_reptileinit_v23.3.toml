@@ -59,7 +59,7 @@ max_val_iter            = 16
 
 [dataloader_train]
 max_samples_per_batch = 64
-episode_subset_path   = "libero_spatial_3ep_per_task_seed42.json"        # 3 demos/task x 10 tasks = 30 episodes (libero_spatial)
+episode_subset_path   = "libero_spatial_3ep_per_task_v3.json"        # 3 demos/task x 10 tasks = 30 episodes (libero_spatial)
 
 [dataloader_val]
 max_samples_per_batch = 16
