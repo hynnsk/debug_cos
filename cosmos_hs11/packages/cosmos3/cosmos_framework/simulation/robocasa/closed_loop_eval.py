@@ -49,6 +49,7 @@ import robocasa  # noqa: F401  (registers RoboCasa envs like CloseToasterOvenDoo
 
 from cosmos_framework.simulation.robocasa.eval_utils import (
     decode_10d_to_env12,
+    decode_15d_armfirst_to_env12,
     decode_15d_to_env12,
     decode_20d_to_env12,
     decode_pred_video,
@@ -77,8 +78,9 @@ def get_env_metadata(dsdir: str) -> dict:
 
 CAMERA_SET = "wrist_lr"  # set from --camera-set in main(); switches compose layout
 USE_BASE_ACTION = False  # set from --use-base-action; widens the state token to the mobile contract
-BASE_ENCODING = "ego"  # set from --base-encoding; "ego" = 20D pose delta, "raw" = 15D base_motion
-_ACTION_DIM_BY_ENCODING = {"ego": 20, "raw": 15}
+BASE_ENCODING = "ego"  # set from --base-encoding; "ego" = 20D pose delta, "raw" / "raw_armfirst" = 15D base_motion
+_ACTION_DIM_BY_ENCODING = {"ego": 20, "raw": 15, "raw_armfirst": 15}
+_BASE_DECODERS = {"ego": decode_20d_to_env12, "raw": decode_15d_to_env12, "raw_armfirst": decode_15d_armfirst_to_env12}
 
 
 def _upright(img: np.ndarray) -> np.ndarray:
@@ -133,12 +135,13 @@ def build_state_token(obs) -> list[float]:
     grip = np.array([qpos[0] - qpos[1]], dtype=np.float32)  # signed finger opening
     token = np.concatenate([pos, rot6d, grip]).astype(np.float32)  # [10]
     if USE_BASE_ACTION:
-        # The conditioning token must match the action width (20D ego / 15D raw). The base
-        # block is zero-filled exactly as in training (RoboCasaLeRobotDataset.__getitem__):
-        # under "ego" the absolute base pose is world-frame and carries no transferable
-        # signal, and under "raw" the observation has no base velocity to put there at all.
-        pad = _ACTION_DIM_BY_ENCODING[BASE_ENCODING] - 10
-        token = np.concatenate([np.zeros(pad, dtype=np.float32), token])
+        # The conditioning token must match the action width (20D ego / 15D raw / raw_armfirst). The
+        # base block is zero-filled exactly as in training (RoboCasaLeRobotDataset._pad_state_token):
+        # under "ego" the absolute base pose is world-frame and carries no transferable signal, and
+        # under "raw" / "raw_armfirst" the observation has no base velocity to put there at all.
+        # "raw_armfirst" keeps the 10D arm token first and pads AFTER it.
+        pad = np.zeros(_ACTION_DIM_BY_ENCODING[BASE_ENCODING] - 10, dtype=np.float32)
+        token = np.concatenate([token, pad]) if BASE_ENCODING == "raw_armfirst" else np.concatenate([pad, token])
     return token.tolist()
 
 
@@ -257,8 +260,9 @@ def run_policy(env, *, server_url, image_size, action_horizon, max_steps,
             queue = acts[:action_horizon] if action_horizon > 0 else list(acts)
         a = np.asarray(queue.pop(0))
         # Decoder is chosen by --base-encoding (explicit), not by guessing from the width:
-        #   raw -> 15D [base_motion(4), control_mode(1), arm(10)]  (identity base round-trip)
-        #   ego -> 20D [base_pos(3), base_rot6d(6), control_mode(1), arm(10)]
+        #   raw          -> 15D [base_motion(4), control_mode(1), arm(10)]  (identity base round-trip)
+        #   raw_armfirst -> 15D [arm(10), base_motion(4), control_mode(1)]  (same, arm block first)
+        #   ego          -> 20D [base_pos(3), base_rot6d(6), control_mode(1), arm(10)]
         # Without --use-base-action it is the 10D fixed-base contract. The width the server
         # returned is asserted against that choice so a mismatched flag fails loudly instead
         # of silently decoding garbage.
@@ -269,7 +273,7 @@ def run_policy(env, *, server_url, image_size, action_horizon, max_steps,
                     f"--base-encoding={BASE_ENCODING} expects {want}D actions but the server "
                     f"returned {a.shape[-1]}D. Check that the flag matches the checkpoint."
                 )
-            env_action = (decode_15d_to_env12 if BASE_ENCODING == "raw" else decode_20d_to_env12)(a, False)
+            env_action = _BASE_DECODERS[BASE_ENCODING](a, False)
         else:
             if a.shape[-1] != 10:
                 raise ValueError(
@@ -314,9 +318,11 @@ def main() -> None:
     ap.add_argument("--camera-set", default="wrist_lr", choices=["wrist_lr", "left_wrist", "lrw"],
                     help="wrist_lr = 3-cam squished (384x256); left_wrist = LIBERO-style [left|wrist] 256x512; "
                          "lrw = 3-cam full-res side by side [left|right|wrist] 256x768")
-    ap.add_argument("--base-encoding", choices=("ego", "raw"), default="ego",
+    ap.add_argument("--base-encoding", choices=("ego", "raw", "raw_armfirst"), default="ego",
                     help="mobile-base action contract: 'ego' (20D state-derived pose delta, "
-                         "the original) or 'raw' (15D native base_motion command)")
+                         "the original), 'raw' (15D native base_motion command, base first) or "
+                         "'raw_armfirst' (15D, the same channels with the 10D arm block first; "
+                         "action_policy_robocasa_edge)")
     ap.add_argument("--use-base-action", action="store_true",
                     help="20D mobile-base checkpoint: widen the state token and decode base_motion")
     ap.add_argument("--use-state", action="store_true",

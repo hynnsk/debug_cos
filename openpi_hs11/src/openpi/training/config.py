@@ -118,26 +118,27 @@ class ModelTransformFactory(GroupFactory):
     def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
         match model_config.model_type:
             case _model.ModelType.PI0:
+                tokenizer = _tokenizer.PaligemmaTokenizer(model_config.max_token_len)
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
                         _transforms.ResizeImages(224, 224),
-                        _transforms.TokenizePrompt(
-                            _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
-                        ),
+                        _transforms.TokenizePrompt(tokenizer),
+                        # cosmos_hs11 language ranking (no-op unless the batch carries a negative_prompt).
+                        _transforms.TokenizeNegativePrompt(tokenizer),
                         _transforms.PadStatesAndActions(model_config.action_dim),
                     ],
                 )
             case _model.ModelType.PI05:
                 assert isinstance(model_config, pi0_config.Pi0Config)
+                tokenizer = _tokenizer.PaligemmaTokenizer(model_config.max_token_len)
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
                         _transforms.ResizeImages(224, 224),
-                        _transforms.TokenizePrompt(
-                            _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
-                            discrete_state_input=model_config.discrete_state_input,
-                        ),
+                        _transforms.TokenizePrompt(tokenizer, discrete_state_input=model_config.discrete_state_input),
+                        # cosmos_hs11 language ranking (no-op unless the batch carries a negative_prompt).
+                        _transforms.TokenizeNegativePrompt(tokenizer, discrete_state_input=model_config.discrete_state_input),
                         _transforms.PadStatesAndActions(model_config.action_dim),
                     ],
                 )

@@ -259,3 +259,122 @@ def test_meta_sampler_config_and_override_keys_carry_the_grouped_knobs() -> None
     cfg = MetaSamplerConfig()
     assert cfg.tasks_per_episode is None and cfg.grouped_episode_fraction == 0.0
     assert {"tasks_per_episode", "grouped_episode_fraction", "cfg_dropout_rate", "embodiment_weights"} <= SAMPLER_OVERRIDE_KEYS
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# cosmos_hs11 v18: language-ranking negatives inside a meta-episode
+# ---------------------------------------------------------------------------------------------------------------
+def _spec(support, query, disjoint=True):
+    from cosmos_framework.data.generator.action.meta.episodic_sampler import MetaEpisodeSpec, SampledDemo
+
+    return MetaEpisodeSpec(
+        embodiment="a",
+        domain_id=1,
+        support=[SampledDemo(e, t, w) for e, t, w in support],
+        query=[SampledDemo(e, t, w) for e, t, w in query],
+        disjoint_tasks=disjoint,
+        grouped=True,
+    )
+
+
+_TEXTS = {0: "open the drawer", 1: "close the drawer | shut the drawer", 2: "pick the cup", 5: "held-out sentence"}
+
+
+def test_episode_ranking_negatives_come_from_the_other_support_tasks() -> None:
+    from cosmos_framework.data.generator.action.meta.episodic_sampler import _paraphrases, episode_ranking_negatives
+
+    spec = _spec(
+        support=[(0, 0, (0, 1)), (1, 1, (2, 3)), (2, 2, (4,))],
+        query=[(3, 5, (10, 11)), (4, 1, (12,))],  # task 5 = held-out instruction, task 1 = also in the support
+    )
+    neg = episode_ranking_negatives(spec, _TEXTS, np.random.default_rng(0))
+    assert set(neg) == {0, 1, 2, 3, 4, 10, 11, 12}
+    support_text = {t: set(_paraphrases(_TEXTS[t])) for t in (0, 1, 2)}
+    for window, own in [(0, 0), (1, 0), (2, 1), (3, 1), (4, 2), (12, 1)]:
+        text, valid = neg[window]
+        assert valid and text not in support_text[own]
+        assert any(text in support_text[t] for t in (0, 1, 2) if t != own)
+    for window in (10, 11):  # held-out query windows: negatives are support instructions, never their own
+        text, valid = neg[window]
+        assert valid and text in support_text[0] | support_text[1] | support_text[2]
+    # deterministic for a given rng seed (every rank draws the same map)
+    again = episode_ranking_negatives(spec, _TEXTS, np.random.default_rng(0))
+    assert again == neg
+    # paraphrases of a " | " task are sampled, not only the first one
+    draws = {episode_ranking_negatives(spec, _TEXTS, np.random.default_rng(s))[0][0] for s in range(40)}
+    assert {"close the drawer", "shut the drawer", "pick the cup"} <= draws
+
+
+def test_episode_ranking_negatives_mask_windows_without_an_eligible_task() -> None:
+    from cosmos_framework.data.generator.action.meta.episodic_sampler import episode_ranking_negatives
+
+    single = _spec(support=[(0, 0, (0,)), (1, 0, (1,))], query=[(2, 0, (2,)), (3, 3, (3,))], disjoint=False)
+    neg = episode_ranking_negatives(single, _TEXTS, np.random.default_rng(0))
+    assert neg[0] == (None, False) and neg[1] == (None, False) and neg[2] == (None, False)  # only task 0 in support
+    assert neg[3] == ("open the drawer", True)  # query of another task: the support instruction is its negative
+    unknown = _spec(support=[(0, -1, (0,)), (1, 2, (1,))], query=[])  # task_index -1 (unknown) is never a candidate
+    neg = episode_ranking_negatives(unknown, _TEXTS, np.random.default_rng(0))
+    assert neg[0] == ("pick the cup", True) and neg[1] == (None, False)
+    assert all(v == (None, False) for v in episode_ranking_negatives(single, None, np.random.default_rng(0)).values())
+
+
+def test_synchronized_dataset_ships_negatives_and_masks_invalid_windows() -> None:
+    from cosmos_framework.data.generator.action.meta.episodic_sampler import (
+        EpisodicEmbodimentSampler,
+        SynchronizedMetaEpisodeIterableDataset,
+    )
+
+    class _DS:
+        def __init__(self):
+            self.calls = []
+
+        def __getitem__(self, i):
+            raise AssertionError("language_ranking must go through getitem_with_extras")
+
+        def getitem_with_extras(self, i, extras):
+            self.calls.append((i, dict(extras)))
+            s = _fake_sample(1)
+            neg = extras["ranking_negative_instruction"]
+            s["negative_text_token_ids"] = torch.tensor([9, 9]) if neg is not None else torch.tensor([1, 2, 3])
+            s["ranking_valid"] = True  # what the transform sets for a non-dropped positive
+            return s
+
+    tables = {"a": _table(24, 6, 100)}
+    texts = {"a": {t: f"task {t}" for t in range(6)}}
+    sampler = EpisodicEmbodimentSampler(
+        tables, {"a": 1}, k_shot=4, q_query=2, windows_per_demo=2, disjoint_tasks=True, tasks_per_episode=2,
+        grouped_episode_fraction=1.0,
+    )
+    ranks = []
+    for r in range(2):
+        ds = _DS()
+        d = SynchronizedMetaEpisodeIterableDataset(
+            {"a": ds}, sampler, max_samples_per_batch=4, seed=7, language_ranking=True, task_texts=texts
+        )
+        d.shard_rank, d.shard_world_size = r, 2
+        ranks.append((d, ds))
+    spec = ranks[0][0].spec_for(3)
+    assert ranks[1][0].spec_for(3).support_indices == spec.support_indices
+    maps = [d.ranking_negatives(spec, np.random.default_rng([7, 3, 7919])) for d, _ in ranks]
+    assert maps[0] == maps[1] and set(maps[0]) == set(spec.support_indices) | set(spec.query_indices)
+    item = ranks[0][0].materialize_shard(spec, 3)
+    assert item["failed"] is False and item["support"] and item["query"]
+    seen = dict(ranks[0][1].calls)
+    assert set(seen) == set(ranks[0][0].shard(spec.support_indices)) | set(ranks[0][0].shard(spec.query_indices))
+    for i, extras in seen.items():
+        assert extras == {"ranking_negative_instruction": maps[0][i][0]}
+    for batch in item["support"] + item["query"]:
+        assert "negative_text_token_ids" in batch and len(batch["ranking_valid"]) == batch["_num_samples"]
+    # two support tasks -> every support window has a negative from the other task
+    assert all(maps[0][i][1] for i in spec.support_indices)
+    with pytest.raises(ValueError, match="task_texts"):
+        SynchronizedMetaEpisodeIterableDataset({"a": _DS()}, sampler, max_samples_per_batch=4, seed=7, language_ranking=True)
+    # ranking off: the plain __getitem__ path and no ranking keys (every existing recipe)
+    class _Plain:
+        def __getitem__(self, i):
+            return _fake_sample(1)
+
+    plain = SynchronizedMetaEpisodeIterableDataset({"a": _Plain()}, sampler, max_samples_per_batch=4, seed=7)
+    plain.shard_rank, plain.shard_world_size = 0, 2
+    item = plain.materialize_shard(spec, 3)
+    assert all("ranking_valid" not in b and "negative_text_token_ids" not in b for b in item["support"] + item["query"])

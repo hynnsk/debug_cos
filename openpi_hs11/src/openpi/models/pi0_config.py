@@ -1,4 +1,5 @@
 import dataclasses
+import math
 from typing import TYPE_CHECKING
 
 import flax.nnx as nnx
@@ -13,6 +14,48 @@ import openpi.shared.nnx_utils as nnx_utils
 
 if TYPE_CHECKING:
     from openpi.models.pi0 import Pi0
+
+
+@dataclasses.dataclass(frozen=True)
+class LanguageRankingConfig:
+    """Action-language hinge ranking, ported from cosmos_hs11 (``[model.language_ranking]``,
+    ``algorithm/loss/language_ranking.py``; the defaults reproduce the v23/v41 recipe).
+
+    Every training sample is predicted twice from the SAME noised actions and flow time: under its own instruction
+    (``E_pos``) and under a uniformly drawn instruction of ANOTHER task of the suite (``E_neg``, see
+    ``hs11.libero_v3.NegativePrompt``). ``E`` is the fp32 MSE over the chunk and the real (non-padded) action dims, without
+    the main-loss weighting. The per-sample hinge ``relu(margin + E_pos - E_neg)`` (zero for samples whose own prompt was
+    CFG-dropped) is averaged over the batch and added as ``loss_weight * hinge`` to openpi's flow-matching loss.
+
+    Weight bookkeeping: Cosmos adds the hinge with ``loss_weight = 1`` next to ``10 x`` an action loss that is a mean over
+    the real dims only (ranking : action = 1 : 10 per real action element). openpi's action loss has weight 1 but averages
+    over all ``action_dim`` (32) padded slots, so the Cosmos-equivalent weight is ``0.1 * raw_action_dim / action_dim``
+    (``0.1 * 7 / 32 = 0.022`` for the 7-D LIBERO actions). ``margin`` is in the same per-element MSE units as in Cosmos.
+    """
+
+    enabled: bool = False
+    loss_weight: float = 0.1
+    margin: float = 0.1
+    # Real action dims = the first ``raw_action_dim`` slots. None = infer per batch (slots that are zero in every
+    # sample and chunk step of the batch are padding).
+    raw_action_dim: int | None = None
+    # The gradient through E_neg is multiplied by this (1 = original hinge, 0 = positive-only: the model can satisfy the
+    # hinge only by lowering E_pos, never by making the wrong-instruction prediction worse).
+    negative_grad_scale: float = 1.0
+    # "absolute": E_neg >= E_pos + margin.  "relative": E_neg >= (1 + margin) * E_pos (margin * stop_gradient(E_pos)).
+    margin_mode: str = "absolute"
+
+    def __post_init__(self):
+        if not math.isfinite(self.margin) or self.margin < 0:
+            raise ValueError(f"language_ranking.margin must be finite and >= 0, got {self.margin}")
+        if not math.isfinite(self.loss_weight) or self.loss_weight < 0:
+            raise ValueError(f"language_ranking.loss_weight must be finite and >= 0, got {self.loss_weight}")
+        if not math.isfinite(self.negative_grad_scale) or not 0.0 <= self.negative_grad_scale <= 1.0:
+            raise ValueError(f"language_ranking.negative_grad_scale must be in [0, 1], got {self.negative_grad_scale}")
+        if self.margin_mode not in ("absolute", "relative"):
+            raise ValueError(f"language_ranking.margin_mode must be 'absolute' or 'relative', got {self.margin_mode!r}")
+        if self.raw_action_dim is not None and self.raw_action_dim <= 0:
+            raise ValueError(f"language_ranking.raw_action_dim must be positive or None, got {self.raw_action_dim}")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -33,6 +76,9 @@ class Pi0Config(_model.BaseModelConfig):
     discrete_state_input: bool = None  # type: ignore
 
     pytorch_compile_mode: str | None = "max-autotune"
+
+    # cosmos_hs11 language ranking (off by default; LIBERO post-training TOMLs enable it via [model.language_ranking]).
+    language_ranking: LanguageRankingConfig = dataclasses.field(default_factory=LanguageRankingConfig)
 
     def __post_init__(self):
         if self.max_token_len is None:

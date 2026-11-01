@@ -497,3 +497,80 @@ windows is ~200+ epochs over the ~1.1 k windows of 10 demos (vs ~75 over 30 demo
 Ports 50140-50147 (baseline/reptileinit per suite in the order 10, goal, object, spatial); every launcher checks the
 LIBERO_ROOT basename against its suite. GIFs of the 40 selected demos: `~/project/utils/libero_1ep_v1_gifs/<suite>/`.
 Tests: `configs/toml_config/libero_1ep_toml_test.py`. Not GPU-smoked.
+
+## 11. v17: shared theta + one PRIVATE LoRA adapter per source embodiment (2026-10-30)
+
+Why: the 2026-10-22 analysis of the v4 run showed that 96 % of the Reptile movement cancels across embodiments and that
+the LIBERO fine-tune from the Reptile init partly *undoes* the meta delta (cos -0.42 with the FT direction). Hypothesis:
+the cancelling / undone part is embodiment-specific. v17 gives every source embodiment its own LoRA adapter `Delta_e`
+(rank 32, alpha 64, the q/k/v/o + up/down `moe_gen` projections of the LoRA post-training recipe) and keeps only the
+shared part in theta:
+
+* an episode of embodiment `e` runs the k inner steps on `theta + Delta_e` -- theta (full set) and `Delta_e` train together
+  (`"lora_"` in `optimizer.keys_to_select`, `lr_multipliers.lora_`, `lora_freeze_base = false`);
+* the Reptile step `theta <- theta + eps (theta_tilde - theta)` is unchanged and touches theta ONLY:
+  `ReptileMetaState(exclude_groups={GROUP_LORA})` never copies, interpolates or restores the adapters;
+* `Delta_e` keeps its post-inner-loop value for the next episode of `e` (`meta/private_lora.py::PrivateLoraBank`: one
+  rank-local shard copy per adapter tensor and embodiment, `activate(e)` before the episode is encoded, `store()` after
+  the inner loop); the other adapters are untouched.
+
+Downstream is unchanged: LIBERO is a NEW embodiment and starts from theta + the meta action heads (`meta_action_init.pt`,
+row copy as before) with NO adapter. The exported DCP also holds the LoRA tensors of the last active embodiment; a
+`*_reptileinit` recipe (`model.lora_enabled = false`) has no such parameters and DCP only reads the keys the model asks
+for, so they are ignored. (A warm adapter -- e.g. `Delta_franka` for the Franka-based LIBERO -- is a possible variant, not
+implemented.)
+
+| key | where | value |
+| --- | --- | --- |
+| `private_lora` | `[custom.meta]` | `true` (requires `theta_mode = "full"`, `lora_enabled = true`, `"lora_"` in `keys_to_select`) |
+| `lora_enabled/rank/alpha/target_modules/freeze_base` | `[model]` | `true / 32 / 64 / q,k,v,o,up,down of moe_gen / false` |
+| `keys_to_skip_loading` | `[checkpoint]` | `+ "lora_"` (the base DCP has no adapters; they start as identity, `B = 0`) |
+
+Recipe `action_reptile_meta_edge_v17.toml` = v4.2 + the rows above, run name `edge_reptile_v17_private_lora`, launcher
+`examples/launch_reptile_meta_edge_v17.sh` (= the v4.2 launcher, port 50099). Diagnostics: `private_lora_delta/<embodiment>`
+(L2 of `Delta_e` from its identity init, logged with the theta norms), `meta_action_init.pt` metadata `private_lora`.
+Checkpointing: `checkpoints/iter_XXXXXXXXX/private_lora_bank_rankRR_ofWW.pt` per rank next to the DCP (auto-resume
+needs the same world size; a missing file restarts the adapters from identity with a warning). Memory: one adapter is
+~0.1 % of the Edge trainable set, x 5 slots, sharded like theta. What to look at vs v4.2: the cancellation fraction and
+`meta_step_norm` (the shared displacement should cancel less), the downstream FT-vs-delta cosine (should be less negative),
+and of course LIBERO SR; if theta stops moving (`theta_norm/*`, `adapt_delta/*` collapse) the adapters absorb too much.
+Tests: `meta/private_lora_test.py` (theta excludes the adapters, slot isolation / persistence, meta step leaves the active
+adapter, save/load, errors), `toml_config/reptile_toml_test.py` (v17 = v4.2 + keys, launcher, port). Not GPU-smoked.
+
+## 12. v18: grouped "scene family" episodes + ranking hinge in the inner loop + held-out query steps (2026-10-30)
+
+Why: the LIBERO-goal/spatial few-shot failures execute the wrong instruction of the scene ([[language confusion]]); the
+post-training RPL hinge addresses it after the fact. v18 shapes the init for it: every meta-episode is a scene family
+(one embodiment, `tasks_per_episode = 8` instructions x 4 demos), the action-language ranking hinge of the post-training
+recipe runs INSIDE the inner loop, and the displacement ends with steps on held-out instructions of the same embodiment.
+
+* `[model.language_ranking] enabled = true, loss_weight = 1.0, margin = 0.1` ("ranking default version"). The reptile
+  experiment now declares the full `language_ranking` dict (off by default, bit-identical) so a TOML can set any knob
+  (relative margin etc. as in the post-training recipes).
+* Negatives: the trainer switches the episodic loader to `language_ranking = true` (`apply_ranking_loader_settings`, like
+  the REPA native-frame switch). `episodic_sampler.episode_ranking_negatives` gives every window a paraphrase of ANOTHER
+  support task's instruction of the same episode (support windows: the other support tasks; query windows: the support
+  tasks other than their own), read from the reader's task table (`embodiments.embodiment_task_texts`, no video decode)
+  and tokenized by the shared transform through `ActionSFTDataset.getitem_with_extras` exactly like the LIBERO loader's
+  negatives. A window with no eligible task (single-task support set, e.g. the 2-task Franka reader after the uniform
+  fill) gets its own text as a placeholder and `ranking_valid = false`. The map is drawn from a stream keyed by the
+  episode only, so every rank holds the same window -> negative assignment.
+* `disjoint_tasks = true`: the 8 query demos come from instructions NOT in the support set when the embodiment has
+  enough of them (the sampler falls back to the uniform draw otherwise, as before).
+* `query_steps = 2` (`[custom.meta]`): after the k = 10 support steps and after the "adapted" query diagnostic, 2 optimizer
+  steps on the query sub-batches (held-out instructions, ranked against the support instructions) are taken BEFORE the
+  displacement: `theta_tilde = U_query^2(U_support^10(theta))`. 0 (default) = plain Reptile. With 8 x 8 = 64 query
+  windows over 4 ranks that is 2 passes over the per-rank query sub-batch.
+
+Recipe `action_reptile_meta_edge_v18.toml` = v4.2 + `[model.language_ranking]` + `tasks_per_episode 8`,
+`grouped_episode_fraction 1.0`, `disjoint_tasks true`, `language_ranking true`, `query_steps 2`; run name
+`edge_reptile_v18_grouped_ranking_queryfit`, launcher `examples/launch_reptile_meta_edge_v18.sh` (port 50100).
+Logged: `support_ranking_{loss,gap,margin_satisfied,valid_fraction}_last`, `query_ranking_{loss_zero_shot,loss,gap,
+margin_satisfied}` (held-out instructions before / after the support steps), `query_step_loss_{first,last}`. Cost: the
+negative forward doubles the inner-step compute (as in post-training) and the query steps add 2 steps per episode; the
+ranking requires `max_num_tokens_after_packing` headroom for the negative pack (same as the LIBERO RPL recipes at 64
+windows / rank). v17 and v18 are orthogonal and can be combined in one TOML (`private_lora = true` + the v18 rows).
+Tests: `meta/episodic_sampler_test.py` (negatives from the other support tasks, masking, rank-identical map, loader
+plumbing, ranking off = plain path), `scripts/train_action_reptile_v17_v18_test.py` (config validation, loader switch,
+scalars, task texts, raw-row extras), `toml_config/reptile_toml_test.py` (v18 = v4.2 + keys, routing onto the loader,
+launcher, port). Not GPU-smoked.

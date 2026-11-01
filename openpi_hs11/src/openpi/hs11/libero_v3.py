@@ -62,6 +62,16 @@ def make_libero_v3_spec(suite: str, episode_subset: str | None, *, root: str | N
     )
 
 
+def suite_instructions(spec: lerobot_v3.V3DatasetSpec) -> tuple[str, ...]:
+    """Every task instruction of the suite (``meta/tasks.parquet`` of the spec's root), de-duplicated and sorted.
+
+    Used by ``NegativePrompt``: the ranking negative of a sample is drawn from the OTHER instructions of the whole suite
+    (all 10 tasks), independently of the episode subset -- same as Cosmos' ``LiberoInstructionNegatives``.
+    """
+    tasks = lerobot_v3._read_tasks(pathlib.Path(spec.roots[0]))  # noqa: SLF001
+    return tuple(sorted({text for text in tasks.values() if text}))
+
+
 def build_libero_v3_dataset(spec: lerobot_v3.V3DatasetSpec, action_horizon: int) -> lerobot_v3.LeRobotV3Dataset:
     """Dataset builder used by the data config (``HS11_SKIP_IMAGES=1`` returns dummy frames: fast norm stats)."""
     skip_images = os.environ.get("HS11_SKIP_IMAGES", "0") == "1"
@@ -113,6 +123,9 @@ class LiberoV3Inputs(_transforms.DataTransformFn):
             inputs["actions"] = np.asarray(data["actions"], dtype=np.float32)
         if "prompt" in data:
             inputs["prompt"] = data["prompt"]
+        for key in ("negative_prompt", "ranking_valid"):  # language ranking (NegativePrompt), training batches only
+            if key in data:
+                inputs[key] = data[key]
         return inputs
 
 
@@ -134,6 +147,34 @@ class PromptDropout(_transforms.DataTransformFn):
             if random.random() < self.p:
                 data = {**data, "prompt": self.uncond_prompt}
         return data
+
+
+@dataclasses.dataclass(frozen=True)
+class NegativePrompt(_transforms.DataTransformFn):
+    """Language-ranking negative (cosmos_hs11 v23 ``negative_sampling = "uniform"``).
+
+    ``negative_prompt`` is drawn uniformly from the instructions of the OTHER tasks of the suite; ``ranking_valid`` is
+    False when the sample's own prompt is not a suite instruction (it was replaced by ``PromptDropout``), so that pair
+    contributes zero to the hinge. Put it in ``repack_transforms`` AFTER ``PromptDropout`` (dataset side, so inference
+    is unaffected); ``transforms.TokenizeNegativePrompt`` tokenizes it with the model transforms.
+    """
+
+    instructions: tuple[str, ...]
+
+    def __post_init__(self):
+        if len(set(self.instructions)) < 2:
+            raise ValueError("NegativePrompt needs at least two distinct suite instructions")
+
+    def __call__(self, data: dict) -> dict:
+        if "prompt" not in data:
+            return data
+        import random
+
+        prompt = data["prompt"]
+        if not isinstance(prompt, str):
+            prompt = str(prompt)
+        candidates = [text for text in self.instructions if text != prompt]
+        return {**data, "negative_prompt": random.choice(candidates), "ranking_valid": prompt in self.instructions}
 
 
 @dataclasses.dataclass(frozen=True)

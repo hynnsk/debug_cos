@@ -67,6 +67,7 @@ class Pi0(_model.BaseModel):
     def __init__(self, config: pi0_config.Pi0Config, rngs: nnx.Rngs):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
         self.pi05 = config.pi05
+        self.language_ranking = config.language_ranking
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
         # TODO: rewrite gemma in NNX. For now, use bridge.
@@ -189,6 +190,36 @@ class Pi0(_model.BaseModel):
     def compute_loss(
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
     ) -> at.Float[at.Array, "*b ah"]:
+        chunked_loss, _ = self.compute_loss_and_metrics(rng, observation, actions, train=train)
+        return chunked_loss
+
+    def _predict_velocity(
+        self, observation: _model.Observation, x_t: _model.Actions, time: at.Float[at.Array, "*b"]
+    ) -> _model.Actions:
+        """One prefix + suffix pass: the velocity field v_t predicted for the (already preprocessed) observation."""
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
+        input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
+        ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
+        attn_mask = make_attn_mask(input_mask, ar_mask)
+        positions = jnp.cumsum(input_mask, axis=1) - 1
+        (prefix_out, suffix_out), _ = self.PaliGemma.llm(
+            [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
+        )
+        return self.action_out_proj(suffix_out[:, -self.action_horizon :])
+
+    def compute_loss_and_metrics(
+        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
+    ) -> tuple[at.Float[at.Array, "*b ah"], dict[str, at.Array]]:
+        """``compute_loss`` plus logging metrics.
+
+        cosmos_hs11 addition: when ``config.language_ranking.enabled`` the batch must carry
+        ``tokenized_negative_prompt(_mask)`` (``hs11.libero_v3.NegativePrompt`` + ``transforms.TokenizeNegativePrompt``).
+        The same noised actions ``x_t`` and time are then predicted a second time under the wrong instruction, and the
+        per-sample hinge ``relu(margin + E_pos - E_neg)`` (E = fp32 MSE over the chunk and the real action dims) is added
+        as ``loss_weight * hinge`` to every chunk step of that sample, so ``mean(chunked_loss)`` equals
+        ``mean_fm + loss_weight * mean_batch(hinge)`` exactly like Cosmos' ``total_loss += loss_weight * ranking_loss``.
+        """
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
 
@@ -200,18 +231,57 @@ class Pi0(_model.BaseModel):
         u_t = noise - actions
 
         # one big forward pass of prefix + suffix at once
-        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
-        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
-        input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
-        ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
-        attn_mask = make_attn_mask(input_mask, ar_mask)
-        positions = jnp.cumsum(input_mask, axis=1) - 1
-        (prefix_out, suffix_out), _ = self.PaliGemma.llm(
-            [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
-        )
-        v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+        v_t = self._predict_velocity(observation, x_t, time)
+        chunked_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
 
-        return jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        ranking = self.language_ranking
+        if not ranking.enabled:
+            return chunked_loss, {}
+        if observation.tokenized_negative_prompt is None or observation.tokenized_negative_prompt_mask is None:
+            raise ValueError(
+                "language_ranking is enabled but the batch has no tokenized_negative_prompt(_mask); the data config must "
+                "add hs11.libero_v3.NegativePrompt (repack side) and the model transforms TokenizeNegativePrompt."
+            )
+        # Paired prediction: identical image augmentation (preprocessed observation), x_t and time; only the prompt differs.
+        negative = observation.replace(
+            tokenized_prompt=observation.tokenized_negative_prompt,
+            tokenized_prompt_mask=observation.tokenized_negative_prompt_mask,
+        )
+        v_neg = self._predict_velocity(negative, x_t, time)
+
+        # Real (non-padded) action slots: explicit width, or inferred from the batch (padding is exactly zero everywhere).
+        if ranking.raw_action_dim is not None:
+            slot_mask = (jnp.arange(actions.shape[-1]) < ranking.raw_action_dim).astype(jnp.float32)
+        else:
+            slot_mask = jnp.any(actions != 0, axis=tuple(range(actions.ndim - 1))).astype(jnp.float32)
+        denominator = jnp.maximum(actions.shape[-2] * jnp.sum(slot_mask), 1.0)
+        target = u_t.astype(jnp.float32)
+
+        def error(v: _model.Actions) -> at.Float[at.Array, "*b"]:
+            return jnp.sum(jnp.square(v.astype(jnp.float32) - target) * slot_mask, axis=(-2, -1)) / denominator
+
+        e_pos, e_neg = error(v_t), error(v_neg)
+        stop = jax.lax.stop_gradient
+        # Asymmetric gradient: same value as e_neg, gradient scaled by negative_grad_scale (0 = stop-gradient).
+        e_neg_grad = ranking.negative_grad_scale * e_neg + (1.0 - ranking.negative_grad_scale) * stop(e_neg)
+        gap = e_neg - e_pos
+        margins = ranking.margin * stop(e_pos) if ranking.margin_mode == "relative" else jnp.full_like(e_pos, ranking.margin)
+        hinge = jax.nn.relu(margins - (e_neg_grad - e_pos))
+        keep = jnp.ones_like(e_pos) if observation.ranking_valid is None else observation.ranking_valid.astype(jnp.float32)
+        sample_term = hinge * keep  # averaged over the ORIGINAL batch, invalid pairs contribute zero (as in Cosmos)
+        chunked_loss = chunked_loss + ranking.loss_weight * sample_term[..., None]
+
+        n_valid = jnp.maximum(jnp.sum(keep), 1.0)
+        metrics = {
+            "language_ranking_loss": stop(jnp.mean(sample_term)),
+            "language_ranking_weighted_loss": stop(ranking.loss_weight * jnp.mean(sample_term)),
+            "language_ranking_positive_error": stop(jnp.sum(e_pos * keep) / n_valid),
+            "language_ranking_negative_error": stop(jnp.sum(e_neg * keep) / n_valid),
+            "language_ranking_gap": stop(jnp.sum(gap * keep) / n_valid),
+            "language_ranking_margin_satisfied": stop(jnp.sum((gap >= margins).astype(jnp.float32) * keep) / n_valid),
+            "language_ranking_valid_fraction": stop(jnp.mean(keep)),
+        }
+        return chunked_loss, metrics
 
     @override
     def sample_actions(

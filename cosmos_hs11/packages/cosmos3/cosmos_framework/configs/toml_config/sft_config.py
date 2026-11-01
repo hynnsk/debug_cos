@@ -922,6 +922,15 @@ class DataloaderTrainConfig(BaseModel):
             "(LIBEROLeRobotDataset). None = train on every episode. Skipped on VLM."
         ),
     )
+    episodes_per_task: Optional[int] = Field(
+        default=None,
+        description=(
+            "RoboCasa365 action-policy SFT only (action_policy_robocasa_edge, cosmos_hs11). Fixed data fraction: keep "
+            "this many seeded train episodes of EACH task shard (nested subsets; 50 = the RoboCasa365 paper's 10 %, "
+            "150 = 30 %). Remapped to the 'robocasa' dataset node's 'episodes_per_task' (RoboCasaLeRobotDataset). "
+            "None = every train episode (100 % = all but the seeded 1 % val hold-out). Skipped on VLM."
+        ),
+    )
 
 
 # ---------------------------------------------------------------- dataloader_val

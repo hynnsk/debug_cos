@@ -6,6 +6,7 @@ re-import ``__main__``::
 
     JAX_PLATFORMS=cpu .venv/bin/python scripts/hs11/smoke_train_cpu.py --config pi05_libero_v3_libero_goal_3ep_base \
         --out $COSMOS_STORAGE/smoke_openpi_hs11 --num-workers 2
+    ... --language-ranking        # also exercises the language-ranking negative stream + metrics
 """
 
 from __future__ import annotations
@@ -35,6 +36,8 @@ class Args:
     num_workers: int = 2
     num_train_steps: int = 3
     batch_size: int = 4
+    # cosmos_hs11 language ranking (NegativePrompt -> TokenizeNegativePrompt -> paired hinge in pi0.compute_loss).
+    language_ranking: bool = False
 
 
 def main(args: Args) -> None:
@@ -45,7 +48,14 @@ def main(args: Args) -> None:
     cfg = dataclasses.replace(
         cfg,
         model=pi0_config.Pi0Config(
-            pi05=True, paligemma_variant="dummy", action_expert_variant="dummy", action_horizon=10, discrete_state_input=False
+            pi05=True,
+            paligemma_variant="dummy",
+            action_expert_variant="dummy",
+            action_horizon=10,
+            discrete_state_input=False,
+            language_ranking=pi0_config.LanguageRankingConfig(
+                enabled=args.language_ranking, loss_weight=0.022, margin=0.1, raw_action_dim=7
+            ),
         ),
         weight_loader=wl.NoOpWeightLoader(),
         batch_size=args.batch_size,

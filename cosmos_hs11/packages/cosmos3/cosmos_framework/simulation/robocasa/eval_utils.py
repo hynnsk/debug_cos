@@ -113,6 +113,26 @@ def decode_15d_to_env12(a15: np.ndarray, gripper_flip: bool) -> np.ndarray:
     return env
 
 
+def decode_15d_armfirst_to_env12(a15: np.ndarray, gripper_flip: bool) -> np.ndarray:
+    """Arm-first raw-base 15D policy output -> env 12D action (cosmos_hs11).
+
+    Policy layout (``base_encoding='raw_armfirst'``)::
+
+        [eef_pos(3), eef_rot6d(6), gripper(1), base_motion(4), control_mode(1)]
+
+    The same channels as ``decode_15d_to_env12`` with the 10D LIBERO / meta-training arm block first,
+    so a meta-initialized action-head row keeps its column semantics. The base block is still the
+    env's native ``base_motion`` command (identity round-trip); it is zeroed in arm mode.
+    """
+    a15 = np.asarray(a15, dtype=np.float64)
+    env = decode_10d_to_env12(a15[0:10], gripper_flip)  # arm block reuses the 10D path
+
+    base_mode = float(a15[14]) > 0.0
+    env[11] = 1.0 if base_mode else -1.0
+    env[7:11] = np.clip(a15[10:14], -1.0, 1.0) if base_mode else 0.0
+    return env
+
+
 # ----------------------------- observation -----------------------------
 
 

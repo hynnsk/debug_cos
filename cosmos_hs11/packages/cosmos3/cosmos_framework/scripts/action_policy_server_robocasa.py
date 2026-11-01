@@ -236,7 +236,7 @@ def _extract_raw_action_dim_from_config(config: Any) -> int | None:
 
     The width is a function of the dataset contract, not a free parameter:
     ``use_base_action=False`` is the 10-D arm-only contract, and with the base
-    channels it is 15-D for ``base_encoding="raw"`` or 20-D for ``"ego"``.  This
+    channels it is 15-D for ``base_encoding="raw"`` / ``"raw_armfirst"`` or 20-D for ``"ego"``.  This
     mirrors ``RoboCasaLeRobotDataset.action_dim``.  Returns ``None`` when the
     config carries no RoboCasa dataset node to read.
     """
@@ -248,7 +248,7 @@ def _extract_raw_action_dim_from_config(config: Any) -> int | None:
             return None
         return 10
     base_encoding = _extract_str_from_config(config, "base_encoding")
-    if base_encoding == "raw":
+    if base_encoding in ("raw", "raw_armfirst"):
         return 15
     if base_encoding == "ego":
         return 20
@@ -554,6 +554,10 @@ class ActionServerArgs(pydantic.BaseModel):
         base = OmniSetupOverrides.model_validate(self.checkpoint.model_dump())
         base.output_dir = output_dir
         base.sampler = self.sampler
+        # cosmos_hs11: same as action_policy_server_libero.py. RoboCasa action-policy evaluation does not need the
+        # Cosmos safety guardrails, and building them would download the gated nvidia/Cosmos-Guardrail1 HF repo
+        # ("Access denied. This repository requires approval."), which kills the server before the model loads.
+        base.guardrails = False
         return base
 
 

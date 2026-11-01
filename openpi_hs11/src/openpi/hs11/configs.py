@@ -79,6 +79,11 @@ def get_hs11_configs():
             repack = [_transforms.RepackTransform(dict(libero_v3.REPACK))]
             if self.prompt_dropout > 0.0:
                 repack.append(libero_v3.PromptDropout(p=float(self.prompt_dropout)))
+            ranking = getattr(model_config, "language_ranking", None)
+            if ranking is not None and ranking.enabled:
+                # Language ranking: every sample also carries a wrong-task instruction (after the dropout, so a dropped
+                # prompt is flagged invalid). Tokenized by TokenizeNegativePrompt in the model transforms.
+                repack.append(libero_v3.NegativePrompt(instructions=libero_v3.suite_instructions(spec)))
             return dataclasses.replace(
                 self.create_base_config(assets_dirs, model_config),
                 repack_transforms=_transforms.Group(inputs=repack),

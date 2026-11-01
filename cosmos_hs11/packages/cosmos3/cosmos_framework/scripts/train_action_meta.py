@@ -92,6 +92,8 @@ SAMPLER_OVERRIDE_KEYS = {
     # cosmos_hs11 v4.1: grouped ("T tasks x d demos") meta-episodes
     "tasks_per_episode",
     "grouped_episode_fraction",
+    # cosmos_hs11 v18: language-ranking negatives inside every meta-episode (Reptile loader only)
+    "language_ranking",
     "max_samples_per_batch",
     "num_workers",
     "prefetch_factor",

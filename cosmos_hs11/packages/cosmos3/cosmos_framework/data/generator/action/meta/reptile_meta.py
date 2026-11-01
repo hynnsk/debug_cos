@@ -29,7 +29,7 @@ either way because it is element-wise on each rank's own shard.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Iterable
 
 import torch
 import torch.distributed as dist
@@ -139,12 +139,18 @@ class ReptileMetaState:
         meta_optimizer: str = "sgd",
         meta_betas: tuple[float, float] = (0.9, 0.999),
         meta_eps: float = 1e-8,
+        exclude_groups: Iterable[str] = (),
     ) -> None:
         if meta_optimizer not in ("sgd", "adam"):
             raise ValueError(f"meta_optimizer must be 'sgd' or 'adam', got {meta_optimizer!r}")
         self.net = net
         lookup = net_param_lookup(net)
-        self.params: dict[str, nn.Parameter] = {n: p for n, p in lookup.items() if p.requires_grad}
+        # cosmos_hs11 v17: ``exclude_groups`` (e.g. {GROUP_LORA}) keeps trainable parameters OUT of theta: they still
+        # train in the inner loop but are never copied, interpolated or restored here (private per-embodiment adapters).
+        self.excluded_groups: frozenset[str] = frozenset(str(g) for g in exclude_groups)
+        self.params: dict[str, nn.Parameter] = {
+            n: p for n, p in lookup.items() if p.requires_grad and reptile_param_group(n) not in self.excluded_groups
+        }
         if not self.params:
             raise ValueError("no trainable parameters -- build the optimizer (keys_to_select) before ReptileMetaState")
         self.groups: dict[str, str] = {n: reptile_param_group(n) for n in self.params}
@@ -160,6 +166,7 @@ class ReptileMetaState:
         log.info(
             f"ReptileMetaState: {len(self.params)} trainable tensors, numel by group {self.numel_by_group()}, "
             f"meta_optimizer={meta_optimizer}, lora={lora_info(net)}"
+            + (f", excluded groups {sorted(self.excluded_groups)}" if self.excluded_groups else "")
         )
 
     # ---- bookkeeping -----------------------------------------------------------------

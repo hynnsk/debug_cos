@@ -74,6 +74,22 @@ def _action_reptile_meta_edge_model_config() -> dict:
     cfg["lora_alpha"] = 64
     cfg["lora_target_modules"] = LORA_TARGET_MODULES
     cfg["lora_freeze_base"] = False  # LoRA + heads + time_embedder train together; keys_to_select selects
+    # cosmos_hs11 v18: action-language ranking hinge INSIDE the inner loop (action_reptile_meta_edge_v18.toml): off by
+    # default (bit-identical to the plain recipe); the dict re-states the LanguageRankingConfig defaults so a TOML
+    # [model.language_ranking] block can override any knob (Hydra cannot add dict keys). With enabled=true the trainer
+    # switches the episode loader to language_ranking=true (negative = another support task of the same episode).
+    cfg["language_ranking"] = dict(
+        enabled=False,
+        loss_weight=1.0,
+        margin=0.1,
+        negative_sampling="uniform",
+        hard_negative_fraction=0.0,
+        hard_negative_temperature=0.5,
+        hard_negative_prefix_frames=64,
+        negative_grad_scale=1.0,
+        margin_mode="absolute",
+        self_paced_fraction=0.0,
+    )
     # REPA distillation INSIDE the inner loop (cosmos_hs11 v11, action_reptile_meta_edge_v11.toml): off by default
     # (bit-identical to the plain recipe); the dict re-states the RepaConfig defaults so a TOML [model.repa] block can
     # override any knob (Hydra cannot add dict keys). With enabled=true the inner objective becomes
@@ -237,6 +253,9 @@ action_reptile_meta_edge = LazyDict(
             # cosmos_hs11 v4.1: grouped episodes (T tasks x d demos); 0.0 = the uniform draw (overridable from [custom.meta])
             tasks_per_episode=None,
             grouped_episode_fraction=0.0,
+            # cosmos_hs11 v18: a negative instruction per window for the ranking hinge (set automatically by
+            # train_action_reptile.py when model.config.language_ranking.enabled; overridable from [custom.meta]).
+            language_ranking=False,
             max_samples_per_batch=32,  # per-rank windows per inner step
             num_workers=4,
             prefetch_factor=2,

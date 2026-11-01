@@ -242,6 +242,31 @@ branch is an empty-prompt extrapolation rather than a trained unconditional mode
 set `[data].prompt_dropout = 0.1` in the training TOML (`libero_v3.PromptDropout`, dataset side only), then sweep
 `GUIDANCE` on that checkpoint. `GUIDANCE` needs the TOML path (`TOML_FILE=`); the stock `scripts/serve_policy.py` has no CFG.
 
+## 5c. Language ranking loss (`[model.language_ranking]`, cosmos_hs11 v23/v41 port)
+
+Same objective as Cosmos' `algorithm/loss/language_ranking.py`: every training sample is predicted a second time from the
+*same* noised chunk `x_t` / flow time under a uniformly drawn instruction of **another** task of the suite, and the
+per-sample hinge `relu(margin + E_pos - E_neg)` (E = fp32 MSE over the chunk and the real action dims) is averaged over the
+batch and added as `loss_weight * hinge` to the flow-matching loss. Samples whose prompt was replaced by `PromptDropout`
+are flagged invalid and contribute zero. Pieces: `pi0_config.LanguageRankingConfig` (knobs: `enabled`, `loss_weight`,
+`margin`, `raw_action_dim`, `negative_grad_scale`, `margin_mode`), `libero_v3.NegativePrompt` (repack side, after the
+dropout; negatives come from `meta/tasks.parquet` of the whole suite), `transforms.TokenizeNegativePrompt` (model side,
+no-op without a negative), `Observation.tokenized_negative_prompt(_mask)` / `ranking_valid`, and
+`Pi0.compute_loss_and_metrics` (used by `train.py`, logs `language_ranking_{loss,weighted_loss,positive_error,
+negative_error,gap,margin_satisfied,valid_fraction}`). Cost: a second prefix+suffix forward/backward per step (~2x).
+
+```toml
+[model.language_ranking]
+enabled        = true
+loss_weight    = 0.022   # Cosmos: 1.0 next to a 10x action loss over the REAL dims -> 1:10 per element.
+margin         = 0.1     # openpi's action loss averages over all 32 padded slots, so 0.1 * 7/32 = 0.022 is equivalent.
+raw_action_dim = 7       # 0/omitted = infer the real dims from the batch (padding is exactly zero)
+```
+
+Tests: `src/openpi/hs11/language_ranking_test.py` (closed-form hinge on the dummy pi05, transforms, TOML knob);
+CPU smoke: `scripts/hs11/smoke_train_cpu.py --language-ranking` (the dummy model's adaLN-zero init ignores the prompt, so
+its gap is exactly 0 there; with `pi05_base` it is not).
+
 ## 6. Tests and CPU smokes
 
 ```bash

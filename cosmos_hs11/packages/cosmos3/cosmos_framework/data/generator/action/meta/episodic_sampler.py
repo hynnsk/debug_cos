@@ -297,6 +297,42 @@ class EpisodicEmbodimentSampler:
 
 
 # --------------------------------------------------------------------------------------------
+# cosmos_hs11 v18: language-ranking negatives inside a meta-episode
+# --------------------------------------------------------------------------------------------
+def _paraphrases(text: str) -> list[str]:
+    parts = [p.strip() for p in str(text).split(" | ") if p.strip()]
+    return parts or [str(text)]
+
+
+def episode_ranking_negatives(
+    spec: MetaEpisodeSpec, task_texts: dict[int, str] | None, rng: np.random.Generator
+) -> dict[int, tuple[str | None, bool]]:
+    """One negative instruction per window of the meta-episode: ``window index -> (instruction, valid)``.
+
+    The negative of a window is a paraphrase of the instruction of ANOTHER task of the same episode's support set
+    (the LIBERO regime: one scene family, several instructions). Support windows draw from the other support tasks;
+    query windows (held-out instructions when the sampler kept the task sets disjoint) draw from the support tasks
+    other than their own. A window with no eligible task gets ``(None, False)``: the loader tokenizes its own
+    instruction as a placeholder and masks it out of the hinge (``ranking_valid=False``) -- a single-task support
+    set (uniform fill of a 2-task embodiment) therefore never ranks a sentence against itself.
+    """
+    texts = task_texts or {}
+    support_tasks = sorted({d.task_index for d in spec.support if d.task_index >= 0 and d.task_index in texts})
+    out: dict[int, tuple[str | None, bool]] = {}
+    for group in (spec.support, spec.query):
+        for d in group:
+            candidates = [t for t in support_tasks if t != d.task_index]
+            for i in d.window_indices:
+                if not candidates:
+                    out[int(i)] = (None, False)
+                    continue
+                t = candidates[int(rng.integers(len(candidates)))]
+                options = _paraphrases(texts[t])
+                out[int(i)] = (options[int(rng.integers(len(options)))], True)
+    return out
+
+
+# --------------------------------------------------------------------------------------------
 # Packing samples into the model's batch format
 # --------------------------------------------------------------------------------------------
 def pack_samples_into_batch(samples: list[dict[str, Any]], dataset_name: str) -> dict[str, Any]:
@@ -399,6 +435,8 @@ class MetaEpisodeIterableDataset(IterableDataset):
         native_video_size: int | None = None,
         native_video_key: str = "video_native",
         native_video_full_res: Sequence[str] | None = None,
+        language_ranking: bool = False,
+        task_texts: dict[str, dict[int, str] | None] | None = None,
     ) -> None:
         super().__init__()
         self.datasets = datasets
@@ -406,6 +444,14 @@ class MetaEpisodeIterableDataset(IterableDataset):
         self.max_samples_per_batch = int(max_samples_per_batch)
         self.seed = int(seed)
         self.embodiment_override = embodiment_override
+        # cosmos_hs11 v18: attach a language-ranking negative (another support task's instruction) to every window;
+        # ``task_texts[embodiment]`` = task_index -> instruction text (see embodiments.embodiment_task_texts).
+        self.language_ranking = bool(language_ranking)
+        self.task_texts: dict[str, dict[int, str] | None] = dict(task_texts or {})
+        if self.language_ranking:
+            missing = [n for n in datasets if not self.task_texts.get(n)]
+            if missing:
+                raise ValueError(f"language_ranking needs task_texts for every embodiment; missing: {missing}")
         # cosmos_hs11 v11: shrink the native REPA-teacher frames (shipped by keep_native_video) to this square in the
         # worker; None = leave them at camera resolution (the only option for multi-view canvases, num_views > 1).
         # ``native_video_full_res``: embodiments exempt from the shrink -- composite canvases that the teacher crops into
@@ -417,9 +463,25 @@ class MetaEpisodeIterableDataset(IterableDataset):
         self.shard_rank = 0
         self.shard_world_size = 1
 
-    def _load(self, name: str, indices: list[int]) -> list[dict[str, Any]]:
+    def _load(
+        self,
+        name: str,
+        indices: list[int],
+        extras_by_index: dict[int, tuple[str | None, bool]] | None = None,
+    ) -> list[dict[str, Any]]:
         dataset = self.datasets[name]
-        samples = [dataset[int(i)] for i in indices]
+        if extras_by_index is None:
+            samples = [dataset[int(i)] for i in indices]
+        else:
+            # cosmos_hs11 v18: negative instruction into the raw row (tokenized by the transform like the LIBERO
+            # loader); windows without an eligible negative are masked out of the hinge.
+            samples = []
+            for i in indices:
+                negative, valid = extras_by_index.get(int(i), (None, False))
+                sample = dataset.getitem_with_extras(int(i), {"ranking_negative_instruction": negative})
+                if not valid:
+                    sample["ranking_valid"] = False
+                samples.append(sample)
         if self.native_video_size is not None and name not in self.native_video_full_res:
             for sample in samples:
                 native = sample.get(self.native_video_key)
@@ -427,13 +489,20 @@ class MetaEpisodeIterableDataset(IterableDataset):
                     sample[self.native_video_key] = resize_native_video_clip(native, self.native_video_size)
         return samples
 
-    def materialize(self, spec: MetaEpisodeSpec) -> dict[str, Any]:
+    def ranking_negatives(self, spec: MetaEpisodeSpec, rng: np.random.Generator | None) -> dict | None:
+        """Per-window negatives of this episode (None when language ranking is off)."""
+        if not self.language_ranking:
+            return None
+        return episode_ranking_negatives(spec, self.task_texts.get(spec.embodiment), rng or np.random.default_rng())
+
+    def materialize(self, spec: MetaEpisodeSpec, rng: np.random.Generator | None = None) -> dict[str, Any]:
+        negatives = self.ranking_negatives(spec, rng)
         support = [
-            pack_samples_into_batch(self._load(spec.embodiment, chunk), spec.embodiment)
+            pack_samples_into_batch(self._load(spec.embodiment, chunk, negatives), spec.embodiment)
             for chunk in _chunk(spec.support_indices, self.max_samples_per_batch)
         ]
         query = [
-            pack_samples_into_batch(self._load(spec.embodiment, chunk), spec.embodiment)
+            pack_samples_into_batch(self._load(spec.embodiment, chunk, negatives), spec.embodiment)
             for chunk in _chunk(spec.query_indices, self.max_samples_per_batch)
         ]
         return {
@@ -661,13 +730,18 @@ class SynchronizedMetaEpisodeIterableDataset(MetaEpisodeIterableDataset):
                 f"rank {self.shard_rank}/{self.shard_world_size} got no support windows: k_shot * windows_per_demo "
                 f"(= {len(spec.support_indices)}) must be >= world size"
             )
+        # cosmos_hs11 v18: the negatives are drawn from a stream keyed by the episode only, so every rank holds the
+        # same window -> negative map (each rank then materializes its own shard of it).
+        negatives = self.ranking_negatives(
+            spec, np.random.default_rng([int(self.seed), int(self.spec_offset) + int(spec_id), 7919])
+        )
         support = [
-            pack_samples_into_batch(self._load(spec.embodiment, chunk), spec.embodiment)
+            pack_samples_into_batch(self._load(spec.embodiment, chunk, negatives), spec.embodiment)
             for chunk in _chunk(sup, self.max_samples_per_batch)
         ]
         query = (
             [
-                pack_samples_into_batch(self._load(spec.embodiment, chunk), spec.embodiment)
+                pack_samples_into_batch(self._load(spec.embodiment, chunk, negatives), spec.embodiment)
                 for chunk in _chunk(qry, self.max_samples_per_batch)
             ]
             if qry
@@ -748,6 +822,7 @@ def build_reptile_episode_loader(
     keep_native_video: bool = False,
     native_video_size: int | None = None,
     native_video_full_res: Sequence[str] | None = None,
+    language_ranking: bool = False,
 ) -> MetaEpisodeLoader:
     """Same datasets / sampler as :func:`build_meta_episode_loader`, streamed as rank-SYNCHRONIZED episodes
     (:class:`SynchronizedMetaEpisodeIterableDataset`) for the Reptile trainer
@@ -758,10 +833,14 @@ def build_reptile_episode_loader(
     ``native_video_size`` px in the workers (set automatically by the trainer from ``model.config.repa``);
     ``native_video_full_res`` names the embodiments kept at camera resolution (composite canvases with a
     ``repa.view_layouts`` entry, cropped into views by the teacher).
+    ``language_ranking`` (cosmos_hs11 v18): ship a negative instruction (another support task of the same episode)
+    with every window for the action-language ranking hinge inside the inner loop (set automatically by the trainer
+    from ``model.config.language_ranking.enabled``).
     """
     from cosmos_framework.data.generator.action.meta.embodiments import (
         build_embodiment_sft_dataset,
         build_meta_transform,
+        embodiment_task_texts,
         get_episode_table,
     )
 
@@ -790,6 +869,12 @@ def build_reptile_episode_loader(
         datasets[name] = ds
         tables[name] = get_episode_table(ds)
         domain_ids[name] = int(ds._dataset.domain_id)
+    task_texts: dict[str, dict[int, str] | None] = {}
+    if language_ranking:
+        task_texts = {name: embodiment_task_texts(ds) for name, ds in datasets.items()}
+        missing = [n for n, t in task_texts.items() if not t]
+        if missing:
+            raise ValueError(f"language_ranking: no task table (reader._tasks) for embodiments {missing}")
     sampler = EpisodicEmbodimentSampler(
         tables,
         domain_ids,
@@ -813,6 +898,8 @@ def build_reptile_episode_loader(
         spec_offset=spec_offset,
         native_video_size=native_video_size,
         native_video_full_res=native_video_full_res,
+        language_ranking=language_ranking,
+        task_texts=task_texts,
     )
     return MetaEpisodeLoader(
         stream, num_workers=num_workers, prefetch_factor=prefetch_factor, timeout_s=loader_timeout_s

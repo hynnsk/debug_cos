@@ -44,6 +44,23 @@ class ActionSFTDataset(Dataset):
     def __getitem__(self, idx: int) -> dict[str, Any]:
         return self._transform(self._dataset[idx], self._resolution)
 
+    def getitem_with_extras(self, idx: int, extras: dict[str, Any] | None) -> dict[str, Any]:
+        """``self[idx]`` with ``extras`` merged into the RAW row before the transform runs.
+
+        cosmos_hs11 v18: the episodic meta sampler attaches ``ranking_negative_instruction`` (another task's
+        instruction of the same meta-episode) so the pipeline tokenizes the negative exactly like the LIBERO loader
+        does. ``ranking_negative_instruction=None`` means "no eligible negative": the sample's own instruction is used
+        as a placeholder (the caller then masks the window with ``ranking_valid=False``).
+        """
+        raw = self._dataset[idx]
+        if extras:
+            raw = dict(raw)
+            extras = dict(extras)
+            if "ranking_negative_instruction" in extras and extras["ranking_negative_instruction"] is None:
+                extras["ranking_negative_instruction"] = str(raw.get("ai_caption", ""))
+            raw.update(extras)
+        return self._transform(raw, self._resolution)
+
     def get_shuffle_blocks(self):
         """Delegate to the inner DROIDLeRobotDataset (per-episode/segment flat-index blocks)."""
         return self._dataset.get_shuffle_blocks()
@@ -279,6 +296,8 @@ def get_action_robocasa_sft_dataset(
     use_state: bool = False,
     use_base_action: bool = False,
     base_encoding: str = "ego",
+    episodes_per_task: int | None = None,
+    episode_subset_seed: int = 42,
     action_normalization: str | None = None,
     split: str = "train",
     split_val_ratio: float = 0.01,
@@ -314,10 +333,17 @@ def get_action_robocasa_sft_dataset(
       ``[base_pos(3), base_rot6d(6), control_mode(1), eef_pos(3), eef_rot6d(6), gripper(1)]``
     * ``"raw"`` (15D) --
       ``[base_motion(4), control_mode(1), eef_pos(3), eef_rot6d(6), gripper(1)]``
+    * ``"raw_armfirst"`` (15D, cosmos_hs11) -- the ``"raw"`` channels with the arm block first,
+      ``[eef_pos(3), eef_rot6d(6), gripper(1), base_motion(4), control_mode(1)]``, so dims 0..9 are
+      the 10D layout of the Reptile meta-training embodiments / LIBERO (meta-initialized heads keep
+      their column semantics).
 
     ``"raw"`` regresses RoboCasa's native normalised velocity command, so replay is an
     identity round-trip and the base channels share the arm's scale; ``"ego"`` is retained
     as the default so existing configs and checkpoints reproduce unchanged.
+
+    ``episodes_per_task`` (cosmos_hs11): fixed data fraction, N seeded train episodes of
+    EACH task shard (nested across N; the 1 % val hold-out is excluded first). None = all.
     """
     dataset: Dataset = RoboCasaLeRobotDataset(
         root=root,
@@ -330,6 +356,8 @@ def get_action_robocasa_sft_dataset(
         use_state=use_state,
         use_base_action=use_base_action,
         base_encoding=base_encoding,
+        episodes_per_task=episodes_per_task,
+        episode_subset_seed=episode_subset_seed,
         action_normalization=action_normalization,
         split=split,
         split_val_ratio=split_val_ratio,

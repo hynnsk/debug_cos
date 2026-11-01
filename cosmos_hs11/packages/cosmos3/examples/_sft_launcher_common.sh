@@ -18,7 +18,8 @@
 #   EXTRA_DATASET_CHECK  bash snippet (string) eval'd after the default checks.
 #   TAIL_OVERRIDES       bash array of Hydra CLI overrides appended after `--`
 #                        (e.g. data_setting.max_tokens=16000 for VLM smokes).
-#   MASTER_PORT          torchrun --master_port; default 50012.
+#   MASTER_PORT          torchrun --master_port; default 50012. Single-node launches probe it first and bump to the
+#                        next free port when it is taken (examples/_free_master_port.py); MASTER_PORT_AUTO=0 disables.
 #   NPROC_PER_NODE       torchrun --nproc_per_node; default SLURM_GPUS_ON_NODE, else 4.
 #                        Warns when it disagrees with the SLURM allocation.
 #   NNODES               torchrun --nnodes; multi-node only (unset = single-node).
@@ -126,7 +127,23 @@ if [[ -n "$_SHARD" && "$_SHARD" != "$NPROC_PER_NODE" ]]; then
     echo ">>>          (not ${_BS:-?} x $_SHARD). Set NPROC_PER_NODE=$_SHARD, or change the TOML, if that is not intended." >&2
 fi
 
-TORCHRUN_ARGS=(--nproc_per_node="$NPROC_PER_NODE" --master_port="${MASTER_PORT:-50012}")
+# MASTER_PORT collision guard (single-node only; a multi-node launch needs the fixed, agreed port). Every launcher
+# hard-codes one port per recipe, so a second copy of a recipe (a *_v2/_v3 launcher keeps the same port), two
+# fractions that share a port, or any other process holding it makes torchrun die at start with
+# "Address already in use". Probe the port with examples/_free_master_port.py and bump to the next free one;
+# MASTER_PORT_AUTO=0 keeps the exact port (and the failure) instead.
+MASTER_PORT="${MASTER_PORT:-50012}"
+if [[ "${MASTER_PORT_AUTO:-1}" == "1" && ( -z "${NNODES:-}" || "${NNODES}" == "1" ) ]]; then
+    _FREE_PORT="$(python "$(dirname "${BASH_SOURCE[0]}")/_free_master_port.py" "$MASTER_PORT")" \
+        || { echo "ERROR: no free MASTER_PORT found from $MASTER_PORT on $(hostname -s)" >&2; exit 1; }
+    if [[ "$_FREE_PORT" != "$MASTER_PORT" ]]; then
+        echo ">>> WARNING: MASTER_PORT $MASTER_PORT is already in use on $(hostname -s); using $_FREE_PORT instead (MASTER_PORT_AUTO=0 to disable)" >&2
+        MASTER_PORT="$_FREE_PORT"
+    fi
+fi
+export MASTER_PORT
+echo ">>> $(date '+%H:%M:%S') MASTER_PORT: $MASTER_PORT"
+TORCHRUN_ARGS=(--nproc_per_node="$NPROC_PER_NODE" --master_port="$MASTER_PORT")
 [[ -n "${NNODES:-}" ]]      && TORCHRUN_ARGS+=(--nnodes="$NNODES")
 [[ -n "${NODE_RANK:-}" ]]   && TORCHRUN_ARGS+=(--node_rank="$NODE_RANK")
 [[ -n "${MASTER_ADDR:-}" ]] && TORCHRUN_ARGS+=(--master_addr="$MASTER_ADDR")

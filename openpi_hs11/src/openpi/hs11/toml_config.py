@@ -11,7 +11,8 @@ pipeline) and re-states the run settings explicitly::
                  keep_period, log_interval, seed, ema_enabled, ema_decay, overwrite, resume (default true: an existing
                  checkpoint dir continues from its latest step and wandb run id), assets_base_dir
     [optimizer]  peak_lr, warmup_steps, decay_steps, decay_lr, weight_decay, clip_gradient_norm, b1, b2
-    [model]      action_horizon
+    [model]      action_horizon; sub-table [model.language_ranking] enabled, loss_weight, margin, raw_action_dim,
+                 negative_grad_scale, margin_mode (cosmos_hs11 action-language hinge ranking; pi0_config.LanguageRankingConfig)
 
 A Reptile TOML maps 1:1 onto ``scripts/train_reptile.py::ReptileConfig`` (sections job / wandb / model / checkpoint /
 data / sampler / inner / outer / infra). Unknown sections or keys are errors, so typos cannot silently fall back to
@@ -71,6 +72,25 @@ def _section(raw: Mapping[str, Any], name: str, allowed: Iterable[str], *, requi
     if missing:
         raise ValueError(f"[{name}]: missing required keys {missing}")
     return sec
+
+
+_LANGUAGE_RANKING_KEYS = ("enabled", "loss_weight", "margin", "raw_action_dim", "negative_grad_scale", "margin_mode")
+
+
+def _language_ranking_config(base, model_section: Mapping[str, Any]):
+    """``[model.language_ranking]`` -> ``pi0_config.LanguageRankingConfig`` (unknown keys error, like every section)."""
+    sec = _section(model_section, "language_ranking", _LANGUAGE_RANKING_KEYS)
+    kw: dict[str, Any] = {}
+    for key, value in sec.items():
+        if key == "enabled":
+            kw[key] = bool(value)
+        elif key in ("loss_weight", "margin", "negative_grad_scale"):
+            kw[key] = float(value)
+        elif key == "raw_action_dim":
+            kw[key] = None if value is None or int(value) <= 0 else int(value)  # 0 = infer from the batch
+        else:
+            kw[key] = str(value)
+    return dataclasses.replace(base, **kw)
 
 
 def _check_sections(raw: Mapping[str, Any], allowed: Iterable[str]) -> None:
@@ -136,7 +156,7 @@ def load_train_config(path: str | pathlib.Path, overrides: Iterable[str] = ()):
          "seed", "ema_enabled", "ema_decay", "overwrite", "resume", "assets_base_dir"),
     )
     opt = _section(raw, "optimizer", ("peak_lr", "warmup_steps", "decay_steps", "decay_lr", "weight_decay", "clip_gradient_norm", "b1", "b2"))
-    model = _section(raw, "model", ("action_horizon",))
+    model = _section(raw, "model", ("action_horizon", "language_ranking"))
 
     cfg = _config.get_config(str(job["config"]))
     updates: dict[str, Any] = {"exp_name": str(job["exp_name"])}
@@ -199,8 +219,13 @@ def load_train_config(path: str | pathlib.Path, overrides: Iterable[str] = ()):
         updates["optimizer"] = dataclasses.replace(adam, **adam_kw)
 
     # [model]
+    model_updates: dict[str, Any] = {}
     if "action_horizon" in model:
-        updates["model"] = dataclasses.replace(cfg.model, action_horizon=int(model["action_horizon"]))
+        model_updates["action_horizon"] = int(model["action_horizon"])
+    if "language_ranking" in model:
+        model_updates["language_ranking"] = _language_ranking_config(cfg.model.language_ranking, model)
+    if model_updates:
+        updates["model"] = dataclasses.replace(cfg.model, **model_updates)
 
     return dataclasses.replace(cfg, **updates)
 
@@ -224,7 +249,7 @@ def load_reptile_config(path: str | pathlib.Path, overrides: Iterable[str] = ())
     _check_sections(raw, _REPTILE_SECTIONS)
     job = _section(raw, "job", ("name", "exp_name", "project_name"), required=("exp_name",))
     wandb = _section(raw, "wandb", ("enabled", "mode", "dir", "entity"))
-    model = _section(raw, "model", ("action_horizon",))
+    model = _section(raw, "model", ("action_horizon", "language_ranking"))
     ckpt = _section(raw, "checkpoint", ("init_params", "base_dir", "save_interval", "keep_period"))
     data = _section(raw, "data", ("embodiments", "data_root", "assets_dir", "num_workers", "prefetch_episodes"))
     sampler = _section(raw, "sampler", ("k_shot", "windows_per_demo", "q_query", "query_windows_per_demo", "disjoint_query_tasks", "min_tasks_for_disjoint", "min_frames"))
@@ -238,6 +263,8 @@ def load_reptile_config(path: str | pathlib.Path, overrides: Iterable[str] = ())
     if "project_name" in job:
         kw["project_name"] = str(job["project_name"])
     kw["wandb_enabled"] = apply_wandb_section(wandb)
+    if "language_ranking" in model:
+        raise ValueError("[model.language_ranking] is a LIBERO post-training knob; the Reptile stream has no negative instructions")
     if "action_horizon" in model:
         kw["model"] = dataclasses.replace(hs11_configs.pi05_model(), action_horizon=int(model["action_horizon"]))
     if "init_params" in ckpt:

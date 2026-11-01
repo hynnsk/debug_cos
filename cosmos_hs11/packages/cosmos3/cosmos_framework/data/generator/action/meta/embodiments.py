@@ -57,6 +57,7 @@ __all__ = [
     "build_embodiment_raw_dataset",
     "build_embodiment_sft_dataset",
     "build_meta_transform",
+    "embodiment_task_texts",
     "get_episode_table",
     "resolve_embodiment_root",
 ]
@@ -324,6 +325,19 @@ def build_embodiment_sft_dataset(
         dataset_kwargs=dataset_kwargs,
     )
     return ActionSFTDataset(raw, transform, resolution)
+
+
+def embodiment_task_texts(dataset: Dataset) -> dict[int, str] | None:
+    """``task_index -> instruction text`` of a raw or ``ActionSFTDataset``-wrapped meta-ready reader (the LeRobot
+    readers keep it as ``_tasks``: list indexed by task id, or dict). ``None`` when the reader has no task table.
+    cosmos_hs11 v18: the episodic sampler draws language-ranking negatives from it without decoding any video."""
+    inner = getattr(dataset, "_dataset", dataset)
+    tasks = getattr(inner, "_tasks", None)
+    if tasks is None:
+        return None
+    if isinstance(tasks, dict):
+        return {int(k): str(v) for k, v in tasks.items()}
+    return {i: str(t) for i, t in enumerate(tasks)}
 
 
 def get_episode_table(dataset: Dataset) -> EpisodeTable:

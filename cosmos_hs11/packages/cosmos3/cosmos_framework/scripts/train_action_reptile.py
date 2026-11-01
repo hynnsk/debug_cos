@@ -68,6 +68,7 @@ from cosmos_framework.callbacks.grad_clip import (
 )
 from cosmos_framework.configs.toml_config.sft_config import load_experiment_from_toml
 from cosmos_framework.data.generator.action.meta.meta_action_adapter import save_meta_action_init
+from cosmos_framework.data.generator.action.meta.private_lora import PrivateLoraBank
 from cosmos_framework.data.generator.action.meta.reptile_meta import (
     GROUP_LORA,
     GROUP_MOE_GEN,
@@ -125,6 +126,15 @@ class ReptileTrainConfig:
     # loss used in the inner loop / diagnostics: "total" = the recipe's objective (vision x scale + action)
     loss_mode: str = "total"
     scratch_domain_id: int = 31  # DomainAwareLinear row that holds the meta action heads
+    # cosmos_hs11 v17: shared theta + one PRIVATE LoRA adapter per source embodiment (model.lora_enabled=true and
+    # "lora_" in optimizer.keys_to_select). The adapters train in the inner loop but are EXCLUDED from theta: never
+    # interpolated, never restored; each embodiment's adapter persists across its episodes (PrivateLoraBank). The
+    # exported theta / meta_action_init.pt are what downstream loads (a new embodiment starts without an adapter).
+    private_lora: bool = False
+    # cosmos_hs11 v18: after the k support steps, this many optimizer steps on the QUERY sub-batches (held-out
+    # instructions of the same embodiment when disjoint_tasks) BEFORE the displacement is taken:
+    # theta_tilde = U_query^n(U_support^k(theta)). 0 = plain Reptile (query = diagnostics only).
+    query_steps: int = 0
     # diagnostics
     eval_query_every: int = 5  # query loss at theta (zero-shot) and at theta_tilde (adapted) every N iters (0 = never)
     log_every: int | None = None  # defaults to trainer.logging_iter
@@ -160,6 +170,10 @@ class ReptileTrainConfig:
             raise ValueError("inner_steps must be >= 1")
         if cfg.meta_batch_embodiments < 1:
             raise ValueError("meta_batch_embodiments must be >= 1")
+        if cfg.query_steps < 0:
+            raise ValueError("query_steps must be >= 0")
+        if cfg.private_lora and cfg.theta_mode != "full":
+            raise ValueError("private_lora needs theta_mode='full' (the adapters are private, theta is the shared full set)")
         if not (0.0 < cfg.meta_lr <= 1.0):
             raise ValueError("meta_lr (Reptile eps) must be in (0, 1]")
         return cfg
@@ -220,6 +234,26 @@ def _repa_scalars(out: dict[str, Any]) -> dict[str, float]:
     """The logged REPA terms of one training step as floats (empty when REPA is off)."""
     vals: dict[str, float] = {}
     for k in _REPA_LOG_KEYS:
+        v = out.get(k)
+        if isinstance(v, torch.Tensor):
+            vals[k] = float(v.detach())
+        elif isinstance(v, (int, float)):
+            vals[k] = float(v)
+    return vals
+
+
+_RANKING_LOG_KEYS = (
+    "language_ranking_loss",
+    "language_ranking_gap",
+    "language_ranking_margin_satisfied",
+    "language_ranking_valid_fraction",
+)
+
+
+def _ranking_scalars(out: dict[str, Any]) -> dict[str, float]:
+    """The logged action-language ranking terms of one training step as floats (empty when ranking is off)."""
+    vals: dict[str, float] = {}
+    for k in _RANKING_LOG_KEYS:
         v = out.get(k)
         if isinstance(v, torch.Tensor):
             vals[k] = float(v.detach())
@@ -291,6 +325,32 @@ def apply_repa_loader_settings(config: Config) -> dict[str, Any]:
     return applied
 
 
+def _ranking_section(config: Config) -> Any:
+    model_cfg = config.model.config
+    if hasattr(model_cfg, "get"):
+        return model_cfg.get("language_ranking", None)
+    return getattr(model_cfg, "language_ranking", None)
+
+
+def apply_ranking_loader_settings(config: Config) -> dict[str, Any]:
+    """cosmos_hs11 v18: the ranking hinge in the inner loop needs a negative instruction per window: switch the
+    episodic loader to ``language_ranking=True`` (negatives = the other support tasks of the same meta-episode).
+    No-op when ``model.config.language_ranking.enabled`` is false, so every existing recipe is untouched."""
+    ranking = _ranking_section(config)
+    if not bool(_cfg_value(ranking, "enabled", False)):
+        return {}
+    dl = config.dataloader_train
+    if "language_ranking" not in dl:
+        raise KeyError(
+            "dataloader_train has no field 'language_ranking': the experiment's episode loader cannot ship negatives"
+        )
+    applied: dict[str, Any] = {}
+    if not bool(dl["language_ranking"]):
+        dl["language_ranking"] = True
+        applied["language_ranking"] = True
+    return applied
+
+
 def _warm_up_checkpoint_collectives(world_size: int) -> None:
     """Open the NCCL point-to-point connections that ``dcp.save`` needs while the GPU is still empty.
 
@@ -350,7 +410,12 @@ def launch(config: Config, cfg: ReptileTrainConfig, args: argparse.Namespace) ->
     start_iter = int(checkpointer.load(model, optimizer, scheduler, grad_scaler))
     model.train()
 
-    state = ReptileMetaState(model.net, meta_optimizer=cfg.meta_optimizer, meta_betas=cfg.meta_betas)
+    state = ReptileMetaState(
+        model.net,
+        meta_optimizer=cfg.meta_optimizer,
+        meta_betas=cfg.meta_betas,
+        exclude_groups=({GROUP_LORA} if cfg.private_lora else ()),
+    )
     groups_present = set(state.groups.values())
     if cfg.theta_mode == "lora" and GROUP_LORA not in groups_present:
         raise ValueError(
@@ -366,6 +431,45 @@ def launch(config: Config, cfg: ReptileTrainConfig, args: argparse.Namespace) ->
             "mode='full' with trainable LoRA parameters -- they are meta-learned too (unusual; check the TOML)"
         )
     trainable_params = list(state.params.values())
+    # ---- cosmos_hs11 v17: private per-embodiment LoRA adapters (trained in the inner loop, outside theta) -----------
+    bank: PrivateLoraBank | None = None
+    if cfg.private_lora:
+        slots = [str(e) for e in list(config.dataloader_train.get("embodiments", []))]
+        override = config.dataloader_train.get("embodiment_override", None)
+        if override:
+            slots = [str(override)]
+        bank = PrivateLoraBank(model.net, slots)  # raises when no trainable LoRA parameters exist
+        trainable_params = trainable_params + list(bank.params.values())
+        if start_iter > 0:
+            bank_file = job_dir / "checkpoints" / f"iter_{start_iter:09d}" / PrivateLoraBank.shard_filename(rank, world_size)
+            if bank_file.exists():
+                bank.load(bank_file)
+                logging.info(f"private LoRA bank restored from {bank_file}")
+            else:
+                logging.warning(
+                    f"resuming at iteration {start_iter} but {bank_file} is missing: every private adapter restarts "
+                    "from the identity adapter (A ~ kaiming, B = 0)"
+                )
+        logging.info(
+            f"private LoRA: {bank.numel:,} adapter params x {len(bank.slots)} embodiments, OUTSIDE theta "
+            f"(theta groups {sorted(groups_present)}); downstream loads theta only"
+        )
+    # ---- cosmos_hs11 v18: action-language ranking hinge inside the inner loop ----------------------------------------
+    ranking_inner = bool(_cfg_value(_ranking_section(config), "enabled", False))
+    if ranking_inner:
+        if not bool(config.dataloader_train.get("language_ranking", False)):
+            raise ValueError(
+                "model.config.language_ranking.enabled=true but dataloader_train.language_ranking is false: run through "
+                "main() (apply_ranking_loader_settings) or set language_ranking=true in [custom.meta]"
+            )
+        rk = _ranking_section(config)
+        logging.info(
+            f"ranking in the inner loop: loss_weight={_cfg_value(rk, 'loss_weight', 1.0)}, "
+            f"margin={_cfg_value(rk, 'margin', 0.1)} ({_cfg_value(rk, 'margin_mode', 'absolute')}), negatives = the "
+            f"other support tasks of the meta-episode; query_steps={cfg.query_steps} on the held-out query sub-batches"
+        )
+    elif cfg.query_steps > 0:
+        logging.info(f"query_steps={cfg.query_steps}: the displacement includes steps on the query sub-batches")
     # ---- REPA inside the inner loop (v11): L_inner = L_base + w * (1 - cos(P_phi(h_theta), sg[T(x)])) --------------
     if bool(getattr(model, "masked_prediction_enabled", False)):
         raise NotImplementedError(
@@ -450,9 +554,15 @@ def launch(config: Config, cfg: ReptileTrainConfig, args: argparse.Namespace) ->
             include_lora=(cfg.theta_mode == "lora"),
             include_time_embedder=(cfg.theta_mode == "lora"),
         )
+        private_md: dict[str, Any] | None = None
+        if bank is not None:
+            # per-rank shard of every private adapter next to the DCP iteration dir (resume needs the same world size)
+            bank.save(job_dir / "checkpoints" / f"iter_{iteration:09d}" / PrivateLoraBank.shard_filename(rank, world_size))
+            private_md = {"slots": list(bank.slots), "numel": bank.numel, "delta_norms": bank.delta_norms()}
         if is_rank0:
             md = {
                 **state.metadata(cfg.theta_mode, cfg.scratch_domain_id),
+                "private_lora": private_md,
                 "iteration": iteration,
                 "max_iter": max_iter,
                 "reptile_config": dataclasses.asdict(cfg),
@@ -488,6 +598,7 @@ def launch(config: Config, cfg: ReptileTrainConfig, args: argparse.Namespace) ->
         """Rank-averaged query loss (+ the REPA terms and the flow-matching part when REPA is on)."""
         vals: list[float] = []
         repa_vals: dict[str, list[float]] = {k: [] for k in _REPA_LOG_KEYS}
+        rank_vals: dict[str, list[float]] = {k: [] for k in _RANKING_LOG_KEYS}
         fm_vals: list[float] = []
         with torch.no_grad():
             for i, inp in enumerate(query_inputs):
@@ -500,11 +611,17 @@ def launch(config: Config, cfg: ReptileTrainConfig, args: argparse.Namespace) ->
                     for k, v in sc.items():
                         repa_vals[k].append(v)
                     fm_vals.append(_fm_part(loss, sc, repa_relation_weight))
+                if ranking_inner:
+                    for k, v in _ranking_scalars(out).items():
+                        rank_vals[k].append(v)
         extras: dict[str, float] = {}
         if repa_inner:  # fixed key order: _reduce_mean is a collective
             for k in _REPA_LOG_KEYS:
                 extras[k] = _reduce_mean(repa_vals[k])
             extras["loss_fm"] = _reduce_mean(fm_vals)
+        if ranking_inner:  # same: every rank reduces the same keys in the same order
+            for k in _RANKING_LOG_KEYS:
+                extras[k] = _reduce_mean(rank_vals[k])
         return _reduce_mean(vals), extras
 
     logging.info(
@@ -532,6 +649,8 @@ def launch(config: Config, cfg: ReptileTrainConfig, args: argparse.Namespace) ->
             _assert_same_across_ranks(len(query_batches), "number of query sub-batches")
             support_batches = [misc.to(b, device="cuda") for b in support_batches]
             query_batches = [misc.to(b, device="cuda") for b in query_batches]
+            if bank is not None:
+                bank.activate(str(ep["embodiment"]))  # model = theta + Delta_e for this embodiment's episode
 
             # VAE encode / tokenize once per episode (model == theta here); with REPA in the inner loop also the
             # frozen-teacher tokens of every sub-batch (shared by the k inner steps + the query diagnostics)
@@ -558,6 +677,7 @@ def launch(config: Config, cfg: ReptileTrainConfig, args: argparse.Namespace) ->
             inner_losses: list[float] = []
             inner_gnorms: list[float] = []
             inner_repa: list[dict[str, float]] = []
+            inner_ranking: list[dict[str, float]] = []
             for s in range(cfg.inner_steps):
                 scale = min(1.0, (s + 1) / cfg.inner_warmup_steps) if cfg.inner_warmup_steps > 0 else 1.0
                 set_lr_scale(optimizer, base_lrs, scale)
@@ -569,6 +689,8 @@ def launch(config: Config, cfg: ReptileTrainConfig, args: argparse.Namespace) ->
                 loss = _select_loss(out, total, cfg.loss_mode)
                 if repa_inner:
                     inner_repa.append(_repa_scalars(out))
+                if ranking_inner:
+                    inner_ranking.append(_ranking_scalars(out))
                 backward_loss = out.get("_backward_loss", total) if cfg.loss_mode == "total" else loss
                 backward_loss.backward()
                 model.on_after_backward()
@@ -580,12 +702,38 @@ def launch(config: Config, cfg: ReptileTrainConfig, args: argparse.Namespace) ->
                 inner_losses.append(float(loss.detach()))
             t_inner += time.time() - t0
 
+            # held-out query AFTER the support steps and BEFORE the query steps: the true generalization diagnostic
             t0 = time.time()
             q_adapted, q_adapted_extra = (
                 _eval_query(query_inputs, iteration, query_repa) if do_eval and query_inputs else (float("nan"), {})
             )
             t_eval += time.time() - t0
+
+            # ---- cosmos_hs11 v18: n optimizer steps on the query sub-batches (held-out instructions) ----------------
+            t0 = time.time()
+            query_step_losses: list[float] = []
+            if cfg.query_steps > 0 and query_inputs:
+                set_lr_scale(optimizer, base_lrs, 1.0)
+                for s in range(cfg.query_steps):
+                    idx = s % len(query_inputs)
+                    inp = query_inputs[idx]
+                    out, total = model.training_step_from_inputs(
+                        inp, iteration, repa_teacher_tokens=(query_repa[idx] if query_repa is not None else None)
+                    )
+                    loss = _select_loss(out, total, cfg.loss_mode)
+                    backward_loss = out.get("_backward_loss", total) if cfg.loss_mode == "total" else loss
+                    backward_loss.backward()
+                    model.on_after_backward()
+                    inner_gnorms.append(_clip_grads(trainable_params, cfg.inner_grad_clip))
+                    model.on_before_optimizer_step(optimizer, scheduler, iteration=iteration)
+                    optimizer.step()
+                    model.on_before_zero_grad(optimizer, scheduler, iteration=iteration)
+                    optimizer.zero_grad(set_to_none=True)
+                    query_step_losses.append(float(loss.detach()))
+            t_inner += time.time() - t0
             del support_repa, query_repa
+            if bank is not None:
+                bank.store()  # Delta_e keeps its inner-loop update; theta is handled by the meta step below
             disp = state.displacement_norms_by_group()
             ep_record = {
                 "embodiment": ep["embodiment"],
@@ -600,6 +748,37 @@ def launch(config: Config, cfg: ReptileTrainConfig, args: argparse.Namespace) ->
                 "adapt_delta": math.sqrt(sum(v * v for v in disp.values())),
                 "adapt_delta_by_group": disp,
             }
+            if cfg.query_steps > 0:  # fixed key order on every rank (_reduce_mean is a collective)
+                ep_record["query_step_loss_first"] = _reduce_mean([query_step_losses[0]] if query_step_losses else [])
+                ep_record["query_step_loss_last"] = _reduce_mean([query_step_losses[-1]] if query_step_losses else [])
+            if ranking_inner:
+                last_rk = inner_ranking[-1] if inner_ranking else {}
+                ep_record.update(
+                    {
+                        "support_ranking_loss_last": _reduce_mean(
+                            [last_rk["language_ranking_loss"]] if "language_ranking_loss" in last_rk else []
+                        ),
+                        "support_ranking_gap_last": _reduce_mean(
+                            [last_rk["language_ranking_gap"]] if "language_ranking_gap" in last_rk else []
+                        ),
+                        "support_ranking_margin_satisfied_last": _reduce_mean(
+                            [last_rk["language_ranking_margin_satisfied"]]
+                            if "language_ranking_margin_satisfied" in last_rk
+                            else []
+                        ),
+                        "support_ranking_valid_fraction_last": _reduce_mean(
+                            [last_rk["language_ranking_valid_fraction"]]
+                            if "language_ranking_valid_fraction" in last_rk
+                            else []
+                        ),
+                        "query_ranking_loss_zero_shot": q_zero_extra.get("language_ranking_loss", float("nan")),
+                        "query_ranking_loss": q_adapted_extra.get("language_ranking_loss", float("nan")),
+                        "query_ranking_gap": q_adapted_extra.get("language_ranking_gap", float("nan")),
+                        "query_ranking_margin_satisfied": q_adapted_extra.get(
+                            "language_ranking_margin_satisfied", float("nan")
+                        ),
+                    }
+                )
             if repa_inner:
                 # REPA diagnostics (all rank-averaged, fixed key order = same collectives on every rank): the raw
                 # cosine term and centered cosine at the first / last inner step, the flow-matching part of the
@@ -669,6 +848,21 @@ def launch(config: Config, cfg: ReptileTrainConfig, args: argparse.Namespace) ->
             }
             if not (math.isnan(record["query_loss"]) or math.isnan(record["query_loss_zero_shot"])):
                 record["query_loss_gain"] = record["query_loss_zero_shot"] - record["query_loss"]
+            if cfg.query_steps > 0:
+                for key in ("query_step_loss_first", "query_step_loss_last"):
+                    record[key] = _mean([e[key] for e in per_ep if not math.isnan(e.get(key, float("nan")))])
+            if ranking_inner:
+                for key in (
+                    "support_ranking_loss_last",
+                    "support_ranking_gap_last",
+                    "support_ranking_margin_satisfied_last",
+                    "support_ranking_valid_fraction_last",
+                    "query_ranking_loss_zero_shot",
+                    "query_ranking_loss",
+                    "query_ranking_gap",
+                    "query_ranking_margin_satisfied",
+                ):
+                    record[key] = _mean([e[key] for e in per_ep if not math.isnan(e.get(key, float("nan")))])
             if repa_inner:
                 for key in (
                     "support_repa_loss_first",
@@ -694,6 +888,8 @@ def launch(config: Config, cfg: ReptileTrainConfig, args: argparse.Namespace) ->
             if iteration % log_every == 0 or iteration == start_iter + 1:
                 theta_norms = state.theta_norms_by_group()
                 record.update({f"theta_norm/{g}": v for g, v in theta_norms.items()})
+                if bank is not None:  # collective, mirrored on the other ranks below
+                    record.update({f"private_lora_delta/{e}": v for e, v in bank.delta_norms().items()})
                 q_str = (
                     f"query {record['query_loss']:.4f} (zero-shot {record['query_loss_zero_shot']:.4f}) | "
                     if do_eval
@@ -709,8 +905,19 @@ def launch(config: Config, cfg: ReptileTrainConfig, args: argparse.Namespace) ->
                     if repa_inner
                     else ""
                 )
+                rank_str = (
+                    f"rank {record['support_ranking_loss_last']:.3f} (gap {record['support_ranking_gap_last']:.3f}, "
+                    f"sat {record['support_ranking_margin_satisfied_last']:.2f}; query {record['query_ranking_loss']:.3f}) | "
+                    if ranking_inner
+                    else ""
+                )
+                qstep_str = (
+                    f"query-steps {record['query_step_loss_first']:.4f} -> {record['query_step_loss_last']:.4f} | "
+                    if cfg.query_steps > 0
+                    else ""
+                )
                 logging.info(
-                    f"iter {iteration}/{max_iter} | {record['embodiments']} | {q_str}{repa_str}"
+                    f"iter {iteration}/{max_iter} | {record['embodiments']} | {q_str}{repa_str}{rank_str}{qstep_str}"
                     f"support {record['support_loss_first']:.4f} -> {record['support_loss_last']:.4f} | "
                     f"inner-grad {record['inner_grad_norm']:.3f} | adapt {record['adapt_delta']:.3f} ({adapt_str}) | "
                     f"eps {eps:.3f} step {meta_step_norm:.3f} | {record['iter_time']:.1f}s (data {t_data:.1f} enc {t_encode:.1f} "
@@ -734,6 +941,8 @@ def launch(config: Config, cfg: ReptileTrainConfig, args: argparse.Namespace) ->
         else:
             if iteration % log_every == 0 or iteration == start_iter + 1:
                 state.theta_norms_by_group()  # collective: keep in step with rank 0
+                if bank is not None:
+                    bank.delta_norms()
         if iteration % save_every == 0 or (iteration == max_iter and cfg.save_at_end):
             _save(iteration)
 
@@ -765,6 +974,9 @@ def main() -> None:
     repa_loader_settings = apply_repa_loader_settings(config)  # no-op unless model.config.repa.enabled (v11)
     if repa_loader_settings:
         logging.info(f"REPA in the inner loop -> episode loader settings applied: {repa_loader_settings}")
+    ranking_loader_settings = apply_ranking_loader_settings(config)  # no-op unless model.config.language_ranking.enabled (v18)
+    if ranking_loader_settings:
+        logging.info(f"ranking in the inner loop -> episode loader settings applied: {ranking_loader_settings}")
     args.config = args.sft_toml
 
     if args.dryrun:

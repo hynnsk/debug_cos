@@ -184,3 +184,112 @@ def test_v4_family_overrides_land_on_the_reptile_loader_config() -> None:
         assert c.dataloader_train.cfg_dropout_rate == 0.0
     ports = [p for p, _ in _V4_FAMILY.values()]
     assert len(set(ports)) == len(ports)
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# cosmos_hs11 v17 (shared theta + private per-embodiment LoRA) and v18 (grouped episodes + ranking hinge + query steps)
+# ---------------------------------------------------------------------------------------------------------------
+def _reptile_launcher_ports() -> dict[str, int]:
+    import re
+
+    out = {}
+    for launcher in sorted((_TOML_DIR.parents[1]).glob("launch_reptile_meta_edge*.sh")):
+        m = re.search(r"MASTER_PORT:-(\d+)", launcher.read_text())
+        if m:
+            out[launcher.name] = int(m.group(1))
+    return out
+
+
+def test_v17_private_lora_recipe_is_v4_2_plus_the_adapter_keys() -> None:
+    import copy
+    import subprocess
+
+    base = tomllib.load(open(_TOML_DIR / "action_reptile_meta_edge_v4.2.toml", "rb"))
+    raw = tomllib.load(open(_TOML_DIR / "action_reptile_meta_edge_v17.toml", "rb"))
+    meta = dict(raw["custom"]["meta"])
+    assert meta.pop("private_lora") is True
+    assert meta == base["custom"]["meta"]
+    m = raw["model"]
+    assert m["lora_enabled"] is True and m["lora_freeze_base"] is False and m["lora_rank"] == 32 and m["lora_alpha"] == 64
+    assert raw["optimizer"]["keys_to_select"] == base["optimizer"]["keys_to_select"] + ["lora_"]
+    assert raw["optimizer"]["lr_multipliers"]["lora_"] == 1.0
+    assert raw["checkpoint"]["keys_to_skip_loading"] == base["checkpoint"]["keys_to_skip_loading"] + ["lora_"]
+    stripped = copy.deepcopy(raw)
+    stripped["custom"]["meta"] = base["custom"]["meta"]
+    stripped["job"]["name"] = base["job"]["name"]
+    stripped["model"] = base["model"]
+    stripped["optimizer"] = base["optimizer"]
+    stripped["checkpoint"] = base["checkpoint"]
+    assert stripped == base  # nothing else differs from v4.2
+    cfg, sampler = _meta_cfg(raw)
+    assert cfg.private_lora is True and cfg.theta_mode == "full" and cfg.query_steps == 0
+    assert sampler == _meta_cfg(base)[1]  # the sampler / loader is v4.2's
+    overrides = build_hydra_overrides(raw)
+    assert "model.config.lora_enabled=true" in overrides
+    launcher = _TOML_DIR.parents[1] / "launch_reptile_meta_edge_v17.sh"
+    text = launcher.read_text()
+    assert "action_reptile_meta_edge_v17.toml" in text
+    subprocess.run(["bash", "-n", str(launcher)], check=True)
+
+
+def test_v18_ranking_recipe_is_v4_2_plus_the_ranking_keys() -> None:
+    import copy
+    import subprocess
+
+    from omegaconf import OmegaConf
+
+    import cosmos_framework.configs.base.experiment.action.meta.action_reptile_meta_edge as edge_module
+    from cosmos_framework.scripts.train_action_meta import SAMPLER_OVERRIDE_KEYS, apply_sampler_overrides
+    from cosmos_framework.scripts.train_action_reptile import apply_ranking_loader_settings
+
+    base = tomllib.load(open(_TOML_DIR / "action_reptile_meta_edge_v4.2.toml", "rb"))
+    raw = tomllib.load(open(_TOML_DIR / "action_reptile_meta_edge_v18.toml", "rb"))
+    assert raw["model"]["language_ranking"] == {"enabled": True, "loss_weight": 1.0, "margin": 0.1}
+    meta = dict(raw["custom"]["meta"])
+    expected = {
+        "tasks_per_episode": 8,
+        "grouped_episode_fraction": 1.0,
+        "disjoint_tasks": True,
+        "language_ranking": True,
+        "query_steps": 2,
+    }
+    for key, value in expected.items():
+        assert meta.pop(key) == value, key
+    meta["disjoint_tasks"] = base["custom"]["meta"]["disjoint_tasks"]
+    assert meta == base["custom"]["meta"]
+    stripped = copy.deepcopy(raw)
+    stripped["custom"]["meta"] = base["custom"]["meta"]
+    stripped["job"]["name"] = base["job"]["name"]
+    del stripped["model"]["language_ranking"]
+    assert stripped == base
+    cfg, sampler = _meta_cfg(raw)
+    assert cfg.query_steps == 2 and cfg.private_lora is False
+    assert "language_ranking" in SAMPLER_OVERRIDE_KEYS
+    assert sampler["language_ranking"] is True and sampler["disjoint_tasks"] is True
+    assert sampler["grouped_episode_fraction"] == 1.0 and sampler["k_shot"] % sampler["tasks_per_episode"] == 0
+    assert "model.config.language_ranking.enabled=true" in build_hydra_overrides(raw)
+    # the overrides land on the edge experiment's loader, and the trainer's auto-switch is a no-op once they did
+    experiment = next(
+        v for k, v in vars(edge_module).items()
+        if k.startswith("action_reptile_meta_edge") and hasattr(v, "keys") and "dataloader_train" in v
+    )
+    c = OmegaConf.create(experiment, flags={"allow_objects": True})
+    assert c.dataloader_train.language_ranking is False and c.model.config.language_ranking.enabled is False
+    apply_sampler_overrides(c, sampler)
+    assert c.dataloader_train.language_ranking is True and c.dataloader_train.tasks_per_episode == 8
+    c.model.config.language_ranking.enabled = True
+    assert apply_ranking_loader_settings(c) == {}
+    c2 = OmegaConf.create(experiment, flags={"allow_objects": True})
+    c2.model.config.language_ranking.enabled = True
+    assert apply_ranking_loader_settings(c2) == {"language_ranking": True} and c2.dataloader_train.language_ranking is True
+    launcher = _TOML_DIR.parents[1] / "launch_reptile_meta_edge_v18.sh"
+    text = launcher.read_text()
+    assert "action_reptile_meta_edge_v18.toml" in text
+    subprocess.run(["bash", "-n", str(launcher)], check=True)
+
+
+def test_v17_v18_launcher_ports_are_unique_among_the_reptile_launchers() -> None:
+    ports = _reptile_launcher_ports()
+    assert "launch_reptile_meta_edge_v17.sh" in ports and "launch_reptile_meta_edge_v18.sh" in ports
+    for name in ("launch_reptile_meta_edge_v17.sh", "launch_reptile_meta_edge_v18.sh"):
+        assert list(ports.values()).count(ports[name]) == 1, name

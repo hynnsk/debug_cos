@@ -1,0 +1,88 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# cosmos_hs11 -- REPTILE INIT -> FULL fine-tune on RoboCasa365 target/atomic (18 tasks, PandaOmron), every remaining train demo (~500/task: the exports hold 502-513, 1 % = 5 go to val) = the paper's 100 % target split.
+# The "Target only" setting of RoboCasa365 Table 2 (no RoboCasa pretrain-split exposure), warm-started from a full-mode
+# Reptile checkpoint instead of the mid-trained Cosmos3-Edge:
+#   [checkpoint].load_path             = REPTILE_CKPT_PATH  (<reptile job>/checkpoints/iter_XXXXXXXXX -- the dir holding model/)
+#                                        -> moe_gen, time_embedder, vae2llm, llm2vae, k_norm_und_for_gen come from theta
+#   [checkpoint].meta_action_init_path = META_ACTION_INIT_PATH (<reptile job>/meta_action_init_iter_XXXXXX.pt)
+#                                        -> the meta action heads are copied into the RoboCasa domain row (30); with the
+#                                           arm-first contract their dims 0..9 keep the [pos, rot6d, gripper] semantics
+# Same recipe as action_policy_robocasa_edge_baseinit_100pct.toml (experiment action_policy_robocasa_edge = the LIBERO Edge full-FT recipe on the RoboCasa 15D arm-first raw-base
+# contract [eef_pos(3), eef_rot6d(6), gripper(1), base_motion(4), control_mode(1)] (dims 0..9 = the 10D LIBERO / Reptile
+# meta-training layout), left|wrist 256x512 + EEF state token, chunk 16.);
+# the ONLY differences are the init and the action-head LR multiplier (5x fresh-head boost -> 1x, the heads are meta-initialized).
+# 4 GPUs (shard 4) x 128 windows (max_samples_per_batch) = global batch 512 x 16 actions, warmup 200, linear decay to 0 at
+# 3000 iterations (the same step budget for every data fraction, as in the paper), held-out val (5 demos/task) every 500.
+# Env: ROBOCASA_ROOT (<ROBOCASA_DATA>/v30/target/atomic), REPTILE_CKPT_PATH, META_ACTION_INIT_PATH, WAN_VAE_PATH,
+# IMAGINAIRE_OUTPUT_ROOT. See docs/action_policy_robocasa_posttrain.md.
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_robocasa_edge"
+project      = "cosmos3_action_robocasa"
+group        = "edge_robocasa365_atomic"
+name         = "edge_robocasa365_atomic_100pct_fullft_reptileinit_v3"
+wandb_mode   = "offline"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056   # inert at train time (only the cost model reads it): the loader packs by max_samples_per_batch, max_sequence_length = null
+lora_enabled = false                   # full fine-tune, no adapters
+
+[model.ema]
+enabled         = true
+rate            = 0.1
+iteration_shift = 0
+
+[model.parallelism]
+data_parallel_shard_degree     = 2      # 4-GPU run: NPROC_PER_NODE=4 sr 4 48 ... (global batch = 128 windows/rank x 4 ranks = 512)
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 5.0e-05          # full-FT LR of the recipe
+
+[optimizer.lr_multipliers]
+action2llm            = 5.0   # 5x in the fresh-head baseline; heads are meta-initialized here -> 1x
+llm2action            = 5.0
+action_modality_embed = 5.0
+
+[scheduler]
+cycle_lengths = [3000]        # linear decay to 0 at max_iter
+warm_up_steps = [200]
+
+[trainer]
+max_iter        = 3000
+logging_iter    = 20
+grad_accum_iter = 1              # global 512 = 128 windows/rank x 4 ranks
+# held-out validation: the seeded 1 % val split (5 demos/task = 90 episodes), same windows every pass
+run_validation          = true
+run_validation_on_start = true   # iteration 0 = the initial model before any update
+validation_iter         = 500
+max_val_iter            = 16     # x 16 windows/rank x 4 ranks = 1024 windows per pass
+
+[dataloader_train]
+max_samples_per_batch = 256       # per rank, binding (token packing off): x 4 ranks = 512 windows/step; measured ~1.9k tokens/window, peak 29 GB/GPU
+# no episodes_per_task: every train episode (~500/task; the seeded 1 % val split = 5/task is held out)
+
+[dataloader_val]
+max_samples_per_batch = 16
+
+[checkpoint]
+load_path = "${oc.env:REPTILE_CKPT_PATH}"   # <reptile job>/checkpoints/iter_XXXXXXXXX (NOT the base Cosmos3-Edge dir)
+save_iter = 3000                             # a full-mode DCP is ~24 GB; 3 per run -- raise to 3000 to keep only the final one
+# The Reptile DCP has no EMA; the action heads are skipped (fresh) and then overwritten by the meta heads below.
+keys_to_skip_loading = ["net_ema.", "action2llm", "llm2action", "action_modality_embed"]
+meta_action_init_path                   = "${oc.env:META_ACTION_INIT_PATH}"
+meta_action_init_domain_id              = 30     # EMBODIMENT_TO_DOMAIN_ID["robocasa"]
+meta_action_init_include_modality_embed = true
+meta_action_init_include_lora           = false  # full mode: no adapters
+meta_action_init_include_time_embedder  = false  # already in the DCP weights

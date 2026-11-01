@@ -188,6 +188,7 @@ action_reptile_meta_nano = LazyDict(
             # cosmos_hs11 v4.1: grouped episodes (T tasks x d demos); 0.0 = the uniform draw (overridable from [custom.meta])
             tasks_per_episode=None,
             grouped_episode_fraction=0.0,
+            language_ranking=False,  # cosmos_hs11 v18 (edge recipe; present so [custom.meta] can set it)
             max_samples_per_batch=32,  # per rank; 8 ranks x 32 = 256 = one pass over the 16 x 16 support set
             num_workers=8,
             prefetch_factor=2,

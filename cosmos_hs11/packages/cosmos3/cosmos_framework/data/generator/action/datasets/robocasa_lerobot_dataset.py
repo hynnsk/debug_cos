@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import glob
 import os
-import random
 from typing import Any
 
 import torch
@@ -48,6 +47,7 @@ from cosmos_framework.data.generator.action.datasets.cosmos3_action_lerobot impo
     build_action_spec,
 )
 from cosmos_framework.data.generator.action.utils.pose_utils import PoseConvention, convert_rotation
+from cosmos_framework.data.generator.action.utils.video_decode_env import ensure_video_decoder_libs
 from cosmos_framework.data.generator.action.utils.viewpoint_utils import Viewpoint
 from cosmos_framework.utils import log
 
@@ -269,9 +269,14 @@ class RoboCasaLeRobotDataset(BaseActionLeRobotDataset):
         camera_set: str = "wrist_lr",
         use_base_action: bool = False,
         base_encoding: str = "ego",
+        episodes_per_task: int | None = None,
+        episode_subset_seed: int = 42,
     ) -> None:
         if rotation_format != "rot6d":
             raise NotImplementedError(f"RoboCasa loader only supports rotation_format='rot6d', got {rotation_format!r}.")
+        # The CUDA torchcodec build needs the pip NVIDIA NPP libraries resolvable (cosmos_hs11: the LIBERO loaders get
+        # this from ActionBaseDataset, this one derives from BaseActionLeRobotDataset which does not pre-load them).
+        ensure_video_decoder_libs()
         super().__init__(
             fps=fps,
             chunk_length=chunk_length,
@@ -295,13 +300,27 @@ class RoboCasaLeRobotDataset(BaseActionLeRobotDataset):
         #       [base_pos(3), base_rot6d(6), control_mode(1), eef_pos(3), eef_rot6d(6), gripper(1)]
         #   "raw" (15D)          -- the native base_motion velocity command, passed through:
         #       [base_motion(4), control_mode(1), eef_pos(3), eef_rot6d(6), gripper(1)]
+        #   "raw_armfirst" (15D) -- the same channels as "raw", arm block FIRST (cosmos_hs11):
+        #       [eef_pos(3), eef_rot6d(6), gripper(1), base_motion(4), control_mode(1)]
+        #       dims 0..9 are then exactly the 10D ``[pos, rot6d, gripper]`` layout every Reptile meta-training
+        #       embodiment (and LIBERO) uses, so a meta-initialized action-head row keeps its column semantics;
+        #       the base command and the mode flag land on dims 10..14 (trained by YAM's right arm, mostly 0 / -1).
         #
         # "ego" is kept as the default so existing checkpoints/configs reproduce bit-for-bit.
         # See the ``BASE_MAX_VELOCITY`` block above for why "raw" is the better contract.
         self._use_base_action = use_base_action
-        if base_encoding not in ("ego", "raw"):
-            raise ValueError(f"Unsupported base_encoding={base_encoding!r}. Use 'ego' or 'raw'.")
+        if base_encoding not in ("ego", "raw", "raw_armfirst"):
+            raise ValueError(f"Unsupported base_encoding={base_encoding!r}. Use 'ego', 'raw' or 'raw_armfirst'.")
         self._base_encoding = base_encoding
+        # Fixed data fraction (cosmos_hs11 RoboCasa365 recipes, docs/action_policy_robocasa_posttrain.md): keep only
+        # ``episodes_per_task`` episodes of EACH task shard, picked by a seeded permutation of the shard's split
+        # episodes in ``_filter_valid_episodes``. Prefixes of one permutation, so the 50-demo subset (the paper's 10 %)
+        # is contained in the 150-demo subset (30 %); None = every split episode (100 %). The seeded 1 % val hold-out
+        # of the base class is removed BEFORE this filter, so no subset ever overlaps the validation episodes.
+        if episodes_per_task is not None and int(episodes_per_task) <= 0:
+            raise ValueError(f"episodes_per_task must be a positive int or None, got {episodes_per_task!r}.")
+        self._episodes_per_task = None if episodes_per_task is None else int(episodes_per_task)
+        self._episode_subset_seed = int(episode_subset_seed)
         self._image_features = _IMAGE_FEATURES
         # camera_set:
         #   "wrist_lr"   (default): concat_view = wrist (top) + L/R (bottom, squished to half).
@@ -369,13 +388,41 @@ class RoboCasaLeRobotDataset(BaseActionLeRobotDataset):
             shard_roots.extend(matches)
         return shard_roots
 
+    def _filter_valid_episodes(self, meta: Any, episode_ids: list[int]) -> list[int]:
+        """Base-class hook (``_append_index_records``), i.e. per shard = per task.
+
+        ``episode_ids`` are the shard's split episodes (train = everything but the seeded 1 % val hold-out, i.e. ~497
+        of the 502-513 target demos a task export holds). With ``episodes_per_task`` set, a permutation seeded by ``episode_subset_seed`` (the same
+        seed for every shard) keeps its first N entries, so subsets of different sizes nest and never contain a val
+        episode. Returns the ids sorted; the iterable shuffle decides the training order anyway.
+        """
+        n = self._episodes_per_task
+        if n is None:
+            return episode_ids
+        where = getattr(meta, "root", "?")
+        if n >= len(episode_ids):
+            if n > len(episode_ids):
+                log.warning(
+                    f"RoboCasaLeRobotDataset: episodes_per_task={n} > {len(episode_ids)} split episodes in {where}; keeping all."
+                )
+            return episode_ids
+        g = torch.Generator().manual_seed(self._episode_subset_seed)
+        perm = torch.randperm(len(episode_ids), generator=g).tolist()
+        kept = sorted(episode_ids[i] for i in perm[:n])
+        log.info(
+            f"RoboCasaLeRobotDataset: episodes_per_task={n} (seed {self._episode_subset_seed}): "
+            f"kept {len(kept)} / {len(episode_ids)} split episodes of {where}"
+        )
+        return kept
+
     # ---- action / spec -----------------------------------------------------
 
     @property
     def action_dim(self) -> int:
         if self._use_base_action:
-            if self._base_encoding == "raw":
-                # [base_motion(4), control_mode(1), eef_pos(3), eef_rot6d(6), gripper(1)]
+            if self._base_encoding in ("raw", "raw_armfirst"):
+                # raw:          [base_motion(4), control_mode(1), eef_pos(3), eef_rot6d(6), gripper(1)]
+                # raw_armfirst: [eef_pos(3), eef_rot6d(6), gripper(1), base_motion(4), control_mode(1)]
                 return 15
             # [base_pos(3), base_rot6d(6), control_mode(1), eef_pos(3), eef_rot6d(6), gripper(1)]
             return 20
@@ -383,6 +430,10 @@ class RoboCasaLeRobotDataset(BaseActionLeRobotDataset):
 
     def _build_action_spec(self) -> ActionSpec:
         if self._use_base_action:
+            if self._base_encoding == "raw_armfirst":
+                # The 10D arm block first (= the LIBERO / meta-training layout), then the same base command
+                # (``Pos(dim=4)``) and mode flag (``Gripper()``) as "raw" -- see the next branch for why.
+                return build_action_spec(Pos(), Rot("rot6d"), Gripper(), Pos(dim=4), Gripper())
             if self._base_encoding == "raw":
                 # base_motion is a NORMALISED velocity command in [-1, 1], the same units
                 # as the arm's eef_pos block -- so it is declared as ``Pos`` (magnitude-based
@@ -468,6 +519,25 @@ class RoboCasaLeRobotDataset(BaseActionLeRobotDataset):
         rot6d = convert_rotation(r_rel, input_format="matrix", output_format="rot6d")  # [chunk,6]
         return torch.cat([d_ego, rot6d], dim=-1)  # [chunk, 9]
 
+    def _assemble_action(self, arm: torch.Tensor, base_block: torch.Tensor, control_mode: torch.Tensor) -> torch.Tensor:
+        """Order the three blocks per ``base_encoding``: arm first for ``raw_armfirst``, base first otherwise."""
+        if self._base_encoding == "raw_armfirst":
+            return torch.cat([arm, base_block, control_mode], dim=-1)  # [chunk, 15]
+        return torch.cat([base_block, control_mode, arm], dim=-1)  # [chunk, 15 | 20]
+
+    def _pad_state_token(self, token: torch.Tensor) -> torch.Tensor:
+        """Widen the 10D EEF proprioception token to ``action_dim`` with zeros in the base block's position.
+
+        The base block is zero-filled on purpose: under "ego" the absolute base pose is world-frame and the
+        kitchen layout is re-randomised per episode, and under "raw" / "raw_armfirst" ``observation.state``
+        carries no base VELOCITY at all -- only pose. Either way there is no transferable signal to put here,
+        unlike the EEF pose, which is base-relative.
+        """
+        pad = torch.zeros(self.action_dim - 10, dtype=token.dtype)
+        if self._base_encoding == "raw_armfirst":
+            return torch.cat([token, pad], dim=-1)  # [action_dim]
+        return torch.cat([pad, token], dim=-1)  # [action_dim]
+
     # ---- video -------------------------------------------------------------
 
     def _compose_multi_view(self, sample: dict[str, Any]) -> torch.Tensor:
@@ -514,13 +584,13 @@ class RoboCasaLeRobotDataset(BaseActionLeRobotDataset):
         if self._use_base_action:
             raw = sample[_ACTION_FEATURE].float()
             control_mode = raw[:, _CONTROL_MODE]  # [chunk, 1]; +/-1, regressed like the gripper
-            if self._base_encoding == "raw":
+            if self._base_encoding in ("raw", "raw_armfirst"):
                 # Native normalised velocity command, passed through unchanged -> [chunk, 15].
                 base_block = raw[:, _BASE_MOTION]  # [chunk, 4]
             else:
                 # State-derived ego-frame pose delta -> [chunk, 20].
                 base_block = self._build_base_delta(sample[_STATE_FEATURE])  # [chunk, 9]
-            action = torch.cat([base_block, control_mode, action], dim=-1)
+            action = self._assemble_action(action, base_block, control_mode)
 
         # EEF proprioception: prepend the current eef pose as a clean conditioning
         # token (DROID use_state parity). Compute idle_frames on the delta-only chunk
@@ -532,16 +602,9 @@ class RoboCasaLeRobotDataset(BaseActionLeRobotDataset):
                 state_extras["idle_frames"] = idle
             initial_state = self._build_initial_state(sample[_STATE_FEATURE])  # [10]
             if self._use_base_action:
-                # Widen the conditioning token to the action contract (20D ego / 15D raw).
-                # The base block is zero-filled on purpose: under "ego" the absolute base
-                # pose is world-frame and the kitchen layout is re-randomised per episode,
-                # and under "raw" ``observation.state`` carries no base VELOCITY at all —
-                # only pose. Either way there is no transferable signal to put here, unlike
-                # the EEF pose, which is base-relative.
-                pad = self.action_dim - 10
-                initial_state = torch.cat(
-                    [torch.zeros(pad, dtype=initial_state.dtype), initial_state], dim=-1
-                )  # [action_dim]
+                # Widen the conditioning token to the action contract (20D ego / 15D raw / raw_armfirst);
+                # the base block is zero-filled, see ``_pad_state_token``.
+                initial_state = self._pad_state_token(initial_state)  # [action_dim]
             action = torch.cat([initial_state.unsqueeze(0), action], dim=0)  # [chunk+1, action_dim]
 
         if self._skip_video_loading:

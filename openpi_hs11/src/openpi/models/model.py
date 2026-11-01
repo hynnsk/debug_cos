@@ -106,12 +106,21 @@ class Observation(Generic[ArrayT]):
     # Token loss mask (for FAST autoregressive model).
     token_loss_mask: at.Bool[ArrayT, "*b l"] | None = None
 
+    # cosmos_hs11 language ranking (training batches only, see pi0_config.LanguageRankingConfig): the tokenized
+    # instruction of ANOTHER task of the same suite, and a per-sample validity flag (False = the sample's own prompt
+    # was CFG-dropped, so the pair carries no ranking signal).
+    tokenized_negative_prompt: at.Int[ArrayT, "*b l"] | None = None
+    tokenized_negative_prompt_mask: at.Bool[ArrayT, "*b l"] | None = None
+    ranking_valid: at.Bool[ArrayT, "*b"] | None = None
+
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":
         """This method defines the mapping between unstructured data (i.e., nested dict) to the structured Observation format."""
         # Ensure that tokenized_prompt and tokenized_prompt_mask are provided together.
         if ("tokenized_prompt" in data) != ("tokenized_prompt_mask" in data):
             raise ValueError("tokenized_prompt and tokenized_prompt_mask must be provided together.")
+        if ("tokenized_negative_prompt" in data) != ("tokenized_negative_prompt_mask" in data):
+            raise ValueError("tokenized_negative_prompt and tokenized_negative_prompt_mask must be provided together.")
         # If images are uint8, convert them to [-1, 1] float32.
         for key in data["image"]:
             if data["image"][key].dtype == np.uint8:
@@ -126,6 +135,9 @@ class Observation(Generic[ArrayT]):
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
             token_ar_mask=data.get("token_ar_mask"),
             token_loss_mask=data.get("token_loss_mask"),
+            tokenized_negative_prompt=data.get("tokenized_negative_prompt"),
+            tokenized_negative_prompt_mask=data.get("tokenized_negative_prompt_mask"),
+            ranking_valid=data.get("ranking_valid"),
         )
 
     def to_dict(self) -> at.PyTree[ArrayT]:
@@ -205,6 +217,9 @@ def preprocess_observation(
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,
         token_loss_mask=observation.token_loss_mask,
+        tokenized_negative_prompt=observation.tokenized_negative_prompt,
+        tokenized_negative_prompt_mask=observation.tokenized_negative_prompt_mask,
+        ranking_valid=observation.ranking_valid,
     )
 
 

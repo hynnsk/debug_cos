@@ -70,6 +70,10 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         ("dataloader_val", "episode_subset_path"): (
             "dataloader_val", "dataloader", "datasets", "libero", "dataset", "episode_subset_path",
         ),
+        # RoboCasa365 data fraction (action_policy_robocasa_edge, cosmos_hs11): nested `robocasa` dataset node.
+        ("dataloader_train", "episodes_per_task"): (
+            "dataloader_train", "dataloader", "datasets", "robocasa", "dataset", "episodes_per_task",
+        ),
         ("model",): ("model", "config"),
     },
     # VLM (VLMModelConfig): model.config.{parallelism, compile,
@@ -109,6 +113,7 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         ("dataloader_train", "max_sequence_length"): ("dataloader_train", "batcher", "max_tokens"),
         ("dataloader_train", "max_caption_tokens"): None,                       # VFM-only knob — VLM packer caps via max_sequence_length
         ("dataloader_train", "episode_subset_path"): None,                      # LIBERO action-SFT-only knob
+        ("dataloader_train", "episodes_per_task"): None,                        # RoboCasa action-SFT-only knob
         ("dataloader_val",): None,                                             # VFM action-SFT-only section (cosmos_hs09)
         # Catch-all for any other model.* sub-keys
         ("model",): ("model", "config"),

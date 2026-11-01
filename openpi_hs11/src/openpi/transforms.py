@@ -267,6 +267,37 @@ class TokenizePrompt(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class TokenizeNegativePrompt(DataTransformFn):
+    """cosmos_hs11 language ranking: tokenize ``negative_prompt`` (an instruction of another task, see
+    ``hs11.libero_v3.NegativePrompt``) exactly like ``TokenizePrompt`` tokenizes the prompt, into
+    ``tokenized_negative_prompt(_mask)``; ``ranking_valid`` becomes a bool array. A no-op when the key is absent
+    (inference, recipes without ranking). Place it right after ``TokenizePrompt`` (before the state is padded).
+    """
+
+    tokenizer: _tokenizer.PaligemmaTokenizer
+    discrete_state_input: bool = False
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if (prompt := data.pop("negative_prompt", None)) is None:
+            return data
+
+        if self.discrete_state_input:
+            if (state := data.get("state", None)) is None:
+                raise ValueError("State is required.")
+        else:
+            state = None
+
+        if not isinstance(prompt, str):
+            prompt = prompt.item()
+
+        tokens, token_masks = self.tokenizer.tokenize(prompt, state)
+        out = {**data, "tokenized_negative_prompt": tokens, "tokenized_negative_prompt_mask": token_masks}
+        if "ranking_valid" in data:
+            out["ranking_valid"] = np.asarray(bool(data["ranking_valid"]))
+        return out
+
+
+@dataclasses.dataclass(frozen=True)
 class TokenizeFASTInputs(DataTransformFn):
     tokenizer: _tokenizer.FASTTokenizer
 
