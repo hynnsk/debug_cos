@@ -35,6 +35,10 @@
 #   TRAIN_PY         default $HOME/anaconda3/envs/cosmos3-pt/bin/python  (steps assets/data/convert; any python >= 3.12)
 #   ASSET_TYPES      default all
 #   TASKS            default: the 18 target/atomic tasks (DEFAULT_ALL_ATOMIC_TASKS of robocasa_lerobot_dataset.py)
+#   DOWNLOAD_SOURCE  auto (default) | box | hf -- where steps assets/data fetch from. Some clusters reset every TCP
+#                    connection to utexas.box.com ("[Errno 104] Connection reset by peer" on every archive); "auto"
+#                    then falls back to the verified Hugging Face mirrors (twilighted/Robocasa365-Assets,
+#                    huiwon/robocasa365, see download_robocasa365.py), "hf" skips Box altogether.
 #
 # Usage:
 #   bash examples/setup_robocasa365.sh                 # everything
@@ -51,6 +55,7 @@ CONDA_BASE="${CONDA_BASE:-$HOME/anaconda3}"
 TRAIN_PY="${TRAIN_PY:-$HOME/anaconda3/envs/cosmos3-pt/bin/python}"
 ASSET_TYPES="${ASSET_TYPES:-all}"
 STEPS="${STEPS:-env assets data convert}"
+DOWNLOAD_SOURCE="${DOWNLOAD_SOURCE:-auto}"
 TASKS="${TASKS:-CloseBlenderLid CloseFridge CloseToasterOvenDoor CoffeeSetupMug NavigateKitchen OpenCabinet OpenDrawer OpenStandMixerHead PickPlaceCounterToCabinet PickPlaceCounterToStove PickPlaceDrawerToCounter PickPlaceSinkToCounter PickPlaceToasterToCounter SlideDishwasherRack TurnOffStove TurnOnElectricKettle TurnOnMicrowave TurnOnSinkFaucet}"
 
 WORKDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -96,20 +101,20 @@ fi
 
 # ------------------------------------------------------------------------------------------------ assets
 if has_step assets; then
-    log "[assets] kitchen assets ($ASSET_TYPES) -> $ROBOCASA_REPO/robocasa/models/assets"
+    log "[assets] kitchen assets ($ASSET_TYPES, source $DOWNLOAD_SOURCE) -> $ROBOCASA_REPO/robocasa/models/assets"
     # shellcheck disable=SC2086
     "$TRAIN_PY" "$DOWNLOADER" assets --box-links "$BOX_LINKS_DIR/box_links_assets.json" \
-        --assets-dir "$ROBOCASA_REPO/robocasa/models/assets" --types $ASSET_TYPES
+        --assets-dir "$ROBOCASA_REPO/robocasa/models/assets" --types $ASSET_TYPES --source "$DOWNLOAD_SOURCE"
     du -sh "$ROBOCASA_REPO/robocasa/models/assets" || true
 fi
 
 # ------------------------------------------------------------------------------------------------ data
 if has_step data; then
-    log "[data] target/atomic human demos (18 tasks x 500) -> $ROBOCASA_DATA/v1.0/target/atomic"
+    log "[data] target/atomic human demos (18 tasks x 500, source $DOWNLOAD_SOURCE) -> $ROBOCASA_DATA/v1.0/target/atomic"
     mkdir -p "$ROBOCASA_DATA/v1.0"
     # shellcheck disable=SC2086
     "$TRAIN_PY" "$DOWNLOADER" datasets --box-links "$BOX_LINKS_DIR/box_links_ds.json" \
-        --dest "$ROBOCASA_DATA/v1.0" --split target --kind atomic --tasks $TASKS
+        --dest "$ROBOCASA_DATA/v1.0" --split target --kind atomic --tasks $TASKS --source "$DOWNLOAD_SOURCE"
     log "[data] verify"
     missing=0
     for t in $TASKS; do

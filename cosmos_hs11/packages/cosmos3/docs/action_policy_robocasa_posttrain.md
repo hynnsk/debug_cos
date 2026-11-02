@@ -57,6 +57,13 @@ export COSMOS_STORAGE=$HOME/project/cosmos_storage
 bash examples/setup_robocasa365.sh                       # STEPS="env assets data convert" (idempotent, resumable)
 ```
 
+Steps `assets` and `data` fetch from the official UT Austin Box links. Some clusters reset every TCP connection to
+`utexas.box.com` (`[Errno 104] Connection reset by peer` on every archive, 3/3 attempts); `DOWNLOAD_SOURCE=auto`
+(default) then falls back to the Hugging Face mirrors `twilighted/Robocasa365-Assets` (6 zips, byte-identical to Box)
+and `huiwon/robocasa365` (same `<split>/<kind>/<Task>/<date>/lerobot.tar` tree; tar metadata differs, extracted files
+identical -- both checked 2026-11-02). `DOWNLOAD_SOURCE=hf bash examples/setup_robocasa365.sh` skips Box altogether
+(`cosmos_framework/scripts/download_robocasa365.py --source`).
+
 * `env`: conda env `robocasa-eval` (python 3.11) with `~/project/robosuite` (ARISE master, 1.5.2) and `~/project/robocasa`
   (RoboCasa365 1.0.1) as editable installs + `requests imageio-ffmpeg`; writes `robocasa/macros_private.py` with
   `DATASET_BASE_PATH=$COSMOS_STORAGE/data/robocasa365`. robocasa pins numpy 2.2.5 / mujoco 3.3.1 / lerobot 0.3.3, hence

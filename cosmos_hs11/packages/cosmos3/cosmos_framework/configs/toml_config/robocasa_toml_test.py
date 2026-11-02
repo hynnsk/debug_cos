@@ -318,3 +318,44 @@ def test_launchers_and_eval_script_reference_the_recipes_with_distinct_ports() -
     # bob/greco NCCL-IB guard, same as the training launcher (the 1-rank broadcast in OmniInference.create SIGSEGVs there)
     assert 'export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}"' in ev
     assert (ex / "setup_robocasa365.sh").is_file()
+
+
+def test_robocasa_downloader_has_a_verified_hf_mirror_fallback(monkeypatch, tmp_path):
+    """Some clusters reset every TCP connection to utexas.box.com (seen 2026-11-02: "[Errno 104] Connection reset by
+    peer" on all 6 asset zips). ``--source auto`` must then fall back to the HF mirrors, and the setup script must
+    expose the knob (DOWNLOAD_SOURCE) to both download steps."""
+    from cosmos_framework.scripts import download_robocasa365 as dl
+
+    # URL mapping: every Box asset key has a mirror file; dataset keys map 1:1 onto the mirror tree.
+    assert set(dl.HF_ASSET_FILES) == {k for k, _ in dl.ASSET_TYPES.values()}
+    assert dl.hf_asset_url("fixtures_lightwheel").endswith("/twilighted/Robocasa365-Assets/resolve/main/fixtures.zip")
+    assert dl.hf_asset_url("objects_lightwheel").endswith("/lightwheel.zip")
+    key = "target/atomic/CloseFridge/20250816/lerobot.tar"
+    assert dl.hf_dataset_url(key) == f"https://huggingface.co/datasets/huiwon/robocasa365/resolve/main/{key}"
+    assert [lbl for lbl, _ in dl.source_order("auto", "B", "H")] == ["box", "hf"]
+    assert dl.source_order("box", "B", "H") == [("box", "B")] and dl.source_order("hf", "B", "H") == [("hf", "H")]
+
+    # Fallback + stickiness: Box fails -> HF is used, and HF goes first for the next archive of the same run.
+    calls: list[str] = []
+
+    def fake_download(url, dst, *, tries=3):
+        calls.append(url)
+        if url.startswith("box://"):
+            raise RuntimeError(f"download failed after {tries} attempts: {url}")
+        dst.write_bytes(b"ok")
+
+    monkeypatch.setattr(dl, "download", fake_download)
+    monkeypatch.setattr(dl, "_PREFERRED", [])
+    cands = dl.source_order("auto", "box://a.zip", "hf://a.zip")
+    assert dl.download_any(cands, tmp_path / "a.zip") == "hf"
+    assert calls == ["box://a.zip", "hf://a.zip"]
+    cands2 = dl.source_order("auto", "box://b.zip", "hf://b.zip")
+    assert dl.download_any(cands2, tmp_path / "b.zip") == "hf"
+    assert calls[-1] == "hf://b.zip" and "box://b.zip" not in calls  # Box skipped once it is known to be blocked
+    with pytest.raises(RuntimeError, match="all sources failed"):
+        dl.download_any(dl.source_order("box", "box://c.zip", "hf://c.zip"), tmp_path / "c.zip")
+
+    # setup script: one knob, passed to both download steps, default auto (Box first).
+    setup = (ROOT / "examples" / "setup_robocasa365.sh").read_text()
+    assert 'DOWNLOAD_SOURCE="${DOWNLOAD_SOURCE:-auto}"' in setup
+    assert setup.count('--source "$DOWNLOAD_SOURCE"') == 2

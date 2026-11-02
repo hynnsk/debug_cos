@@ -196,7 +196,7 @@ cookbooks/cosmos3/reasoner/finetune/outputs/
 .streamlit/
 
 # Core dump files
-core.*
+core.[0-9]*
 
 # deploy
 /external/

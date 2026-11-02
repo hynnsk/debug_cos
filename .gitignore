@@ -13,8 +13,8 @@ _scratch/
 LIBERO/
 # RoboCasa365 simulator clones for cosmos_hs11 (own .git each; robocasa/ also holds ~23 GB of kitchen assets).
 # Set up by cosmos_hs11/packages/cosmos3/examples/setup_robocasa365.sh; install from upstream instead.
-robocasa/
-robosuite/
+/robocasa/
+/robosuite/
 # Upstream NVIDIA/cosmos benchmark assets, unmodified and identical in every
 # cosmos*/ copy (~140 MB each). Delete this line if you edit anything in there.
 cosmos*/evaluation/
@@ -143,7 +143,7 @@ tmp/
 temp/
 *.tmp
 *.temp
-core.*
+core.[0-9]*
 
 # ---- Paper draft (CVPR LaTeX project), kept local only -------------
 Paper/

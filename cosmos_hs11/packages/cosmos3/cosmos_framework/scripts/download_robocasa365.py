@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
 
-"""Download RoboCasa365 datasets / kitchen assets from the official Box links -- standard library only.
+"""Download RoboCasa365 datasets / kitchen assets from the official Box links (or verified HF mirrors) -- stdlib only.
 
 A stand-alone, resumable replacement for ``robocasa.scripts.download_datasets`` and
 ``robocasa.scripts.download_kitchen_assets`` that does NOT import the ``robocasa`` package (so it runs in any
@@ -26,6 +26,12 @@ Examples (see examples/setup_robocasa365.sh):
 Every archive is fetched to ``<name>.part`` first (retried), extracted with Python's ``data`` filter (no absolute
 paths / links escaping the destination), then deleted. A dataset whose ``lerobot/meta/info.json`` already exists is
 skipped, so re-running after an interruption resumes.
+
+``--source`` (default ``auto``): some clusters reset every TCP connection to utexas.box.com ("[Errno 104] Connection
+reset by peer" on all archives, seen 2026-11-02). ``auto`` tries Box first and falls back to the Hugging Face mirrors
+below for the rest of the run; ``hf`` skips Box; ``box`` never falls back. The mirrors were checked against Box on
+2026-11-02: the 6 asset zips are byte-identical (size + first/last MiB sha256), the dataset tars differ only in tar
+metadata (one task extracted and every file sha256-compared against the Box copy: identical).
 """
 
 from __future__ import annotations
@@ -59,6 +65,42 @@ def direct_url(shared_url: str, ext: str) -> str:
     shared_id = shared_url.rstrip("/").split("/")[-1]
     base = shared_url.split("/s/")[0]
     return f"{base}/shared/static/{shared_id}.{ext}"
+
+
+# Hugging Face mirrors of the Box archives (public, ungated; see the module docstring for how they were verified).
+HF_ASSETS_REPO = "twilighted/Robocasa365-Assets"  # one zip per Box asset key, byte-identical to Box
+HF_ASSET_FILES: dict[str, str] = {  # box_links_assets.json key -> file in HF_ASSETS_REPO
+    "textures": "textures.zip",
+    "generative_textures": "generative_textures.zip",
+    "fixtures_lightwheel": "fixtures.zip",
+    "objaverse": "objaverse.zip",
+    "aigen_objs": "aigen_objs.zip",
+    "objects_lightwheel": "lightwheel.zip",
+}
+HF_DATASETS_REPO = "huiwon/robocasa365"  # mirrors the Box tree: <split>/<kind>/<Task>/<date>/lerobot.tar
+SOURCES = ("auto", "box", "hf")
+
+
+def hf_url(repo: str, path: str) -> str:
+    return f"https://huggingface.co/datasets/{repo}/resolve/main/{path}"
+
+
+def hf_asset_url(link_key: str, repo: str = HF_ASSETS_REPO) -> str:
+    return hf_url(repo, HF_ASSET_FILES[link_key])
+
+
+def hf_dataset_url(key: str, repo: str = HF_DATASETS_REPO) -> str:
+    """``key`` is the box_links_ds.json key, e.g. ``target/atomic/CloseFridge/20250816/lerobot.tar``."""
+    return hf_url(repo, key)
+
+
+def source_order(source: str, box: str, hf: str) -> list[tuple[str, str]]:
+    """Candidate (label, url) pairs for ``--source``; ``auto`` = Box then HF."""
+    if source == "box":
+        return [("box", box)]
+    if source == "hf":
+        return [("hf", hf)]
+    return [("box", box), ("hf", hf)]
 
 
 def _fmt(n: float) -> str:
@@ -97,6 +139,31 @@ def download(url: str, dst: Path, *, tries: int = 3, chunk: int = 1 << 22) -> No
             time.sleep(5 * attempt)
     part.unlink(missing_ok=True)
     raise RuntimeError(f"download failed after {tries} attempts: {url}") from last_err
+
+
+_PREFERRED: list[str] = []  # labels that succeeded after an earlier one failed, most recent first
+
+
+def download_any(candidates: list[tuple[str, str]], dst: Path, *, tries: int = 3) -> str:
+    """Try each (label, url) with :func:`download`; return the label that worked.
+
+    A source that succeeds after another failed is moved to the front for the rest of the process, so a run on a
+    network that resets every Box connection pays the Box timeouts once, not once per archive.
+    """
+    order = sorted(candidates, key=lambda c: _PREFERRED.index(c[0]) if c[0] in _PREFERRED else len(_PREFERRED))
+    errors: list[str] = []
+    for i, (label, url) in enumerate(order):
+        if i > 0:
+            print(f"    falling back to {label}: {url}", flush=True)
+        try:
+            download(url, dst, tries=tries)
+        except RuntimeError as exc:
+            errors.append(f"{label}: {exc}")
+            continue
+        if i > 0 and label not in _PREFERRED:
+            _PREFERRED.insert(0, label)
+        return label
+    raise RuntimeError("all sources failed: " + " | ".join(errors))
 
 
 def extract(archive: Path, into: Path) -> None:
@@ -139,20 +206,27 @@ def cmd_datasets(args: argparse.Namespace) -> int:
             if (ds_dir / "meta" / "info.json").is_file():
                 print(f"[{i}/{len(tasks)}] {task}: already present at {ds_dir}, skipping", flush=True)
                 continue
-            url = direct_url(links[key], "tar")
-            print(f"[{i}/{len(tasks)}] {task}: {key}\n    {url}", flush=True)
+            candidates = source_order(
+                args.source, direct_url(links[key], "tar"), hf_dataset_url(key, args.hf_datasets_repo)
+            )
+            print(
+                f"[{i}/{len(tasks)}] {task}: {key}\n    " + "\n    ".join(f"{lbl}: {u}" for lbl, u in candidates),
+                flush=True,
+            )
             if args.dryrun:
                 continue
             date_dir.mkdir(parents=True, exist_ok=True)
             tar_path = date_dir / "lerobot.tar"
             try:
-                download(url, tar_path)
+                download_any(candidates, tar_path)
                 if ds_dir.exists():  # a previous partial extraction
                     shutil.rmtree(ds_dir)
                 print(f"    extracting into {date_dir}", flush=True)
                 extract(tar_path, date_dir)
                 if not (ds_dir / "meta" / "info.json").is_file():
-                    raise RuntimeError(f"archive did not produce {ds_dir}/meta/info.json; contents: {os.listdir(date_dir)}")
+                    raise RuntimeError(
+                        f"archive did not produce {ds_dir}/meta/info.json; contents: {os.listdir(date_dir)}"
+                    )
                 info = json.loads((ds_dir / "meta" / "info.json").read_text())
                 print(
                     f"    OK {task}: {info.get('total_episodes')} episodes, {info.get('total_frames')} frames, "
@@ -185,13 +259,18 @@ def cmd_assets(args: argparse.Namespace) -> int:
             print(f"[{i}/{len(types)}] {t}: already present at {target}, skipping", flush=True)
             continue
         url = direct_url(links[link_key], "zip")
-        print(f"[{i}/{len(types)}] {t}: {link_key} -> {target}\n    {url}", flush=True)
+        candidates = source_order(args.source, url, hf_asset_url(link_key, args.hf_assets_repo))
+        print(
+            f"[{i}/{len(types)}] {t}: {link_key} -> {target}\n    "
+            + "\n    ".join(f"{lbl}: {u}" for lbl, u in candidates),
+            flush=True,
+        )
         if args.dryrun:
             continue
         zip_path = target.parent / f"{target.name}.zip"
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
-            download(url, zip_path)
+            download_any(candidates, zip_path)
             print(f"    extracting into {target.parent}", flush=True)
             extract(zip_path, target.parent)
             if not target.is_dir():
@@ -215,11 +294,19 @@ def main(argv: list[str] | None = None) -> int:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     d = sub.add_parser("datasets", help="LeRobot v2.1 demo datasets (one tar per task)")
-    d.add_argument("--box-links", required=True, help="robocasa/models/assets/box_links/box_links_ds.json of a robocasa clone")
+    d.add_argument(
+        "--box-links", required=True, help="robocasa/models/assets/box_links/box_links_ds.json of a robocasa clone"
+    )
     d.add_argument("--dest", required=True, help="dataset base dir = robocasa DATASET_BASE_PATH/v1.0")
     d.add_argument("--split", default="target", choices=["target", "pretrain"])
     d.add_argument("--kind", default="atomic", choices=["atomic", "composite"])
     d.add_argument("--tasks", nargs="*", default=None, help="task names (default: every task of the split/kind)")
+    d.add_argument("--source", default="auto", choices=SOURCES, help="auto = Box, then the HF mirror (default)")
+    d.add_argument(
+        "--hf-datasets-repo",
+        default=HF_DATASETS_REPO,
+        help=f"HF dataset repo mirroring the Box tree (default {HF_DATASETS_REPO})",
+    )
     d.add_argument("--dryrun", action="store_true")
     d.set_defaults(fn=cmd_datasets)
 
@@ -227,6 +314,12 @@ def main(argv: list[str] | None = None) -> int:
     a.add_argument("--box-links", required=True, help="robocasa/models/assets/box_links/box_links_assets.json")
     a.add_argument("--assets-dir", required=True, help="<robocasa clone>/robocasa/models/assets")
     a.add_argument("--types", nargs="+", default=["all"], choices=list(ASSET_TYPES) + ["all"])
+    a.add_argument("--source", default="auto", choices=SOURCES, help="auto = Box, then the HF mirror (default)")
+    a.add_argument(
+        "--hf-assets-repo",
+        default=HF_ASSETS_REPO,
+        help=f"HF dataset repo holding the 6 asset zips (default {HF_ASSETS_REPO})",
+    )
     a.add_argument("--dryrun", action="store_true")
     a.set_defaults(fn=cmd_assets)
 
