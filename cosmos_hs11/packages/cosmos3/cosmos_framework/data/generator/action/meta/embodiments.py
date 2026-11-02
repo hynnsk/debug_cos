@@ -328,11 +328,16 @@ def build_embodiment_sft_dataset(
 
 
 def embodiment_task_texts(dataset: Dataset) -> dict[int, str] | None:
-    """``task_index -> instruction text`` of a raw or ``ActionSFTDataset``-wrapped meta-ready reader (the LeRobot
-    readers keep it as ``_tasks``: list indexed by task id, or dict). ``None`` when the reader has no task table.
+    """``task_index -> instruction text`` of a raw or ``ActionSFTDataset``-wrapped meta-ready reader.
+
+    The single-root LeRobot readers keep it as ``_tasks`` (dict ``{task id: text}`` or a list indexed by task id);
+    the YAM repo collection (``YAMRepoCollectionDataset``) keeps its GLOBAL task table as ``task_texts`` (list indexed
+    by the global task id its ``episode_table()`` reports). ``None`` when the reader exposes neither.
     cosmos_hs11 v18: the episodic sampler draws language-ranking negatives from it without decoding any video."""
     inner = getattr(dataset, "_dataset", dataset)
     tasks = getattr(inner, "_tasks", None)
+    if tasks is None:
+        tasks = getattr(inner, "task_texts", None)
     if tasks is None:
         return None
     if isinstance(tasks, dict):

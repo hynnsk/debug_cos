@@ -77,6 +77,9 @@ def test_ranking_scalars_pick_the_logged_terms() -> None:
 def test_embodiment_task_texts_reads_the_reader_task_table() -> None:
     assert embodiment_task_texts(SimpleNamespace(_tasks=["open", "close | shut"])) == {0: "open", 1: "close | shut"}
     assert embodiment_task_texts(SimpleNamespace(_dataset=SimpleNamespace(_tasks={3: "pick", 7: "place"}))) == {3: "pick", 7: "place"}
+    # the YAM repo collection keeps a GLOBAL task table as ``task_texts`` (no ``_tasks``)
+    assert embodiment_task_texts(SimpleNamespace(_dataset=SimpleNamespace(task_texts=["fold towel", "stack cups"]))) == {0: "fold towel", 1: "stack cups"}
+    assert embodiment_task_texts(SimpleNamespace(_tasks={0: "a"}, task_texts=["ignored"])) == {0: "a"}  # _tasks wins
     assert embodiment_task_texts(SimpleNamespace(_dataset=SimpleNamespace())) is None
 
 

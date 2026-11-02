@@ -550,7 +550,7 @@ recipe runs INSIDE the inner loop, and the displacement ends with steps on held-
 * Negatives: the trainer switches the episodic loader to `language_ranking = true` (`apply_ranking_loader_settings`, like
   the REPA native-frame switch). `episodic_sampler.episode_ranking_negatives` gives every window a paraphrase of ANOTHER
   support task's instruction of the same episode (support windows: the other support tasks; query windows: the support
-  tasks other than their own), read from the reader's task table (`embodiments.embodiment_task_texts`, no video decode)
+  tasks other than their own), read from the reader's task table (`embodiments.embodiment_task_texts`: `_tasks` of the single-root readers, `task_texts` of the YAM repo collection = its global task ids; no video decode)
   and tokenized by the shared transform through `ActionSFTDataset.getitem_with_extras` exactly like the LIBERO loader's
   negatives. A window with no eligible task (single-task support set, e.g. the 2-task Franka reader after the uniform
   fill) gets its own text as a placeholder and `ranking_valid = false`. The map is drawn from a stream keyed by the
