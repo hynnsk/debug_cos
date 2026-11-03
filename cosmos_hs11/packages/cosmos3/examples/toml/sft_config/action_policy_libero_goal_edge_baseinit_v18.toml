@@ -22,7 +22,7 @@ experiment   = "action_policy_libero_edge"
 project      = "cosmos3_action_libero"
 group        = "edge_libero_goal_fewshot"
 name         = "edge_libero_goal_3ep_fullft_baseinit_v18"
-wandb_mode   = "online"
+wandb_mode   = "offline"
 
 [model]
 precision = "bfloat16"

@@ -6,7 +6,7 @@
 
 [job]
 config       = "pi05_libero_v3_libero_10_all_reptile"
-exp_name     = "libero10_all_reptile_v2.1"
+exp_name     = "libero10_all_reptile_v2.1_re"
 project_name = "openpi_hs11"
 
 [wandb]

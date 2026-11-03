@@ -5,7 +5,7 @@
 #   dry run (CPU):  JAX_PLATFORMS=cpu .venv/bin/python scripts/train_toml.py --toml scripts/hs11/toml/libero10_all_reptile_v1.toml --dryrun
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/_common.sh"
-TOML_FILE="${TOML_FILE:-scripts/hs11/toml/libero10_all_reptile_v2.1.toml}"
+TOML_FILE="${TOML_FILE:-scripts/hs11/toml/libero10_all_reptile_v2.1_re.toml}"
 # REPTILE_PARAMS=<reptile ckpt>/<meta-iter>/params overrides [checkpoint].init_params of the TOML.
 if [[ -n "${REPTILE_PARAMS:-}" ]]; then set -- "checkpoint.init_params=$REPTILE_PARAMS" "$@"; fi
 echo ">>> $(date '+%H:%M:%S') train_toml: $TOML_FILE $*"
