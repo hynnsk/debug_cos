@@ -101,6 +101,7 @@ def _action_policy_libero_edge_repa_model_config() -> dict:
         layer_index=8,  # output of MoT block 8 (of 28); next candidate: 14
         teacher="vjepa2_1_vit_base_384",  # ViT-B/16 default; "vjepa2_1_vit_large_384" = ViT-L/16
         teacher_checkpoint_path=None,  # $COSMOS_STORAGE/checkpoints/vjepa2_1/<release file>
+        teacher_layer_index=None,  # teacher="self_init" (cosmos_hs11 v115+): MoT block of the frozen initial network
         teacher_input_size=256,  # LIBERO native camera resolution == V-JEPA 2.1 RoPE base grid (16x16)
         teacher_num_frames=16,  # = chunk_length: the predicted frames 1..16
         teacher_batch_size=32,

@@ -291,3 +291,50 @@ weight 0 is now evaluated without autograd (it is still logged as `repa_cos_sim`
 Launchers `launch_sft_action_policy_libero_10_edge_reptileinit_repa_dinov2_v1{3,4,5}.sh` (ports 50060 / 50061 / 50062).
 Note the relation loss is rotation-invariant: it constrains the geometry among tokens, not their absolute direction,
 so `repa_cos_sim` need not rise under v13-v15. Not GPU-smoked; CPU tests + dry-runs.
+
+## Internal teachers: self-distillation from the frozen initial network and the Wan VAE patches (cosmos_hs11 v115-v123, 2026-11-04)
+
+Why: the few-shot post-training moves the generation tower a lot and partly undoes the pre-training delta (hs11 analysis of
+2026-10-22). Instead of an external encoder (DINOv2 / V-JEPA), the REPA machinery can now take its target from INSIDE the
+model, in the MoT token order (no teacher grid, no target adapter, no native frames):
+
+| `[model.repa] teacher` | target rows (predicted-frame vision tokens, sample-major; latent frames 1..4 = raw frames 2..17) | width |
+| --- | --- | --- |
+| `"self_init"` | residual stream after MoT block `teacher_layer_index` of a FROZEN copy of the network **as loaded** (Reptile theta + fresh heads), run on the SAME noised packed sequence (same noise, same t, same text, same action tokens). The copy is built lazily at the first training/validation step (`OmniMoTModel._get_self_init_teacher_net`: `build_net(mp_policy=None, ac_config=none, repa_enabled=False)` + a rank-local shard copy of every parameter/buffer, bf16, `requires_grad=False`, outside the module registry: not trained, not checkpointed). | hidden size (2048) |
+| `"wan_vae"` | the CLEAN Wan2.2 VAE latent patches of the predicted frames, patchified exactly like `_encode_vision` (the `vae2llm` input; kept from the pack before the noise replacement). | C x p x p = 48 x 2 x 2 = 192 |
+
+Student = `layer_index` (14 in the recipes). Two terms, both from the existing REPA loss block: `loss_weight` x per-token
+`1 - cos` (needs pred/target of one width) and `relation_loss_weight` x the VideoREPA token-relation distillation, i.e. the L1
+mean (margin 0.1 in the recipes, as in repa_dinov2_v29) between the token x token cosine-similarity maps of each sample's predicted frames (`relation_distance="l1"`;
+widths may differ, the maps are n x n either way). `projector_type="identity"` (new) compares h_k itself (parameter-free, so
+`"repa_"` selects nothing); `"mlp"` is REPA's 2048 -> 192 MLP for the VAE feature term. Pieces: `repa/teachers.py`
+(`INTERNAL_REPA_TEACHERS`, `InternalRepaTeacher` handle), `repa/alignment.py` (`RepaTokenTargets`,
+`select_noisy_vision_rows`), `Cosmos3VFMNetwork.forward(capture_only_layer=k)` (prefix forward of the teacher copy),
+`_compute_repa_targets` (token targets pass through), `OmniMoTModel._internal_repa_targets` / `_set_up_internal_repa_teacher`,
+`RepaConfig.teacher_layer_index`. Not supported in the Reptile inner loop (`_compute_repa_teacher_tokens` raises).
+
+Recipes (= `action_policy_libero_10_edge_reptileinit_v108.toml`, fresh heads + head LR x5, with `experiment =
+action_policy_libero_edge_repa`, the `[model.repa]` block and `"repa_"` in `keys_to_skip_loading`); launchers
+`examples/launch_sft_action_policy_libero_10_edge_reptileinit_v115..v123.sh` (= the v108 launcher, ports 50702-50710):
+
+| recipe | teacher | teacher block | projector | feature cosine w | cosine-map L1 w |
+| --- | --- | --- | --- | --- | --- |
+| v115 | self_init | 28 | mlp | 5.0 | 0 |
+| v116 | self_init | 28 | mlp | 0 | 5.0 |
+| v117 | self_init | 28 | mlp | 5.0 | 5.0 |
+| v118 | self_init | 14 | mlp | 5.0 | 0 |
+| v119 | self_init | 14 | mlp | 0 | 5.0 |
+| v120 | self_init | 14 | mlp | 5.0 | 5.0 |
+| v121 | wan_vae | - | mlp | 5.0 | 0 |
+| v122 | wan_vae | - | mlp | 0 | 5.0 |
+| v123 | wan_vae | - | mlp | 5.0 | 5.0 |
+
+All nine recipes use the REPA MLP projector on the STUDENT side only (2048 -> 2048 for self_init, 2048 -> 192 for wan_vae; the teacher has no projector) and compute the relation maps on the projector output, like repa_dinov2_v29. Notes. (1) v118 starts near loss 0 up to the fresh projector (student == teacher): it is a drift regularizer; v115 (block 14 -> block 28 of the
+initial model) is a depth-transfer objective and starts above 0. (2) Memory: `self_init` keeps a second bf16 copy of the
+network (3.37 B params, sharded like the student) and runs one extra no-grad forward per step (up to block 28 for v115-v117,
+14 for v118-v120); the native frames are dropped from the batch. The relation maps are 640 x 640 per sample (4 x 8 x 20
+tokens at bs 128 per rank: 128 maps). (3) A resumed run would build the teacher from the resumed weights (warning in the log).
+(4) `teacher_input_size` / `teacher_num_frames` / `target_adapter` / `target_grid_thw` / `num_views` are ignored by the
+internal teachers. Tests: `repa/internal_teacher_test.py` (registry, identity projector, token targets through the network,
+capture-only forward, wan_vae/self_init targets, loss block with different widths, six end-to-end training steps on the tiny
+model), `toml_config/internal_teacher_toml_test.py`. Not GPU-smoked.

@@ -44,6 +44,9 @@ class LanguageRankingConfig:
     negative_grad_scale: float = 1.0
     # "absolute": E_neg >= E_pos + margin.  "relative": E_neg >= (1 + margin) * E_pos (margin * stop_gradient(E_pos)).
     margin_mode: str = "absolute"
+    # 0 = off. Otherwise only this fraction of the VALID pairs -- the easiest ones, i.e. the largest detached
+    # ``gap - margin_i`` -- receives the hinge, normalized by ``batch * fraction`` (cosmos_hs11 v24 self-paced ranking).
+    self_paced_fraction: float = 0.0
 
     def __post_init__(self):
         if not math.isfinite(self.margin) or self.margin < 0:
@@ -56,6 +59,8 @@ class LanguageRankingConfig:
             raise ValueError(f"language_ranking.margin_mode must be 'absolute' or 'relative', got {self.margin_mode!r}")
         if self.raw_action_dim is not None and self.raw_action_dim <= 0:
             raise ValueError(f"language_ranking.raw_action_dim must be positive or None, got {self.raw_action_dim}")
+        if not math.isfinite(self.self_paced_fraction) or not 0.0 <= self.self_paced_fraction <= 1.0:
+            raise ValueError(f"language_ranking.self_paced_fraction must be in [0, 1], got {self.self_paced_fraction}")
 
 
 @dataclasses.dataclass(frozen=True)

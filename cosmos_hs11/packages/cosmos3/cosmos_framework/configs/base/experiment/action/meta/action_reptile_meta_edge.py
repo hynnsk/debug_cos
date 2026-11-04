@@ -116,6 +116,7 @@ def _action_reptile_meta_edge_model_config() -> dict:
         layer_index=8,
         teacher="vjepa2_1_vit_base_384",
         teacher_checkpoint_path=None,
+        teacher_layer_index=None,  # internal teacher "self_init" (post-training only; not supported in the inner loop)
         teacher_input_size=256,
         teacher_num_frames=16,
         teacher_batch_size=32,

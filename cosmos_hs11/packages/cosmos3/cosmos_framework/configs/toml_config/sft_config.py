@@ -131,6 +131,15 @@ class EMAConfig(BaseModel):
             "'early-iter' decay strength."
         ),
     )
+    beta: Optional[float] = Field(
+        default=None,
+        gt=0.0,
+        lt=1.0,
+        description=(
+            "cosmos_hs11: fixed exponential decay, ema = beta * ema + (1 - beta) * w at every step "
+            "(openpi's ema_decay, e.g. 0.999). Omitted = the EDM2 power schedule driven by `rate`. VFM only."
+        ),
+    )
 
 
 class ParallelismConfig(BaseModel):
@@ -411,11 +420,18 @@ class RepaTomlConfig(BaseModel):
         default=None,
         description=(
             "'vjepa2_1_vit_base_384' (ViT-B/16, default) or 'vjepa2_1_vit_large_384' (ViT-L/16); or 'dinov2_vitb14' "
-            "(DINOv2 ViT-B/14 per frame; set teacher_input_size=224)."
+            "(DINOv2 ViT-B/14 per frame; set teacher_input_size=224); or the INTERNAL teachers (cosmos_hs11 v115+): "
+            "'self_init' (frozen copy of the initial network, block teacher_layer_index) or 'wan_vae' (clean VAE latent "
+            "patches of the predicted frames)."
         ),
     )
     teacher_checkpoint_path: Optional[str] = Field(
         default=None, description="Checkpoint file or dir; default $COSMOS_STORAGE/checkpoints/vjepa2_1/<release file>."
+    )
+    teacher_layer_index: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="teacher='self_init' only: 1-based MoT block of the frozen initial network whose output is the target.",
     )
     teacher_input_size: Optional[int] = Field(
         default=None, description="Square teacher input side (256 = native grid)."
@@ -438,7 +454,7 @@ class RepaTomlConfig(BaseModel):
         default=None,
         description="'trilinear' = keep the teacher at its full grid and upsample the student MoT grid to it (interpolation + depthwise conv, then the MLP; hs11 v12). Default 'none'.",
     )
-    projector_type: Optional[str] = Field(
+    projector_type: Optional[str] = Field(  # 'mlp' | 'linear' | 'identity' (cosmos_hs11 v115+: no projector)
         default=None,
         description="Student-side projector: 'mlp' (REPA 3-layer SiLU MLP, default) or 'linear' (one Linear).",
     )
@@ -687,6 +703,14 @@ class SchedulerConfig(BaseModel):
             "Linear warmup duration in optimizer steps. LR ramps from "
             "lr × f_start to lr × f_max linearly over this many iters "
             "before the cosine/linear decay begins."
+        ),
+    )
+    lr_scheduler_type: Optional[Literal["LambdaLinear", "LambdaCosine"]] = Field(
+        default=None,
+        description=(
+            "cosmos_hs11: decay shape after warmup. The experiments pick LambdaLinear (linear to lr × f_min); "
+            "'LambdaCosine' switches to a cosine decay toward lr × f_min (openpi's CosineDecaySchedule). "
+            "Omitted = the experiment default. VFM only."
         ),
     )
 

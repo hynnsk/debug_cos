@@ -1,0 +1,68 @@
+# openpi_hs11 -- REPTILE meta pre-training of pi05_base, variant v2: DIVERSE SUPPORT + DAMPED OUTER STEP.
+# Diagnosis of reptile_v1 (2026-10-21): the 10 inner steps re-visit the same 256 windows drawn from only 32 demos (8 windows of a
+# ~40-frame fractal/bridge episode overlap almost completely), so the inner loop memorises the support (-56 % support loss) while
+# the held-out query loss gets WORSE (-15..-21 % of zero-shot); 96 % of the meta movement cancels (random walk) and the first
+# 250 iterations with eps >= 0.4 produce most of the net displacement.
+# v2 keeps the v1 compute (10 steps x 256 support windows per meta-iteration) but
+#   * draws the 256 support windows from 128 distinct demonstrations (2 windows each) instead of 32 x 8,
+#   * halves the outer step (0.25 -> 0.05) so single-embodiment overfit points are averaged instead of chased,
+#   * measures what we care about: query demos from OTHER tasks of the embodiment, every iteration.
+# Success criterion before any LIBERO eval: query_loss_zero_shot - query_loss_adapted >= 0 (v1: -0.005) and decreasing q_zero.
+# Launch: sr 4 48 scripts/hs11/launch_reptile_pi05_v2.sh      (smoke: ... outer.max_iter=2 checkpoint.save_interval=1 wandb.enabled=false)
+# Checkpoints: checkpoints/pi05_reptile/reptile_v2/<meta-iter>/params  -> REPTILE_PARAMS=... or checkpoint.init_params=... of the *_reptile LIBERO TOMLs
+
+[job]
+name         = "pi05_reptile"
+exp_name     = "reptile_v6"
+project_name = "openpi_hs11"
+
+[wandb]
+enabled = true
+mode    = "offline"
+
+[model]
+action_horizon = 10            # = the downstream LIBERO recipe
+
+[checkpoint]
+init_params   = "gs://openpi-assets/checkpoints/pi05_base/params"   # cached under $OPENPI_DATA_HOME
+base_dir      = "./checkpoints"
+save_interval = 1000
+keep_period   = 1000
+
+[data]
+embodiments      = ["fractal", "bridge", "robomind_ur", "robomind_franka", "molmoact2_yam"]
+data_root        = ""          # "" = $ROBOT_FEWSHOT_ROOT
+assets_dir       = "./assets/pi05_reptile"   # <assets_dir>/<embodiment>/norm_stats.json
+num_workers      = 8
+prefetch_episodes = 3          # 160 episodes are decoded per meta-episode now (v1: 40); watch t_data_s in reptile_train_log.jsonl
+
+[sampler]
+k_shot                 = 512   # v1: 32.  256 support windows from 128 distinct demos
+windows_per_demo       = 2     # v1: 8.   2 windows per demo -> no near-duplicate windows from ~40-frame episodes
+q_query                = 32    # v1: 8.   64 query windows (diagnostics only; must be a multiple of inner.batch_size)
+query_windows_per_demo = 2
+disjoint_query_tasks   = true  # query demos come from tasks absent from the support set (skipped automatically for embodiments with < 4 tasks)
+min_tasks_for_disjoint = 4
+min_frames             = 1
+
+[inner]
+steps           = 10           # unchanged: the Reptile meta term scales with k(k-1)
+batch_size      = 64           # v1: 32.  256 / 64 = 4 micro-batches per inner step (same averaged gradient, better GPU utilisation)
+lr              = 5e-5         # = downstream post-training lr
+warmup_steps    = 2
+weight_decay    = 1e-10
+clip            = 1.0
+reset_optimizer = true
+
+[outer]
+meta_lr           = 0.25       # v1: 0.5.  eps 0.25 -> 0.05 (same end value as v1)
+meta_lr_min_ratio = 0.2
+max_iter          = 1000       # ~300 s / iter on 4 x 48 GB -> ~84 h (same budget as v1)
+eval_query_every  = 1          # v1: 5.  zero-shot / adapted query loss every iteration (2 extra forward passes)
+
+[infra]
+seed         = 42
+fsdp_devices = 0               # 0 = all GPUs of the allocation
+log_interval = 1
+overwrite    = false
+resume       = true            # an existing checkpoint dir continues from its latest step + wandb run id

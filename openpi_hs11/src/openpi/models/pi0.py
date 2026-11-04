@@ -268,7 +268,20 @@ class Pi0(_model.BaseModel):
         margins = ranking.margin * stop(e_pos) if ranking.margin_mode == "relative" else jnp.full_like(e_pos, ranking.margin)
         hinge = jax.nn.relu(margins - (e_neg_grad - e_pos))
         keep = jnp.ones_like(e_pos) if observation.ranking_valid is None else observation.ranking_valid.astype(jnp.float32)
-        sample_term = hinge * keep  # averaged over the ORIGINAL batch, invalid pairs contribute zero (as in Cosmos)
+        if ranking.self_paced_fraction > 0.0:
+            # Self-paced (cosmos_hs11 v24): rank only the easiest fraction of the VALID pairs (largest detached
+            # gap - margin_i); the loss is normalized by batch * fraction so a selected pair keeps its full-batch weight.
+            score = jnp.where(keep > 0, stop(gap - margins), -jnp.inf).reshape(-1)
+            n_valid_int = jnp.sum(keep).astype(jnp.int32)
+            n_select = jnp.minimum(
+                n_valid_int, jnp.maximum(1, jnp.ceil(ranking.self_paced_fraction * n_valid_int).astype(jnp.int32))
+            )
+            rank_of = jnp.argsort(jnp.argsort(-score))  # 0 = easiest pair
+            selected = (rank_of < n_select).astype(jnp.float32).reshape(keep.shape) * keep
+            sample_term = hinge * selected / ranking.self_paced_fraction  # mean over the batch == sum / (batch * fraction)
+        else:
+            selected = keep
+            sample_term = hinge * keep  # averaged over the ORIGINAL batch, invalid pairs contribute zero (as in Cosmos)
         chunked_loss = chunked_loss + ranking.loss_weight * sample_term[..., None]
 
         n_valid = jnp.maximum(jnp.sum(keep), 1.0)
@@ -280,6 +293,7 @@ class Pi0(_model.BaseModel):
             "language_ranking_gap": stop(jnp.sum(gap * keep) / n_valid),
             "language_ranking_margin_satisfied": stop(jnp.sum((gap >= margins).astype(jnp.float32) * keep) / n_valid),
             "language_ranking_valid_fraction": stop(jnp.mean(keep)),
+            "language_ranking_selected_fraction": stop(jnp.sum(selected) / n_valid),
         }
         return chunked_loss, metrics
 

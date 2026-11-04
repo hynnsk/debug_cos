@@ -1,0 +1,95 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+# v121 = v108 + block 14 features -> frozen Wan VAE latent patches of the predicted frames (MLP projector, cosine, w 5.0). [checkpoint] as in v108 (fresh action heads, Reptile theta).
+
+# cosmos_hs11 -- REPTILE INIT -> FULL fine-tune. LIBERO-10 few-shot post-training (3 demos/task = 30 episodes) with the
+# ORIGINAL Cosmos3 recipe (experiment action_policy_libero_edge), warm-started from a full-mode Reptile checkpoint:
+#   [checkpoint].load_path       = REPTILE_CKPT_PATH  (<reptile job>/checkpoints/iter_XXXXXXXXX -- the dir holding model/)
+#                                  -> moe_gen, time_embedder, vae2llm, llm2vae, k_norm_und_for_gen come from theta
+#   [checkpoint].meta_action_init_path = META_ACTION_INIT_PATH (<reptile job>/meta_action_init_iter_XXXXXX.pt)
+#                                  -> the meta action heads are copied from the scratch row into the LIBERO row (5)
+# Same trainable set, LR, schedule, batch and validation as the full-FT baseline (cosmos_hs08 / hs09); differences to the
+# fresh baseline: the init, and the action-head LR multiplier (5x fresh-head boost -> 1x, the heads are meta-initialized).
+# 4 GPUs (shard 4) x 64 windows = global batch 256, warmup 200, cycle 2000, 2000 iterations, held-out val every 200.
+# Env: LIBERO_ROOT, REPTILE_CKPT_PATH, META_ACTION_INIT_PATH, WAN_VAE_PATH, IMAGINAIRE_OUTPUT_ROOT. See docs/action_reptile_meta.md.
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_libero_edge_repa"   # REPA experiment: [model.repa] is only honoured here
+project      = "cosmos3_action_libero"
+group        = "edge_libero10_fewshot"
+name         = "edge_libero10_3ep_fullft_reptile_v121"
+wandb_mode   = "offline"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056
+lora_enabled = false            # full mode: theta lives in the DCP weights themselves, no adapters
+
+# ---- cosmos_hs11 v121: INTERNAL REPA teacher "wan_vae" = clean Wan2.2 VAE latent patches (vae2llm input, 48 x 2 x 2 = 192-d) of the predicted frames.
+# Student = gen-tower residual stream after MoT block 14, predicted frames (latent frames 1..4 = raw frames 2..17) only.
+# loss_weight = per-token feature cosine (1 - cos), relation_loss_weight = L1 (mean) between the token x token cosine-similarity
+# maps of a sample's 16 predicted frames, computed on the projector OUTPUT (VideoREPA TRD, margin 0.1). projector_type = REPA MLP on the STUDENT only (2048 -> 192, the VAE patch width); the teacher has no projector.
+# Only honoured by experiment action_policy_libero_edge_repa (keys_to_skip_loading below also skips repa_).
+[model.repa]
+enabled              = true
+teacher              = "wan_vae"
+layer_index          = 14                 # student: output of MoT block 14 (of 28)
+objective            = "token"
+projector_type       = "mlp"
+loss_weight          = 5.0
+relation_loss_weight = 0.0
+relation_distance    = "l1"
+relation_margin      = 0.1                # VideoREPA soft margin (as in repa_dinov2_v29): |R_s - R_t| <= 0.1 is not penalized
+
+[model.ema]
+enabled         = true
+rate            = 0.1
+iteration_shift = 0
+
+[model.parallelism]
+data_parallel_shard_degree     = 2      # 4-GPU run: NPROC_PER_NODE=4 sr 4 48 ...
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr = 5.0e-05          # full-FT LR of the recipe
+
+[optimizer.lr_multipliers]
+action2llm            = 5.0   # 5x in the fresh-head baseline; heads are meta-initialized here -> 1x
+llm2action            = 5.0
+action_modality_embed = 5.0
+
+[scheduler]
+cycle_lengths = [2000]        # linear decay to 0 at max_iter (matches the cosmos_hs08 baseline)
+warm_up_steps = [200]
+
+[trainer]
+max_iter        = 2000
+logging_iter    = 20
+grad_accum_iter = 1              # global 256 = 64 windows/rank x 4 ranks (2-GPU alternative: shard 2, bs 64, accum 2)
+# held-out validation
+run_validation          = true
+run_validation_on_start = true   # iteration 0 = the Reptile-initialized model before any update
+validation_iter         = 200
+max_val_iter            = 16     # x 64 windows x 4 ranks = 4096 windows ~= half of the 50-episode val set (same windows every time)
+
+[dataloader_train]
+max_samples_per_batch = 128       # per rank; x 4 ranks = global batch 256
+episode_subset_path   = "libero_10_3ep_per_task_seed42.json"          # 3 demos/task x 10 tasks = 30 episodes
+
+[dataloader_val]
+max_samples_per_batch = 16
+episode_subset_path   = "libero_10_val_5ep_per_task_seed42_excl3ep.json"  # 5 held-out demos/task, disjoint from train
+
+[checkpoint]
+load_path = "${oc.env:REPTILE_CKPT_PATH}"   # <reptile job>/checkpoints/iter_XXXXXXXXX (NOT the base Cosmos3-Edge dir)
+save_iter = 2000
+# The Reptile DCP has no EMA; the action heads are skipped (fresh) and then overwritten by the meta heads below.
+keys_to_skip_loading = ["net_ema.", "repa_", "action2llm", "llm2action", "action_modality_embed"]   # + repa_head (absent from the Reptile DCP); heads stay fresh

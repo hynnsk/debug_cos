@@ -227,9 +227,18 @@ class RepaConfig:
     # Teacher backbone: "vjepa2_1_vit_base_384" (ViT-B/16, D=768, default) or "vjepa2_1_vit_large_384" (ViT-L/16, 1024);
     # or a DINOv2 image encoder "dinov2_vitb14" (D=768; also vits14 / vitl14) applied per frame -- then set
     # teacher_input_size to a multiple of 14 (224 -> the same 16x16 grid) and teacher_checkpoint_path may name an HF repo/dir.
+    # cosmos_hs11 v115+: INTERNAL teachers (no encoder). "self_init" = the gen-tower residual stream after MoT block
+    # ``teacher_layer_index`` of a FROZEN copy of the network as loaded at start (self-distillation: block layer_index of
+    # the student imitates block teacher_layer_index of its own initial weights); "wan_vae" = the clean Wan VAE latent
+    # patches (vae2llm input, C * p * p per token) of the predicted frames. Targets are built in MoT token order
+    # (RepaTokenTargets), so teacher_input_size / teacher_num_frames / target_adapter / the teacher grid are unused;
+    # projector_type="identity" compares h_k itself (self_init, or any relation-map-only arm).
     teacher: str = "vjepa2_1_vit_base_384"
     # Explicit checkpoint file/dir. None = $COSMOS_STORAGE/checkpoints/vjepa2_1/<release file> (download if absent).
     teacher_checkpoint_path: str | None = None
+    # teacher="self_init" only: 1-based MoT block whose output the frozen initial network provides as the target
+    # (e.g. 28 = the last block, 14 = the same depth as layer_index). None for every other teacher.
+    teacher_layer_index: int | None = None
     # Square input side for the teacher. 256 = the V-JEPA 2.1 pretraining RoPE grid (16x16 patches) and LIBERO's
     # native camera resolution; other sizes are resized bilinearly and handled by RoPE interpolation.
     teacher_input_size: int = 256
@@ -267,7 +276,7 @@ class RepaConfig:
     student_upsampler: str = attrs.field(default="none", validator=attrs.validators.in_({"none", "trilinear"}))
     # Student-side projector: "mlp" = REPA's Linear-SiLU-Linear-SiLU-Linear (default), "linear" = one
     # Linear(hidden_size, D_t) so h_k itself has to become an affine image of the teacher features (v4 recipe).
-    projector_type: str = attrs.field(default="mlp", validator=attrs.validators.in_({"mlp", "linear"}))
+    projector_type: str = attrs.field(default="mlp", validator=attrs.validators.in_({"mlp", "linear", "identity"}))
     # REPA projector: 3-layer SiLU MLP hidden width (ignored for projector_type="linear").
     projector_hidden_dim: int = 2048
     # Camera views concatenated along the width of the canvas; each is encoded by the teacher separately.

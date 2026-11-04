@@ -249,7 +249,7 @@ Same objective as Cosmos' `algorithm/loss/language_ranking.py`: every training s
 per-sample hinge `relu(margin + E_pos - E_neg)` (E = fp32 MSE over the chunk and the real action dims) is averaged over the
 batch and added as `loss_weight * hinge` to the flow-matching loss. Samples whose prompt was replaced by `PromptDropout`
 are flagged invalid and contribute zero. Pieces: `pi0_config.LanguageRankingConfig` (knobs: `enabled`, `loss_weight`,
-`margin`, `raw_action_dim`, `negative_grad_scale`, `margin_mode`), `libero_v3.NegativePrompt` (repack side, after the
+`margin`, `raw_action_dim`, `negative_grad_scale`, `margin_mode`, `self_paced_fraction`), `libero_v3.NegativePrompt` (repack side, after the
 dropout; negatives come from `meta/tasks.parquet` of the whole suite), `transforms.TokenizeNegativePrompt` (model side,
 no-op without a negative), `Observation.tokenized_negative_prompt(_mask)` / `ranking_valid`, and
 `Pi0.compute_loss_and_metrics` (used by `train.py`, logs `language_ranking_{loss,weighted_loss,positive_error,
@@ -261,6 +261,8 @@ enabled        = true
 loss_weight    = 0.022   # Cosmos: 1.0 next to a 10x action loss over the REAL dims -> 1:10 per element.
 margin         = 0.1     # openpi's action loss averages over all 32 padded slots, so 0.1 * 7/32 = 0.022 is equivalent.
 raw_action_dim = 7       # 0/omitted = infer the real dims from the batch (padding is exactly zero)
+# Cosmos v24-style variants (all off by default): margin_mode = "relative" (E_neg >= (1 + margin) * E_pos, unit-free margin,
+# e.g. 0.2 as in Cosmos v97 -> libero10_3ep_reptile_v2.4.toml), negative_grad_scale (0 = positive-only), self_paced_fraction.
 ```
 
 Tests: `src/openpi/hs11/language_ranking_test.py` (closed-form hinge on the dummy pi05, transforms, TOML knob);

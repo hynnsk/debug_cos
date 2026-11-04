@@ -61,6 +61,52 @@ class RepaTeacherTokens:
         return self._tokens is None
 
 
+class RepaTokenTargets:
+    """cosmos_hs11 v115+: REPA targets that are ALREADY in the MoT token order (one row per predicted-frame vision token,
+    sample-major, same rows as :meth:`RepaAlignmentHead.project`), with the per-sample row counts. Built by the
+    internal teachers (``self_init`` / ``wan_vae``) in ``OmniMoTModel``; ``Cosmos3VFMNetwork._compute_repa_targets``
+    passes them through untouched (no teacher grid, no target adapter)."""
+
+    def __init__(self, target: torch.Tensor, counts: Sequence[int]) -> None:
+        if target.ndim != 2:
+            raise ValueError(f"RepaTokenTargets.target must be [N, D], got {tuple(target.shape)}")
+        counts = [int(c) for c in counts]
+        if sum(counts) != int(target.shape[0]):
+            raise ValueError(f"RepaTokenTargets counts sum to {sum(counts)} but target has {target.shape[0]} rows")
+        self.target = target
+        self.counts = counts
+
+
+def select_noisy_vision_rows(
+    vision_hidden: torch.Tensor,
+    token_shapes: Sequence[Sequence[int]],
+    noisy_frame_indexes: Sequence[torch.Tensor],
+) -> tuple[torch.Tensor, list[int]] | None:
+    """The predicted-frame rows of a per-vision-token tensor ``[N_vision, D]`` (packing order), as
+    :meth:`RepaAlignmentHead.project` selects them (sample-major, then the noisy latent frames in index order, then h, w),
+    plus the per-sample row counts (0 for a sample without predicted frames). ``None`` when no sample has one.
+    Latent frame 0 (the clean conditioning frame) is rejected like the head does."""
+    grids = split_flat_tokens(vision_hidden, token_shapes)  # list of [T,H,W,D]
+    nfi_list = [nfi.to(device=vision_hidden.device, dtype=torch.long) for nfi in noisy_frame_indexes]
+    if len(grids) != len(nfi_list):
+        raise ValueError(f"{len(grids)} vision samples but {len(nfi_list)} noisy-frame index sets")
+    non_empty = [nfi for nfi in nfi_list if nfi.numel() > 0]
+    if non_empty and bool((torch.cat(non_empty) < 1).any()):
+        raise ValueError("REPA aligns the predicted (noisy) latent frames only; latent frame 0 has no teacher target")
+    rows: list[torch.Tensor] = []
+    counts: list[int] = []
+    for grid, nfi in zip(grids, nfi_list):
+        if nfi.numel() == 0:
+            counts.append(0)
+            continue
+        sel = grid.index_select(0, nfi).reshape(-1, grid.shape[-1])
+        rows.append(sel)
+        counts.append(int(sel.shape[0]))
+    if not rows:
+        return None
+    return torch.cat(rows, dim=0), counts
+
+
 class RepaAlignmentHead(nn.Module):
     def __init__(
         self,
@@ -273,8 +319,8 @@ class RepaAlignmentHead(nn.Module):
         ]
         if not preds:
             return None
-        out = self.projector(torch.cat(preds, dim=0))  # [N, S*D_t]
-        return out.reshape(-1, self.teacher_embed_dim)  # [N*S, D_t] (sub-cell-minor, same row order as the targets)
+        out = self.projector(torch.cat(preds, dim=0))  # [N, S*D_t] (identity projector: [N, hidden_size])
+        return out.reshape(-1, out.shape[-1] // self.num_subcells)  # [N*S, D] (sub-cell-minor, target row order)
 
     def _student_rows_full_grid(self, sel: torch.Tensor) -> torch.Tensor:
         """``sel``: the selected latent frames of one sample, ``[F, H, W_canvas, D]`` -> upsampled per view to the teacher

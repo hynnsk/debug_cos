@@ -12,7 +12,7 @@ pipeline) and re-states the run settings explicitly::
                  checkpoint dir continues from its latest step and wandb run id), assets_base_dir
     [optimizer]  peak_lr, warmup_steps, decay_steps, decay_lr, weight_decay, clip_gradient_norm, b1, b2
     [model]      action_horizon; sub-table [model.language_ranking] enabled, loss_weight, margin, raw_action_dim,
-                 negative_grad_scale, margin_mode (cosmos_hs11 action-language hinge ranking; pi0_config.LanguageRankingConfig)
+                 negative_grad_scale, margin_mode, self_paced_fraction (cosmos_hs11 action-language hinge ranking; pi0_config.LanguageRankingConfig)
 
 A Reptile TOML maps 1:1 onto ``scripts/train_reptile.py::ReptileConfig`` (sections job / wandb / model / checkpoint /
 data / sampler / inner / outer / infra). Unknown sections or keys are errors, so typos cannot silently fall back to
@@ -74,7 +74,7 @@ def _section(raw: Mapping[str, Any], name: str, allowed: Iterable[str], *, requi
     return sec
 
 
-_LANGUAGE_RANKING_KEYS = ("enabled", "loss_weight", "margin", "raw_action_dim", "negative_grad_scale", "margin_mode")
+_LANGUAGE_RANKING_KEYS = ("enabled", "loss_weight", "margin", "raw_action_dim", "negative_grad_scale", "margin_mode", "self_paced_fraction")
 
 
 def _language_ranking_config(base, model_section: Mapping[str, Any]):
@@ -84,7 +84,7 @@ def _language_ranking_config(base, model_section: Mapping[str, Any]):
     for key, value in sec.items():
         if key == "enabled":
             kw[key] = bool(value)
-        elif key in ("loss_weight", "margin", "negative_grad_scale"):
+        elif key in ("loss_weight", "margin", "negative_grad_scale", "self_paced_fraction"):
             kw[key] = float(value)
         elif key == "raw_action_dim":
             kw[key] = None if value is None or int(value) <= 0 else int(value)  # 0 = infer from the batch

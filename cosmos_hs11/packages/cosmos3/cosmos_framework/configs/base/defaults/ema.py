@@ -14,6 +14,9 @@ class EMAConfig:
     enabled: bool = True
     rate: float = 0.1
     iteration_shift: int = 0
+    # cosmos_hs11: fixed exponential decay ``ema = beta * ema + (1 - beta) * w`` (openpi's ``ema_decay``). None keeps the
+    # EDM2 power schedule driven by ``rate``.
+    beta: float | None = None
 
 
 PowerEMAConfig: EMAConfig = EMAConfig(

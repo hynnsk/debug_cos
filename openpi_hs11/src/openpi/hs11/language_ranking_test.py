@@ -1,5 +1,6 @@
 """cosmos_hs11 language ranking ported to openpi: config, data transforms, TOML knob and the paired hinge in pi0 (CPU, dummy pi05)."""
 
+import dataclasses
 import os
 import pathlib
 import random
@@ -176,6 +177,33 @@ def test_config_validation():
         pi0_config.LanguageRankingConfig(margin_mode="hinge")
     with pytest.raises(ValueError, match="raw_action_dim"):
         pi0_config.LanguageRankingConfig(raw_action_dim=0)
+    with pytest.raises(ValueError, match="self_paced_fraction"):
+        pi0_config.LanguageRankingConfig(self_paced_fraction=1.5)
+
+
+def test_self_paced_fraction_ranks_only_the_easiest_valid_pairs(batch):
+    obs, actions = batch
+    rng = jax.random.key(7)
+    base = pi0_config.LanguageRankingConfig(enabled=True, loss_weight=1.0, margin=0.1, raw_action_dim=RAW_DIM)
+    as_kw = lambda c: {f.name: getattr(c, f.name) for f in c.__dataclass_fields__.values()}
+    full, _ = _model_for(_config(**as_kw(base))).compute_loss_and_metrics(rng, obs, actions)
+    # fraction 1.0 selects every valid pair and normalizes by batch * 1 == the plain hinge
+    one, m1 = _model_for(_config(**as_kw(dataclasses.replace(base, self_paced_fraction=1.0)))).compute_loss_and_metrics(rng, obs, actions)
+    np.testing.assert_allclose(np.asarray(one), np.asarray(full), rtol=1e-6)
+    assert float(m1["language_ranking_selected_fraction"]) == pytest.approx(1.0)
+    # fraction 0.5 with 2 valid pairs -> n_select = min(2, max(1, ceil(1))) = 1: only the easiest (largest gap - margin)
+    half_cfg = dataclasses.replace(base, self_paced_fraction=0.5)
+    model = _model_for(_config(**as_kw(half_cfg)))
+    half, m_half = model.compute_loss_and_metrics(rng, obs, actions)
+    plain, e_pos, e_neg, hinge = _closed_form(model, obs, actions, rng, half_cfg)
+    score = np.asarray(e_neg - e_pos) - half_cfg.margin
+    score[2] = -np.inf  # invalid pair
+    easiest = int(np.argmax(score))
+    expected_term = np.zeros(BATCH)
+    expected_term[easiest] = float(np.asarray(hinge)[easiest]) / 0.5  # sum / (batch * fraction) once averaged over the batch
+    np.testing.assert_allclose(np.asarray(half), np.asarray(plain) + expected_term[:, None], rtol=1e-5, atol=1e-6)
+    assert float(m_half["language_ranking_selected_fraction"]) == pytest.approx(0.5)
+    np.testing.assert_allclose(float(m_half["language_ranking_loss"]), expected_term.mean(), rtol=1e-5)
 
 
 def test_negative_prompt_and_tokenizer_transforms():
@@ -211,9 +239,11 @@ def test_negative_prompt_and_tokenizer_transforms():
 def test_toml_knob_wires_the_negative_stream(tmp_path):
     (tmp_path / "params").mkdir()
     overrides = [f"checkpoint.init_params={tmp_path / 'params'}"]
-    cfg = toml_config.load_train_config(TOML_DIR / "libero10_3ep_reptile_v2.1.toml", overrides)
+    # v2.4 = the Cosmos v97-style relative hinge; the Cosmos block (incl. self_paced_fraction) is accepted verbatim
+    cfg = toml_config.load_train_config(TOML_DIR / "libero10_3ep_reptile_v2.4.toml", overrides)
     lr = cfg.model.language_ranking
-    assert lr.enabled and lr.loss_weight == 0.022 and lr.margin == 0.1 and lr.raw_action_dim == RAW_DIM
+    assert lr.enabled and lr.loss_weight == 0.02 and lr.margin == 0.2 and lr.raw_action_dim == RAW_DIM
+    assert lr.margin_mode == "relative" and lr.negative_grad_scale == 1.0 and lr.self_paced_fraction == 0.0
     dc = cfg.data.create(cfg.assets_dirs, cfg.model)
     assert [type(t).__name__ for t in dc.repack_transforms.inputs] == ["RepackTransform", "NegativePrompt"]
     assert len(dc.repack_transforms.inputs[1].instructions) == 10
@@ -222,10 +252,12 @@ def test_toml_knob_wires_the_negative_stream(tmp_path):
     base = toml_config.load_train_config(TOML_DIR / "goal_3ep_base_v1.toml")
     assert not base.model.language_ranking.enabled
     assert "NegativePrompt" not in [type(t).__name__ for t in base.data.create(base.assets_dirs, base.model).repack_transforms.inputs]
-    off = toml_config.load_train_config(TOML_DIR / "libero10_3ep_reptile_v2.1.toml", [*overrides, "model.language_ranking.enabled=false"])
-    assert not off.model.language_ranking.enabled and off.model.language_ranking.loss_weight == 0.022
+    off = toml_config.load_train_config(TOML_DIR / "libero10_3ep_reptile_v2.4.toml", [*overrides, "model.language_ranking.enabled=false"])
+    assert not off.model.language_ranking.enabled and off.model.language_ranking.margin_mode == "relative"
     with pytest.raises(ValueError, match="language_ranking"):
-        toml_config.load_train_config(TOML_DIR / "libero10_3ep_reptile_v2.1.toml", [*overrides, "model.language_ranking.foo=1"])
+        toml_config.load_train_config(TOML_DIR / "libero10_3ep_reptile_v2.4.toml", [*overrides, "model.language_ranking.foo=1"])
+    with pytest.raises(ValueError, match="margin_mode"):
+        toml_config.load_train_config(TOML_DIR / "libero10_3ep_reptile_v2.4.toml", [*overrides, "model.language_ranking.margin_mode=hinge"])
     reptile = (TOML_DIR / "reptile_pi05_v1.toml").read_text() + "\n[model.language_ranking]\nenabled = true\n"
     (tmp_path / "r.toml").write_text(reptile)
     with pytest.raises(ValueError, match="language_ranking"):

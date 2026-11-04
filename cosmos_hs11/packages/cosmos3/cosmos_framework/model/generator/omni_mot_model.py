@@ -64,6 +64,7 @@ from cosmos_framework.model.generator.mot.inference_text_kv_memory import (
 from cosmos_framework.model.generator.mot.modeling_utils import has_noisy_tokens
 from cosmos_framework.model.generator.mot.parallelize_vfm_network import parallelize_vfm_network
 from cosmos_framework.model.generator.reasoner.qwen3_vl.utils import tokenize_caption
+from cosmos_framework.configs.base.defaults.activation_checkpointing import ActivationCheckpointingConfig
 from cosmos_framework.model.generator.repa.adapters import (
     centered_cosine_similarity,
     repa_centered_cosine_loss,
@@ -74,7 +75,7 @@ from cosmos_framework.model.generator.repa.adapters import (
     repa_temporal_difference_cosine_loss,
     select_repa_samples,
 )
-from cosmos_framework.model.generator.repa.alignment import RepaTeacherTokens
+from cosmos_framework.model.generator.repa.alignment import RepaTeacherTokens, RepaTokenTargets, select_noisy_vision_rows
 from cosmos_framework.model.generator.repa.masked_prediction import (
     auxiliary_weight,
     masked_prediction_loss,
@@ -82,7 +83,12 @@ from cosmos_framework.model.generator.repa.masked_prediction import (
     validate_masked_prediction_config,
 )
 from cosmos_framework.model.generator.repa.sigreg import sigreg_loss
-from cosmos_framework.model.generator.repa.teachers import build_repa_teacher, resolve_repa_teacher_spec
+from cosmos_framework.model.generator.repa.teachers import (
+    InternalRepaTeacher,
+    build_repa_teacher,
+    is_internal_repa_teacher,
+    resolve_repa_teacher_spec,
+)
 from cosmos_framework.model.generator.repa.view_layouts import (
     compose_view_grids,
     crop_and_resize_views,
@@ -365,8 +371,12 @@ class OmniMoTModel(ImaginaireModel):
         *,
         mp_policy: MixedPrecisionPolicy | None = None,
         lora_enabled: bool | None = None,
+        ac_config: ActivationCheckpointingConfig | None = None,
+        repa_enabled: bool | None = None,
     ) -> torch.nn.Module:
         """Build the VFM network, parallelize it, and materialize it on device.
+        ``ac_config`` / ``repa_enabled`` (cosmos_hs11 v115+): overrides for the frozen ``self_init`` REPA teacher copy
+        (no activation checkpointing, no REPA head); ``None`` = the model config (every existing path).
 
         Args:
             dtype: dtype the network's parameters and buffers are *stored* in -- what the
@@ -443,7 +453,7 @@ class OmniMoTModel(ImaginaireModel):
                 sound_dim=self.config.sound_dim,
                 sound_latent_fps=self.config.sound_latent_fps,
                 enable_input_bias=self.config.enable_input_bias,
-                **self._repa_network_config_kwargs(),
+                **(self._repa_network_config_kwargs() if repa_enabled is not False else {}),
                 **self._sigreg_network_config_kwargs(),
             )
             network_config._attn_implementation_internal = "eager"
@@ -491,7 +501,7 @@ class OmniMoTModel(ImaginaireModel):
             net,
             parallel_dims=self.parallel_dims,
             compile_config=self.config.compile,
-            ac_config=self.config.activation_checkpointing,
+            ac_config=self.config.activation_checkpointing if ac_config is None else ac_config,
             attention_io_layout=getattr(self.config, "attention_io_layout", "sequence_sharded"),
             mp_policy=mp_policy,
         )
@@ -519,8 +529,33 @@ class OmniMoTModel(ImaginaireModel):
         """cosmos_hs12: REPA head used as a masked V-JEPA feature predictor on an auxiliary pixel-masked branch."""
         return self.repa_enabled and self.config.repa.objective == "masked_prediction"
 
+    @property
+    def repa_internal_teacher(self) -> str | None:
+        """``"self_init"`` / ``"wan_vae"`` when the REPA teacher is one of the INTERNAL teachers (cosmos_hs11 v115+:
+        the frozen initial network / the clean VAE latents, targets built in MoT token order), else ``None``."""
+        repa_cfg = getattr(self.config, "repa", None)
+        if repa_cfg is None or not repa_cfg.enabled:
+            return None
+        name = str(repa_cfg.teacher).strip().lower()
+        return name if is_internal_repa_teacher(name) else None
+
+    def _repa_teacher_embed_dim(self) -> int:
+        """Target feature dim: the external encoder's, ``0`` (= the MoT hidden size, resolved by the network) for
+        ``self_init``, ``C * p * p`` (the vae2llm input width) for ``wan_vae``."""
+        repa_cfg = self.config.repa
+        kind = self.repa_internal_teacher
+        if kind == "self_init":
+            return 0
+        if kind == "wan_vae":
+            p = int(self.config.diffusion_expert_config.patch_spatial)
+            return int(self.config.state_ch) * p * p
+        return int(resolve_repa_teacher_spec(repa_cfg.teacher).embed_dim)
+
     def _repa_teacher_grid_thw(self) -> tuple[int, int, int]:
         repa_cfg = self.config.repa
+        if self.repa_internal_teacher is not None:
+            # internal teachers never go through the grid adapter: declare the MoT grid itself (identity pooling)
+            return tuple(int(v) for v in repa_cfg.target_grid_thw)
         spec = resolve_repa_teacher_spec(repa_cfg.teacher)
         patch, tubelet = (
             spec.patch_size,
@@ -546,7 +581,7 @@ class OmniMoTModel(ImaginaireModel):
         return dict(
             repa_enabled=True,
             repa_layer_index=int(repa_cfg.layer_index),
-            repa_teacher_embed_dim=resolve_repa_teacher_spec(repa_cfg.teacher).embed_dim,
+            repa_teacher_embed_dim=self._repa_teacher_embed_dim(),
             repa_projector_hidden_dim=int(repa_cfg.projector_hidden_dim),
             repa_projector_type=str(repa_cfg.projector_type),
             repa_target_adapter=repa_cfg.target_adapter,
@@ -591,6 +626,9 @@ class OmniMoTModel(ImaginaireModel):
                 "REPA needs the raw frames of the batch on every rank, but context parallelism broadcasts a "
                 "tokenized payload without them; run REPA with context_parallel_shard_degree=1."
             )
+        if self.repa_internal_teacher is not None:
+            self._set_up_internal_repa_teacher(self.repa_internal_teacher)
+            return
         teacher = build_repa_teacher(
             repa_cfg.teacher,
             checkpoint_path=repa_cfg.teacher_checkpoint_path,
@@ -611,6 +649,126 @@ class OmniMoTModel(ImaginaireModel):
             f"target_adapter={repa_cfg.target_adapter}, loss_weight={repa_cfg.loss_weight}, "
             f"relation_loss_weight={repa_cfg.relation_loss_weight} ({repa_cfg.relation_distance})"
         )
+
+    # ------------------- cosmos_hs11 v115+: internal REPA teachers (self-distillation / VAE patches) -------------------
+    def _set_up_internal_repa_teacher(self, kind: str) -> None:
+        """``teacher="self_init"`` / ``"wan_vae"``: no encoder to build. Validate the knobs and install a stand-in
+        handle so the REPA bookkeeping (``repa_teacher is not None``) and the logs keep working."""
+        repa_cfg = self.config.repa
+        if self.masked_prediction_enabled or str(repa_cfg.objective) != "token":
+            raise NotImplementedError(
+                f"internal REPA teacher {kind!r} supports objective='token' (+ relation_loss_weight) only, got "
+                f"{repa_cfg.objective!r}"
+            )
+        if str(getattr(repa_cfg, "student_upsampler", "none")) != "none" or tuple(repa_cfg.target_subgrid_thw) != (1, 1, 1):
+            raise NotImplementedError("internal REPA teachers compare the MoT tokens themselves (no upsampler / sub-grid)")
+        layer = getattr(repa_cfg, "teacher_layer_index", None)
+        if kind == "self_init":
+            if layer is None or int(layer) < 1:
+                raise ValueError(
+                    "repa.teacher='self_init' needs repa.teacher_layer_index: the 1-based MoT block of the frozen "
+                    "initial network whose output is the target (e.g. 28 = last block, 14 = same depth as layer_index)"
+                )
+        elif layer is not None:
+            raise ValueError("repa.teacher_layer_index is only meaningful for repa.teacher='self_init'")
+        embed_dim = self._repa_teacher_embed_dim() or int(getattr(self.net, "hidden_size", 0))
+        handle = InternalRepaTeacher(kind, embed_dim, self._repa_teacher_grid_thw(), None if layer is None else int(layer))
+        object.__setattr__(self, "repa_teacher", handle)
+        what = (
+            f"frozen copy of the network as loaded (built lazily at the first step), MoT block {layer} residual stream"
+            if kind == "self_init"
+            else "clean Wan VAE latent patches of the predicted frames (vae2llm input)"
+        )
+        log.info(
+            f"REPA enabled with INTERNAL teacher {kind!r}: target = {what} (D={embed_dim}), student = MoT block "
+            f"{repa_cfg.layer_index}, projector={repa_cfg.projector_type}, loss_weight={repa_cfg.loss_weight}, "
+            f"relation_loss_weight={repa_cfg.relation_loss_weight} ({repa_cfg.relation_distance}, margin "
+            f"{getattr(repa_cfg, 'relation_margin', 0.0)}); native frames are not used"
+        )
+
+    @torch.no_grad()
+    def _copy_parameters_into(self, target: torch.nn.Module) -> int:
+        """Copy every parameter and buffer of ``self.net`` into ``target`` (same architecture and sharding; rank-local
+        shards). Returns the number of tensors copied."""
+
+        def _local(t: torch.Tensor) -> torch.Tensor:
+            try:
+                from torch.distributed.tensor import DTensor
+
+                if isinstance(t, DTensor):
+                    return t.to_local()
+            except Exception:  # noqa: BLE001
+                pass
+            return t
+
+        src_params = dict(self.net.named_parameters())
+        src_buffers = dict(self.net.named_buffers())
+        copied = 0
+        for name, param in target.named_parameters():
+            if name not in src_params:
+                raise KeyError(f"self_init teacher parameter {name!r} has no counterpart in the loaded network")
+            _local(param.data).copy_(_local(src_params[name].data))
+            copied += 1
+        for name, buf in target.named_buffers():
+            if name in src_buffers:
+                _local(buf).copy_(_local(src_buffers[name]))
+                copied += 1
+        return copied
+
+    def _get_self_init_teacher_net(self, iteration: int) -> torch.nn.Module:
+        """The frozen copy of the network AS LOADED (built once, at first use, from the current weights). Kept out of
+        the module registry (``object.__setattr__``): not trained, not checkpointed, not in ``parameters()``."""
+        net = getattr(self, "_self_init_teacher_net", None)
+        if net is not None:
+            return net
+        if int(iteration) > 0:
+            log.warning(
+                f"REPA self_init teacher is being built at iteration {iteration} (resumed run): the frozen copy is taken "
+                "from the CURRENT weights, not from the initial ones"
+            )
+        dtype = self.precision if self.precision in (torch.bfloat16, torch.float16) else torch.float32
+        with misc.timer("REPA self_init teacher: build + copy a frozen copy of the network"):
+            net = self.build_net(
+                dtype=dtype, mp_policy=None, ac_config=ActivationCheckpointingConfig(mode="none"), repa_enabled=False
+            )
+            copied = self._copy_parameters_into(net)
+            net.requires_grad_(False)
+            net.eval()
+        object.__setattr__(self, "_self_init_teacher_net", net)
+        log.info(
+            f"REPA self_init teacher ready: {copied} tensors copied from the loaded network into a frozen {dtype} copy; "
+            f"its MoT block {self.config.repa.teacher_layer_index} output is the target"
+        )
+        return net
+
+    def _internal_repa_targets(
+        self, packed_sequence: PackedSequence, clean_vision_tokens: list[torch.Tensor] | None, iteration: int
+    ) -> RepaTokenTargets | None:
+        """Targets of the internal teachers in MoT token order (predicted-frame vision tokens only, sample-major):
+        ``self_init`` runs the frozen initial network on the SAME noised packed sequence up to block
+        ``teacher_layer_index``; ``wan_vae`` patchifies the CLEAN latents exactly like ``_encode_vision`` does."""
+        kind = self.repa_internal_teacher
+        vision = packed_sequence.vision
+        if kind is None or vision is None or vision.tokens is None:
+            return None
+        with torch.no_grad():
+            if kind == "self_init":
+                teacher = self._get_self_init_teacher_net(iteration)
+                out = teacher(packed_seq=packed_sequence, capture_only_layer=int(self.config.repa.teacher_layer_index))
+                rows = out["captured_hidden"][vision.sequence_indexes]  # [N_vision, hidden_size]
+            else:
+                if clean_vision_tokens is None:
+                    raise RuntimeError("wan_vae REPA teacher needs the clean latents captured before the noise replacement")
+                device = vision.sequence_indexes.device
+                clean = [t.to(device) for t in clean_vision_tokens]
+                rows, _ = self.net.patchify_and_pack_latents(
+                    clean, vision.token_shapes, latent_channel=self.net.latent_channel
+                )  # [N_vision, C*p*p] in the vae2llm input order
+            selected = select_noisy_vision_rows(rows.float(), vision.token_shapes, vision.noisy_frame_indexes)
+        if selected is None:
+            return None
+        target, counts = selected
+        return RepaTokenTargets(target.detach(), counts)
 
     def _resolve_repa_teacher_tokens(
         self,
@@ -657,6 +815,7 @@ class OmniMoTModel(ImaginaireModel):
 
         Returns a ``[B,V,T_t,H_p,W_p,D_t]`` tensor in batch (= packing) order.
 
+        cosmos_hs11 v115+: the internal teachers (``self_init`` / ``wan_vae``) never run this path.
         cosmos_hs11 v11 -- ``repa.view_layouts``: a sample whose ``data_batch["dataset_name"]`` has a layout (e.g.
         MolmoAct2-YAM ``primary_over_two``) is cropped into its views by that layout instead of the width split; every
         view is encoded at the teacher input size and the per-view grids are re-assembled into ONE canvas-shaped grid
@@ -664,6 +823,11 @@ class OmniMoTModel(ImaginaireModel):
         ones, the result is then a LIST of per-sample ``[V_i,T_t,H_i,W_i,D_t]`` tensors (``compute_targets`` accepts
         both forms). Without any layout sample the tensor form above is returned, bit-identical to before.
         """
+        if getattr(self, "repa_internal_teacher", None) is not None:
+            raise NotImplementedError(
+                f"REPA teacher {self.config.repa.teacher!r} is internal; it is supported in post-training "
+                "(training_step) only, not in the precomputed-token path of the Reptile inner loop"
+            )
         repa_cfg = self.config.repa
         native = data_batch.get(repa_cfg.native_video_key)
         if native is None:
@@ -877,7 +1041,7 @@ class OmniMoTModel(ImaginaireModel):
                     )
                 where = (
                     f"REPA projector output of the predicted video tokens (MoT block {self.config.repa.layer_index}, "
-                    f"D={resolve_repa_teacher_spec(self.config.repa.teacher).embed_dim})"
+                    f"D={self._repa_teacher_embed_dim()})"
                 )
             log.info(
                 f"SIGReg enabled on the {where}: loss_weight={sigreg_cfg.loss_weight}, "
@@ -1755,6 +1919,14 @@ class OmniMoTModel(ImaginaireModel):
             sigmas_lidar=sigmas_lidar,
             iteration=iteration,
         )
+        # cosmos_hs11 v115+: the wan_vae internal REPA teacher reads the CLEAN latents, which the pack holds until here
+        clean_vision_tokens: list[torch.Tensor] | None = None
+        if (
+            getattr(self, "repa_internal_teacher", None) == "wan_vae"
+            and packed_sequence.vision is not None
+            and packed_sequence.vision.tokens is not None
+        ):
+            clean_vision_tokens = list(packed_sequence.vision.tokens)
         self._replace_clean_with_noised(packed_sequence, gen_data_noised)
 
         # Move packed sequence to CUDA
@@ -1780,7 +1952,13 @@ class OmniMoTModel(ImaginaireModel):
 
         # REPA: frozen teacher (V-JEPA 2.1 / DINOv2) tokens of the predicted frames (per camera view), consumed
         # inside the net forward. Either computed here from the raw batch or handed in pre-computed (Reptile inner loop).
-        repa_teacher_tokens = self._resolve_repa_teacher_tokens(data_batch, sequence_plans, repa_teacher_tokens)
+        if getattr(self, "repa_internal_teacher", None) is not None:
+            # cosmos_hs11 v115+: targets from the frozen initial network / the clean VAE latents, in MoT token order
+            if data_batch is not None:
+                data_batch.pop(getattr(self.config.repa, "native_video_key", "video_native"), None)  # not needed
+            repa_teacher_tokens = self._internal_repa_targets(packed_sequence, clean_vision_tokens, iteration)
+        else:
+            repa_teacher_tokens = self._resolve_repa_teacher_tokens(data_batch, sequence_plans, repa_teacher_tokens)
 
         # cosmos_hs12 masked prediction: an independent pixel-masked pack + frozen-teacher targets, consumed inside the
         # same root net forward (prefix up to the REPA block); needs the raw data_batch like the REPA teacher above.
@@ -2030,9 +2208,19 @@ class OmniMoTModel(ImaginaireModel):
                 else:
                     repa_gate = 0.0
             # Weight 0 (e.g. relation-only recipes): the token objective is only logged -> no autograd graph.
+            same_width = int(repa_pred.shape[-1]) == int(repa_target.shape[-1])
+            if not same_width and repa_weight != 0.0:
+                raise ValueError(
+                    f"REPA feature term needs pred/target of one width, got {repa_pred.shape[-1]} vs "
+                    f"{repa_target.shape[-1]}; a relation-map-only arm must set repa.loss_weight = 0"
+                )
             with torch.set_grad_enabled(repa_weight != 0.0):
                 objective = str(repa_cfg.objective)
-                if objective == "temporal_difference":
+                if not same_width:
+                    # cosmos_hs11 v115+: identity projector vs a target of another width (wan_vae relation-only arm)
+                    repa_loss = 0.0 * repa_pred.sum()
+                    repa_cos = repa_cos_centered = repa_loss.new_tensor(float("nan"))
+                elif objective == "temporal_difference":
                     repa_loss, objective_cos = repa_temporal_difference_cosine_loss(
                         repa_pred,
                         repa_target,
@@ -2063,8 +2251,9 @@ class OmniMoTModel(ImaginaireModel):
 
             # The logged cosines always cover ALL aligned rows (also the samples outside a sigma window), so they
             # stay comparable across recipes; the specialized objective cosines above say what the loss optimized.
-            _, repa_cos = repa_cosine_loss(repa_pred_all.detach(), repa_target_all)
-            repa_cos_centered = centered_cosine_similarity(repa_pred_all, repa_target_all)
+            if same_width:
+                _, repa_cos = repa_cosine_loss(repa_pred_all.detach(), repa_target_all)
+                repa_cos_centered = centered_cosine_similarity(repa_pred_all, repa_target_all)
             losses_dict["repa_cos_sim"] = repa_cos
             losses_dict["repa_cos_sim_centered"] = repa_cos_centered
             # Weight 0 = monitor only: evaluate without building an autograd graph over the per-sample n_i x n_i
@@ -5783,6 +5972,10 @@ class OmniMoTModel(ImaginaireModel):
         iteration = iteration + self.config.ema.iteration_shift
         if iteration < 1:
             return 0.0
+        constant_beta = getattr(self.config.ema, "beta", None)
+        if constant_beta is not None:
+            # cosmos_hs11: plain exponential moving average with a fixed decay (openpi's ema_decay), no power ramp.
+            return float(constant_beta)
         return (1 - 1 / (iteration + 1)) ** (self.ema_exp_coefficient + 1)
 
     def model_param_stats(self) -> Dict[str, int]:

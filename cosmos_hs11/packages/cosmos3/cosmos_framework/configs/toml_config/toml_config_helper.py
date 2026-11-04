@@ -102,6 +102,8 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         ("dataloader_train", "episode_balanced_sampling"): None,                # VFM/LIBERO-only knob
         ("optimizer", "eps"): None,                                            # VLM_OPTIMIZER_KWARGS has no eps field
         ("scheduler", "verbosity_interval"): None,                             # VLM_LAMBDACOSINE_KWARGS has no verbosity_interval
+        ("scheduler", "lr_scheduler_type"): None,                              # VLM is lambdacosine already; VFM-only knob
+        ("model", "ema", "beta"): None,                                        # VFM-only constant EMA decay (cosmos_hs11)
         ("trainer", "callbacks", "compile_tokenizer"): None,                   # VFM-only callback (VLM has no torch.compile of the tokenizer)
         # Rename / re-route to the VLM path
         ("model", "attn_implementation"): ("model", "config", "policy", "attn_implementation"),

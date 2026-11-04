@@ -34,7 +34,7 @@ from cosmos_framework.model.generator.mot.flex_attention import (
     resolve_flex_backend,
 )
 from cosmos_framework.model.generator.mot.modeling_utils import TimestepEmbedder, has_noisy_tokens
-from cosmos_framework.model.generator.repa.alignment import RepaAlignmentHead, RepaTeacherTokens
+from cosmos_framework.model.generator.repa.alignment import RepaAlignmentHead, RepaTeacherTokens, RepaTokenTargets
 from cosmos_framework.model.generator.utils.memory import MemoryState
 from cosmos_framework.utils import log
 
@@ -311,9 +311,13 @@ class Cosmos3VFMNetwork(PreTrainedModel):
                     "(number of MoT decoder blocks applied before the aligned hidden state is read)."
                 )
             self.repa_layer_index = int(config.repa_layer_index)
+            # cosmos_hs11 v115+: repa_teacher_embed_dim <= 0 = "the MoT hidden size" (internal self_init teacher)
+            repa_teacher_embed_dim = int(config.repa_teacher_embed_dim)
+            if repa_teacher_embed_dim <= 0:
+                repa_teacher_embed_dim = int(self.hidden_size)
             self.repa_head = RepaAlignmentHead(
                 hidden_size=self.hidden_size,
-                teacher_embed_dim=config.repa_teacher_embed_dim,
+                teacher_embed_dim=repa_teacher_embed_dim,
                 projector_hidden_dim=config.repa_projector_hidden_dim,
                 projector_type=getattr(config, "repa_projector_type", "mlp"),
                 target_adapter=config.repa_target_adapter,
@@ -425,6 +429,9 @@ class Cosmos3VFMNetwork(PreTrainedModel):
         vision = packed_seq.vision
         if teacher_tokens is None or vision is None or vision.tokens is None:
             return None
+        if isinstance(teacher_tokens, RepaTokenTargets):
+            # cosmos_hs11 v115+: internal teachers hand over rows already in MoT token order (no grid, no adapter)
+            return teacher_tokens.target, list(teacher_tokens.counts)
         if isinstance(teacher_tokens, RepaTeacherTokens):
             teacher_tokens = teacher_tokens.take()
         return self.repa_head.compute_targets(
@@ -1276,6 +1283,7 @@ class Cosmos3VFMNetwork(PreTrainedModel):
         repa_aux_only: bool = False,
         ranking_negative: PackedSequence | None = None,
         ranking_action_only: bool = False,
+        capture_only_layer: int | None = None,
     ) -> dict:
         """
         Forward pass for Cosmos3VFMNetwork.
@@ -1299,6 +1307,9 @@ class Cosmos3VFMNetwork(PreTrainedModel):
             repa_aux_only: Internal prefix call; stop at the captured block and skip all output decoders.
             ranking_negative: Same noised samples with alternative instructions. Runs under this root FSDP forward.
             ranking_action_only: Internal negative branch; decode only actions.
+            capture_only_layer: cosmos_hs11 v115+ (internal ``self_init`` REPA teacher): run the encoders and the MoT
+                blocks up to this 1-based block, then return ``{"captured_hidden": [N_total, hidden]}`` (the residual
+                stream after that block, before the final norms) and skip every decoder. Independent of the REPA head.
 
         Returns:
             dict with keys:
@@ -1540,7 +1551,17 @@ class Cosmos3VFMNetwork(PreTrainedModel):
         # MoT text model to keep the residual stream after block ``repa_layer_index`` (1-based).
         repa_text_model = None
         repa_targets = None
-        if self.repa_head is not None and repa_teacher_tokens is not None:
+        if capture_only_layer is not None:
+            # cosmos_hs11 v115+: teacher-side prefix forward (frozen initial network): capture block k and stop.
+            if memory is not None or repa_aux is not None or ranking_negative is not None or repa_aux_only:
+                raise ValueError("capture_only_layer cannot be combined with memory, repa_aux or ranking branches")
+            if not (1 <= int(capture_only_layer) <= self.num_hidden_layers):
+                raise ValueError(f"capture_only_layer={capture_only_layer} must be in [1, {self.num_hidden_layers}]")
+            repa_text_model = self._repa_text_model()
+            repa_text_model._repa_capture_layer = int(capture_only_layer) - 1
+            repa_text_model._repa_captured = None
+            repa_text_model._repa_stop_after_capture = True
+        elif self.repa_head is not None and repa_teacher_tokens is not None:
             repa_targets = self._compute_repa_targets(packed_seq, repa_teacher_tokens)
             repa_teacher_tokens = None
             repa_text_model = self._repa_text_model()
@@ -1579,9 +1600,15 @@ class Cosmos3VFMNetwork(PreTrainedModel):
         if repa_text_model is not None:
             if repa_captured is None:
                 raise RuntimeError(
-                    f"REPA capture at MoT block {self.repa_layer_index} did not fire; the language model's "
-                    "_impl_forward loop must honour _repa_capture_layer."
+                    f"REPA capture at MoT block {capture_only_layer or self.repa_layer_index} did not fire; the language "
+                    "model's _impl_forward loop must honour _repa_capture_layer."
                 )
+        if capture_only_layer is not None:
+            return {
+                "captured_hidden": get_context_parallel_last_hidden_state(
+                    packed_outputs=repa_captured, parallel_dims=sequence_shard_parallel_dims
+                )  # [N_total, hidden_size]
+            }
         if sigreg_text_model is not None:
             if sigreg_captured is None:
                 raise RuntimeError(

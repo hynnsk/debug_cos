@@ -144,7 +144,26 @@ class RepaLinearProjector(nn.Module):
         return self.fc(x)
 
 
-PROJECTOR_TYPES = ("mlp", "linear")
+class RepaIdentityProjector(nn.Module):
+    """cosmos_hs11 v115+: no projector at all -- the layer-k hidden state itself is compared with the target (same
+    feature space: the internal ``self_init`` teacher, or the relation-map-only objectives where only the token
+    geometry matters). Parameter-free, so ``"repa_"`` selects nothing in the optimizer and the probe contributes 0."""
+
+    def __init__(self, in_dim: int, out_dim: int) -> None:
+        super().__init__()
+        # The output keeps the INPUT width. A target of another width is only usable by the relation-map term
+        # (``repa_relation_loss`` compares n x n maps), which ``_repa_loss_terms`` enforces (loss_weight must be 0).
+        self.in_dim, self.out_dim = int(in_dim), int(in_dim)
+        self.requested_out_dim = int(out_dim)
+
+    def reset_parameters(self) -> None:  # noqa: D401 - nothing to initialize
+        return None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x
+
+
+PROJECTOR_TYPES = ("mlp", "linear", "identity")
 
 
 def build_projector(projector_type: str, in_dim: int, hidden_dim: int, out_dim: int) -> nn.Module:
@@ -154,6 +173,8 @@ def build_projector(projector_type: str, in_dim: int, hidden_dim: int, out_dim: 
         return RepaProjector(in_dim, hidden_dim, out_dim)
     if projector_type == "linear":
         return RepaLinearProjector(in_dim, out_dim)
+    if projector_type == "identity":
+        return RepaIdentityProjector(in_dim, out_dim)
     raise ValueError(f"Unknown REPA projector_type {projector_type!r}; expected one of {PROJECTOR_TYPES}")
 
 
@@ -436,8 +457,9 @@ def repa_relation_loss(
     rotation of either feature space. ``checkpoint=True`` recomputes each sample's maps in backward (the per-sample
     path), which keeps the memory at one ``n_i x n_i`` map at a time (7200^2 / 8192^2 for the native-size recipes).
     """
-    if pred.shape != target.shape:
-        raise ValueError(f"pred {tuple(pred.shape)} and target {tuple(target.shape)} must have the same shape")
+    if pred.ndim != 2 or target.ndim != 2 or pred.shape[0] != target.shape[0]:
+        # cosmos_hs11 v115+: widths may differ (identity projector vs a 192-d VAE target); only the rows must match
+        raise ValueError(f"pred {tuple(pred.shape)} and target {tuple(target.shape)} must be [N, D] with the same N")
     if distance not in RELATION_DISTANCES:
         raise ValueError(f"Unknown relation distance {distance!r}; expected one of {RELATION_DISTANCES}")
     if not math.isfinite(margin) or margin < 0:
