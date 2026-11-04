@@ -21,7 +21,7 @@ experiment   = "action_policy_libero_edge"
 project      = "cosmos3_action_libero"
 group        = "edge_libero10_fewshot"
 name         = "edge_libero10_3ep_fullft_reptile_v114"
-wandb_mode   = "online"
+wandb_mode   = "offline"
 
 [model]
 precision = "bfloat16"

@@ -22,7 +22,7 @@ experiment   = "action_policy_libero_edge_repa"   # REPA experiment: [model.repa
 project      = "cosmos3_action_libero"
 group        = "edge_libero_spatial_fewshot"
 name         = "edge_libero_spatial_3ep_fullft_reptile_v102"
-wandb_mode   = "online"
+wandb_mode   = "offline"
 
 [model]
 precision = "bfloat16"
