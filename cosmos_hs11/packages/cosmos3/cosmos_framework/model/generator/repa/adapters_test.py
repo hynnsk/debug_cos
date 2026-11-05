@@ -227,7 +227,7 @@ def test_relation_loss_batched_and_ragged_paths_agree_and_backprop():
 
 def test_relation_loss_rejects_bad_inputs():
     pred, target, counts = _relation_inputs()
-    with pytest.raises(ValueError, match="same shape"):
+    with pytest.raises(ValueError, match="same N"):  # widths may differ (internal teachers); rows may not
         repa_relation_loss(pred, target[:-1], counts)
     with pytest.raises(ValueError, match="sums to"):
         repa_relation_loss(pred, target, [7, 7])

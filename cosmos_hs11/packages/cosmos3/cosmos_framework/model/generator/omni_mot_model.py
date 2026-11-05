@@ -9,7 +9,7 @@ import inspect
 import json
 import time
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Mapping, Optional, Tuple
 
 import numpy as np
 import torch
@@ -689,7 +689,11 @@ class OmniMoTModel(ImaginaireModel):
     @torch.no_grad()
     def _copy_parameters_into(self, target: torch.nn.Module) -> int:
         """Copy every parameter and buffer of ``self.net`` into ``target`` (same architecture and sharding; rank-local
-        shards). Returns the number of tensors copied."""
+        shards). Returns the number of tensors copied.
+
+        Names are matched after :func:`_canonical_net_param_name`: the loaded network runs under the recipe's
+        activation checkpointing (and torch.compile when enabled) while the ``self_init`` teacher is built without AC,
+        so their raw ``named_parameters()`` names differ by the wrapper prefixes only."""
 
         def _local(t: torch.Tensor) -> torch.Tensor:
             try:
@@ -701,18 +705,39 @@ class OmniMoTModel(ImaginaireModel):
                 pass
             return t
 
-        src_params = dict(self.net.named_parameters())
-        src_buffers = dict(self.net.named_buffers())
+        def _canonical(named: Iterable[tuple[str, torch.Tensor]], what: str) -> dict[str, torch.Tensor]:
+            out: dict[str, torch.Tensor] = {}
+            for raw_name, tensor in named:
+                name = _canonical_net_param_name(raw_name)
+                if name in out:
+                    raise KeyError(f"two {what} of the loaded network canonicalize to the same name {name!r}")
+                out[name] = tensor
+            return out
+
+        src_params = _canonical(self.net.named_parameters(), "parameters")
+        src_buffers = _canonical(self.net.named_buffers(), "buffers")
         copied = 0
-        for name, param in target.named_parameters():
+        for raw_name, param in target.named_parameters():
+            name = _canonical_net_param_name(raw_name)
             if name not in src_params:
                 raise KeyError(f"self_init teacher parameter {name!r} has no counterpart in the loaded network")
-            _local(param.data).copy_(_local(src_params[name].data))
+            src = _local(src_params[name].data)
+            dst = _local(param.data)
+            if tuple(dst.shape) != tuple(src.shape):
+                raise ValueError(
+                    f"self_init teacher parameter {name!r}: local shard shape {tuple(dst.shape)} != loaded network "
+                    f"{tuple(src.shape)} (the teacher must be built with the same parallelism)"
+                )
+            dst.copy_(src)
             copied += 1
-        for name, buf in target.named_buffers():
+        for raw_name, buf in target.named_buffers():
+            name = _canonical_net_param_name(raw_name)
             if name in src_buffers:
-                _local(buf).copy_(_local(src_buffers[name]))
-                copied += 1
+                src = _local(src_buffers[name])
+                dst = _local(buf)
+                if tuple(dst.shape) == tuple(src.shape):
+                    dst.copy_(src)
+                    copied += 1
         return copied
 
     def _get_self_init_teacher_net(self, iteration: int) -> torch.nn.Module:
@@ -7337,6 +7362,16 @@ def _broadcast_seed(seed: list[int], group: dist.ProcessGroup, rank: int) -> lis
 
     dist.broadcast(seed_tensor, group=group, group_src=0)
     return seed_tensor.tolist()
+
+
+def _canonical_net_param_name(name: str) -> str:
+    """Strip the wrapper prefixes ``parallelize_vfm_network`` inserts around every MoT block: the activation checkpoint
+    wrapper contributes ``_checkpoint_wrapped_module.`` and ``torch.compile`` contributes ``_orig_mod.``
+    (``...layers.N._orig_mod._checkpoint_wrapped_module.self_attn...``). ``named_parameters()`` called from the root does
+    not undo either rename (unlike ``state_dict()``), so two networks built with different AC / compile settings
+    disagree on every block parameter name although they hold the same tensors (the cosmos_hs11 v115-v120 ``self_init``
+    teacher is built without AC; the loaded network runs under the recipe's AC and, when enabled, torch.compile)."""
+    return name.replace("_orig_mod.", "").replace("_checkpoint_wrapped_module.", "")
 
 
 def _is_reasoner_state_dict_key(key: str) -> bool:

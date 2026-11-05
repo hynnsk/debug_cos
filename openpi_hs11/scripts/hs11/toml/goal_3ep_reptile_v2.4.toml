@@ -27,7 +27,7 @@ batch_size      = 64
 num_train_steps = 5000
 fsdp_devices    = 0            # 0 = shard over every GPU of the allocation
 num_workers     = 8
-save_interval   = 1000
+save_interval   = 5000
 keep_period     = 1000
 log_interval    = 50
 seed            = 42

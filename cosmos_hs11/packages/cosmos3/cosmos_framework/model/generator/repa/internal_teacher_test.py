@@ -17,7 +17,7 @@ from cosmos_framework.configs.base.defaults.model_config import RepaConfig
 from cosmos_framework.data.generator.sequence_packing.packers import pack_input_sequence
 from cosmos_framework.data.generator.sequence_packing.sequence import SequencePlan
 from cosmos_framework.model.generator.mot.cosmos3_vfm_network import Cosmos3VFMNetwork, Cosmos3VFMNetworkConfig
-from cosmos_framework.model.generator.omni_mot_model import OmniMoTModel
+from cosmos_framework.model.generator.omni_mot_model import OmniMoTModel, _canonical_net_param_name
 from cosmos_framework.model.generator.repa.adapters import (
     PROJECTOR_TYPES,
     RepaIdentityProjector,
@@ -420,3 +420,87 @@ def test_training_step_with_internal_teachers(monkeypatch, kind, projector, loss
     assert grads and any(float(g.abs().sum()) > 0 for g in grads)
     if teacher_net is not None:
         assert all(p.grad is None for p in teacher_net.parameters())  # frozen teacher never receives gradient
+
+
+# ---------------------------------------------------------------------------------------------
+# the frozen copy under activation checkpointing / torch.compile wrappers (the v115-v120 crash)
+# ---------------------------------------------------------------------------------------------
+def _wrap_blocks_like_parallelize(net, *, checkpointed=True, compiled=True):
+    """Rename the MoT block parameters exactly like ``parallelize_unified_mot`` does: ``apply_ac`` wraps each block in
+    the activation-checkpoint wrapper (``_checkpoint_wrapped_module.``), then ``apply_compile`` wraps it in
+    ``torch.compile`` (``_orig_mod.``; the OptimizedModule is created without compiling anything)."""
+    from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import checkpoint_wrapper
+
+    layers = net.language_model.model.layers
+    for layer_id, block in list(layers.named_children()):
+        if checkpointed:
+            block = checkpoint_wrapper(block)
+        if compiled:
+            block = torch.compile(block)
+        layers.register_module(layer_id, block)
+    return net
+
+
+def _canonical_params(net):
+    return {_canonical_net_param_name(n): p for n, p in net.named_parameters()}
+
+
+@pytest.mark.parametrize("checkpointed,compiled", [(True, False), (False, True), (True, True)])
+def test_copy_parameters_into_matches_names_across_ac_and_compile_wrappers(checkpointed, compiled):
+    torch.manual_seed(3)
+    student = _wrap_blocks_like_parallelize(_net(), checkpointed=checkpointed, compiled=compiled)
+    teacher = _net()  # built without AC / compile, like ``_get_self_init_teacher_net`` does
+    raw_student = dict(student.named_parameters())
+    raw_teacher = dict(teacher.named_parameters())
+    assert any("layers.0." in n and ("_checkpoint_wrapped_module." in n or "_orig_mod." in n) for n in raw_student)
+    assert not any(n in raw_student for n in raw_teacher if "layers." in n)  # the raw names really differ
+    with torch.no_grad():
+        for p in teacher.parameters():
+            p.add_(torch.randn_like(p))
+    before = {n: p.detach().clone() for n, p in _canonical_params(student).items()}
+    assert any(not torch.equal(before[n], p) for n, p in _canonical_params(teacher).items())
+
+    copied = OmniMoTModel._copy_parameters_into(SimpleNamespace(net=student), teacher)
+
+    teacher_params = _canonical_params(teacher)
+    assert copied >= len(teacher_params)
+    for name, p in teacher_params.items():
+        torch.testing.assert_close(p, before[name], rtol=0, atol=0)
+    for name, p in _canonical_params(student).items():  # the loaded network itself is untouched
+        torch.testing.assert_close(p, before[name], rtol=0, atol=0)
+
+
+def test_copy_parameters_into_rejects_unknown_names_and_shard_shape_mismatch():
+    student = _wrap_blocks_like_parallelize(_net())
+    teacher = _net()
+    teacher.extra = nn.Linear(2, 2)
+    with pytest.raises(KeyError, match="extra.weight"):
+        OmniMoTModel._copy_parameters_into(SimpleNamespace(net=student), teacher)
+    teacher = _net()
+    teacher.llm2action.fc.weight = nn.Parameter(torch.zeros(1, 1))
+    with pytest.raises(ValueError, match="local shard shape"):
+        OmniMoTModel._copy_parameters_into(SimpleNamespace(net=student), teacher)
+
+
+def test_get_self_init_teacher_net_builds_a_frozen_eval_copy_once():
+    torch.manual_seed(5)
+    student = _wrap_blocks_like_parallelize(_net())
+    fresh = _net()
+    builds = []
+    model = SimpleNamespace(
+        net=student,
+        precision=torch.bfloat16,
+        config=SimpleNamespace(repa=SimpleNamespace(teacher_layer_index=10)),
+        build_net=lambda **kw: (builds.append(kw), fresh)[1],
+    )
+    model._copy_parameters_into = MethodType(OmniMoTModel._copy_parameters_into, model)
+    model._get_self_init_teacher_net = MethodType(OmniMoTModel._get_self_init_teacher_net, model)
+
+    teacher = model._get_self_init_teacher_net(0)
+    assert teacher is fresh and model._get_self_init_teacher_net(7) is fresh and len(builds) == 1
+    assert builds[0]["dtype"] == torch.bfloat16 and builds[0]["repa_enabled"] is False
+    assert builds[0]["ac_config"].mode == "none"
+    assert not teacher.training and all(not p.requires_grad for p in teacher.parameters())
+    student_params = _canonical_params(student)
+    for name, p in _canonical_params(teacher).items():
+        torch.testing.assert_close(p, student_params[name], rtol=0, atol=0)
