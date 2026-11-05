@@ -11,7 +11,7 @@ project_name = "openpi_hs11"
 
 [wandb]
 enabled = true
-mode    = "online"        # offline | online | disabled (WANDB_MODE); enabled=false disables logging entirely
+mode    = "offline"        # offline | online | disabled (WANDB_MODE); enabled=false disables logging entirely
 
 [data]
 suite          = "libero_goal"

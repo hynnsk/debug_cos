@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: OpenMDW-1.1
-# v99 = v94 + DINOv2 ViT-B/14 REPA distillation on MoT block 24 (weight 5.0; experiment action_policy_libero_edge_repa). [checkpoint] unchanged from v94 (fresh action heads).
+# v96 = v94 + action-language ranking hinge, "ranking default version" (absolute margin 0.1, weight 1.0). [checkpoint] unchanged from v94 (fresh action heads).
 # v94 = v38 with FRESH action heads (no meta_action_init; backbone = Reptile theta), head LR x5 like the baseline.
 
 # cosmos_hs11 -- REPTILE INIT -> FULL fine-tune. LIBERO-Spatial (libero_spatial suite) few-shot post-training (3 demos/task = 30 episodes) with the
@@ -18,7 +18,7 @@
 
 [job]
 task         = "vfm"
-experiment   = "action_policy_libero_edge_repa"   # REPA experiment: [model.repa] is only honoured here
+experiment   = "action_policy_libero_edge"
 project      = "cosmos3_action_libero"
 group        = "edge_libero_spatial_fewshot"
 name         = "edge_libero_spatial_3ep_fullft_reptile_v105"
@@ -28,17 +28,6 @@ wandb_mode   = "offline"
 precision = "bfloat16"
 max_num_tokens_after_packing = 45056
 lora_enabled = false            # full mode: theta lives in the DCP weights themselves, no adapters
-
-# ---- DINOv2 ViT-B/14 REPA distillation (cosmos_hs10 v7 setting, as in action_policy_libero_10_edge_reptileinit_v105.toml);
-# only honoured by experiment action_policy_libero_edge_repa (keys_to_skip_loading below also skips repa_).
-[model.repa]
-enabled            = true
-loss_weight        = 1.0                   # unweighted 1 - cos in [0, 2]; the fm terms are x10-scaled (see hs10 docs)
-layer_index        = 24                     # output of MoT block 24 (of 28)
-teacher            = "dinov2_vitb14"       # facebook/dinov2-base (D=768), per frame; V-JEPA 2.1 = "vjepa2_1_vit_base_384"
-teacher_input_size = 224                   # 16x16 patches of 14 px (REPA reference setting)
-target_adapter     = "avgpool"             # variant 1 (parameter-free) | "avgpool_conv" (2) | "strided_conv" (3)
-target_grid_thw    = [4, 5, 5]             # per-view MoT token grid (validated at runtime)
 
 [model.ema]
 enabled         = true
@@ -79,7 +68,7 @@ validation_iter         = 200
 max_val_iter            = 16     # x 64 windows x 4 ranks = 4096 windows ~= half of the 50-episode val set (same windows every time)
 
 [dataloader_train]
-max_samples_per_batch = 64       # per rank; x 4 ranks = global batch 256
+max_samples_per_batch = 128       # per rank; x 4 ranks = global batch 256
 episode_subset_path   = "libero_spatial_3ep_per_task_v3.json"        # 3 demos/task x 10 tasks = 30 episodes (libero_spatial)
 
 [dataloader_val]
@@ -88,14 +77,17 @@ episode_subset_path   = "libero_spatial_val_5ep_per_task_seed42_excl3ep.json"  #
 
 [checkpoint]
 load_path = "${oc.env:REPTILE_CKPT_PATH}"   # <reptile job>/checkpoints/iter_XXXXXXXXX (NOT the base Cosmos3-Edge dir)
-save_iter = 250
+save_iter = 1000
 # v94: the Reptile DCP has no EMA; the action heads (action2llm / llm2action / action_modality_embed) are skipped and
 # stay FRESH (trunc-normal / zero bias, exactly like the baseline) -- no meta_action_init_* here on purpose; head LR x5 as in the baseline.
-keys_to_skip_loading = ["net_ema.", "repa_", "action2llm", "llm2action", "action_modality_embed"]   # + repa_head (absent from the Reptile DCP)
+keys_to_skip_loading = ["net_ema.", "action2llm", "llm2action", "action_modality_embed"]
 
 # ---- action-language ranking hinge, "ranking default version" (absolute margin 0.1, weight 1.0; the RPL of the paper).
 # Added directly to the existing total loss, independently of the action FM multiplier.
 [model.language_ranking]
 enabled = true
 loss_weight = 1.0
-margin = 0.1
+margin = 0.3      # absolute: E_neg >= E_pos + margin | relative: E_neg >= (1 + margin) * E_pos
+negative_grad_scale = 1.0        # gradient scale through E_neg: 1.0 = original, 0.0 = positive-only, 0.2 = asymmetric
+margin_mode         = "relative"   # "absolute" | "relative" (margin x sg(E_pos) per sample)
+self_paced_fraction = 0.0        # 0.0 = off; else only this fraction of valid samples (largest detached gap - margin_i) is ranked
