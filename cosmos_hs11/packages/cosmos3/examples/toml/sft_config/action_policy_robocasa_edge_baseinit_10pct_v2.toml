@@ -22,7 +22,7 @@ experiment   = "action_policy_robocasa_edge"
 project      = "cosmos3_action_robocasa"
 group        = "edge_robocasa365_atomic"
 name         = "edge_robocasa365_atomic_10pct_fullft_baseinit_v2"
-wandb_mode   = "online"
+wandb_mode   = "offline"
 
 [model]
 precision = "bfloat16"
