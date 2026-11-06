@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
 
-set -e
-
 # User-defined variables
 PORT=${PORT:-8701}
 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
