@@ -19,7 +19,7 @@ episode_subset = "libero_object_3ep_per_task_seed42.json"
 
 [checkpoint]
 init        = "reptile"        # warm start from a Reptile theta
-init_params = "checkpoints/pi05_reptile/reptile_v7/2500/params"   # <reptile ckpt>/<meta-iter>/params; REPTILE_PARAMS env or checkpoint.init_params=... overrides
+init_params = "checkpoints/pi05_reptile/reptile_v7/3000/params"   # <reptile ckpt>/<meta-iter>/params; REPTILE_PARAMS env or checkpoint.init_params=... overrides
 base_dir    = "./checkpoints"
 
 [train]
