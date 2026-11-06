@@ -34,7 +34,11 @@ class RepaTeacherSpec:
 # token order itself (``RepaTokenTargets``): ``self_init`` = the gen-tower residual stream after MoT block
 # ``repa.teacher_layer_index`` of a FROZEN copy of the network as loaded at start (self-distillation / feature anchoring);
 # ``wan_vae`` = the clean Wan2.2 VAE latent patches (``vae2llm`` input, C * p * p per token) of the predicted frames.
-INTERNAL_REPA_TEACHERS = ("self_init", "wan_vae")
+# cosmos_hs11 v130+: ``dcp_init`` = like ``self_init`` but the frozen network is LOADED from another DCP checkpoint
+# (``repa.teacher_checkpoint_path``, e.g. the mid-trained Cosmos3-Edge) instead of copied from the weights as loaded.
+INTERNAL_REPA_TEACHERS = ("self_init", "wan_vae", "dcp_init")
+# The internal teachers that are a frozen NETWORK (run with ``capture_only_layer``; ``repa.teacher_input`` applies).
+NETWORK_REPA_TEACHERS = ("self_init", "dcp_init")
 
 
 def is_internal_repa_teacher(name: str) -> bool:

@@ -17,7 +17,12 @@ from cosmos_framework.configs.base.defaults.model_config import RepaConfig
 from cosmos_framework.data.generator.sequence_packing.packers import pack_input_sequence
 from cosmos_framework.data.generator.sequence_packing.sequence import SequencePlan
 from cosmos_framework.model.generator.mot.cosmos3_vfm_network import Cosmos3VFMNetwork, Cosmos3VFMNetworkConfig
-from cosmos_framework.model.generator.omni_mot_model import OmniMoTModel, _canonical_net_param_name
+from cosmos_framework.model.generator.omni_mot_model import (
+    OmniMoTModel,
+    _canonical_net_param_name,
+    load_net_from_dcp,
+    resolve_dcp_model_dir,
+)
 from cosmos_framework.model.generator.repa.adapters import (
     PROJECTOR_TYPES,
     RepaIdentityProjector,
@@ -29,6 +34,7 @@ from cosmos_framework.model.generator.repa.alignment import RepaAlignmentHead, R
 from cosmos_framework.model.generator.repa.masked_network_test import TinyLanguage
 from cosmos_framework.model.generator.repa.teachers import (
     INTERNAL_REPA_TEACHERS,
+    NETWORK_REPA_TEACHERS,
     InternalRepaTeacher,
     build_repa_teacher,
     is_internal_repa_teacher,
@@ -82,8 +88,9 @@ def _pack(clean):
 # registry / projector / loss pieces
 # ---------------------------------------------------------------------------------------------
 def test_internal_teacher_registry_and_identity_projector():
-    assert INTERNAL_REPA_TEACHERS == ("self_init", "wan_vae")
+    assert INTERNAL_REPA_TEACHERS == ("self_init", "wan_vae", "dcp_init") and NETWORK_REPA_TEACHERS == ("self_init", "dcp_init")
     assert is_internal_repa_teacher("self_init") and is_internal_repa_teacher(" WAN_VAE ") and not is_internal_repa_teacher("dinov2_vitb14")
+    assert is_internal_repa_teacher("dcp_init") and resolve_repa_teacher_spec("dcp_init").family == "internal"
     spec = resolve_repa_teacher_spec("self_init")
     assert spec.family == "internal" and spec.embed_dim == 0
     assert resolve_repa_teacher_spec("dinov2_vitb14").family == "dinov2"  # external teachers untouched
@@ -221,7 +228,10 @@ def _model(repa_cfg, net):
     # properties cannot be attached to a SimpleNamespace instance: emulate them as plain attributes / bound methods
     model.repa_enabled = bool(repa_cfg.enabled)
     model.repa_internal_teacher = OmniMoTModel.repa_internal_teacher.fget(model)
-    for name in ("_repa_teacher_embed_dim", "_repa_teacher_grid_thw", "_set_up_internal_repa_teacher", "_internal_repa_targets"):
+    for name in (
+        "_repa_teacher_embed_dim", "_repa_teacher_grid_thw", "_set_up_internal_repa_teacher", "_internal_repa_targets",
+        "_get_frozen_teacher_net", "_repa_teacher_pack_mode", "_build_repa_teacher_pack",
+    ):
         setattr(model, name, MethodType(getattr(OmniMoTModel, name), model))
     return model
 
@@ -350,34 +360,44 @@ def _step_model(net, repa_cfg, kind, teacher_net=None):
         pre_noise_memory_hook=lambda pack, clean, memory: memory,
         _resolve_repa_teacher_tokens=lambda *a, **k: (_ for _ in ()).throw(AssertionError("external path must not run")),
         _get_self_init_teacher_net=lambda iteration: teacher_net,
+        _get_dcp_init_teacher_net=lambda iteration: teacher_net,
         build_memory_state=lambda *args: None,
         _get_load_balancing_loss_meshes=lambda: (None, None),
         packs=packs,
     )
     for name in (
         "_replace_clean_with_noised", "_compute_flow_matching_loss", "_compute_losses", "_repa_loss_terms", "denoise",
-        "_add_noise_to_input", "_internal_repa_targets",
+        "_add_noise_to_input", "_internal_repa_targets", "_get_frozen_teacher_net", "_repa_teacher_pack_mode",
+        "_build_repa_teacher_pack",
     ):
         setattr(model, name, MethodType(getattr(OmniMoTModel, name), model))
     return model
 
 
-@pytest.mark.parametrize("kind,projector,loss_weight,relation_weight", [
-    ("self_init", "identity", 5.0, 0.0),
-    ("self_init", "identity", 0.0, 5.0),
-    ("self_init", "identity", 5.0, 5.0),
-    ("wan_vae", "mlp", 5.0, 0.0),
-    ("wan_vae", "identity", 0.0, 5.0),
-    ("wan_vae", "mlp", 5.0, 5.0),
+@pytest.mark.parametrize("kind,projector,loss_weight,relation_weight,teacher_input", [
+    ("self_init", "identity", 5.0, 0.0, "same"),
+    ("self_init", "identity", 0.0, 5.0, "same"),
+    ("self_init", "identity", 5.0, 5.0, "same"),
+    ("wan_vae", "mlp", 5.0, 0.0, "same"),
+    ("wan_vae", "identity", 0.0, 5.0, "same"),
+    ("wan_vae", "mlp", 5.0, 5.0, "same"),
+    # cosmos_hs11 v126+: the frozen-network teachers on the CLEAN predicted frames, and the dcp_init teacher
+    ("self_init", "mlp", 5.0, 0.0, "clean_context"),
+    ("self_init", "identity", 0.0, 5.0, "clean_context"),
+    ("self_init", "mlp", 5.0, 0.0, "clean_t0"),
+    ("dcp_init", "mlp", 5.0, 0.0, "clean_context"),
+    ("dcp_init", "identity", 0.0, 5.0, "clean_t0"),
+    ("dcp_init", "mlp", 5.0, 5.0, "same"),
 ])
-def test_training_step_with_internal_teachers(monkeypatch, kind, projector, loss_weight, relation_weight):
+def test_training_step_with_internal_teachers(monkeypatch, kind, projector, loss_weight, relation_weight, teacher_input):
     from cosmos_framework.data.generator.sequence_packing import PackedSequence
 
     torch.manual_seed(11)
     monkeypatch.setattr(PackedSequence, "to_cuda", lambda self: None)
-    teacher_dim = 0 if kind == "self_init" else LATENT_C * PATCH * PATCH
+    network_teacher = kind in NETWORK_REPA_TEACHERS
+    teacher_dim = 0 if network_teacher else LATENT_C * PATCH * PATCH
     net = _net(projector_type=projector, teacher_embed_dim=teacher_dim, layer_index=8)
-    teacher_net = _net(projector_type="identity", layer_index=8) if kind == "self_init" else None
+    teacher_net = _net(projector_type="identity", layer_index=8) if network_teacher else None
     if teacher_net is not None:
         with torch.no_grad():
             for p in teacher_net.parameters():
@@ -386,8 +406,9 @@ def test_training_step_with_internal_teachers(monkeypatch, kind, projector, loss
         for p in net.llm2action.parameters():
             p.normal_(std=0.1)
     cfg = RepaConfig(
-        enabled=True, teacher=kind, teacher_layer_index=10 if kind == "self_init" else None, layer_index=8,
+        enabled=True, teacher=kind, teacher_layer_index=10 if network_teacher else None, layer_index=8,
         projector_type=projector, loss_weight=loss_weight, relation_loss_weight=relation_weight, relation_distance="l1",
+        teacher_input=teacher_input, teacher_checkpoint_path="/some/dcp/iter_000001000" if kind == "dcp_init" else None,
     )
     model = _step_model(net, cfg, kind, teacher_net)
     clean = _clean(1)
@@ -395,6 +416,11 @@ def test_training_step_with_internal_teachers(monkeypatch, kind, projector, loss
     batch = {"video_native": torch.zeros(1), "other": 1}
     forwards = []
     net.register_forward_hook(lambda module, args, output: forwards.append(output))
+    teacher_inputs = []
+    if teacher_net is not None:
+        teacher_net.register_forward_hook(
+            lambda module, args, kwargs, output: teacher_inputs.append(kwargs["packed_seq"]), with_kwargs=True
+        )
     output, loss = OmniMoTModel.training_step_from_inputs(
         model, ([[4, 5]], plans, clean, dict(skip_text=False, initial_temporal_offset=0), None, []), 3, data_batch=batch
     )
@@ -406,6 +432,25 @@ def test_training_step_with_internal_teachers(monkeypatch, kind, projector, loss
     assert not net_out.get("repa_empty", False)
     pred, target = net_out.get("repa_pred"), net_out.get("repa_target")
     assert pred is not None and target is not None and pred.shape[0] == target.shape[0] == 32
+    student_pack = model.packs[0]
+    if network_teacher:
+        assert len(teacher_inputs) == 1
+        seen = teacher_inputs[0]
+        if teacher_input == "same":
+            assert len(model.packs) == 1 and seen is student_pack
+        else:
+            # the teacher ran on its OWN pack: clean latents, the student's noised action chunk, same layout
+            assert len(model.packs) == 2 and seen is model.packs[1] and seen is not student_pack
+            torch.testing.assert_close(seen.vision.tokens[0], clean.x0_tokens_vision[0])
+            assert not torch.allclose(student_pack.vision.tokens[0], clean.x0_tokens_vision[0])  # the student is noised
+            assert seen.action.tokens[0] is student_pack.action.tokens[0]
+            assert torch.equal(seen.vision.sequence_indexes, student_pack.vision.sequence_indexes)
+            if teacher_input == "clean_context":
+                assert all(nfi.numel() == 0 for nfi in seen.vision.noisy_frame_indexes)
+                assert all(bool(torch.all(cm == 1)) for cm in seen.vision.condition_mask)
+            else:
+                assert torch.equal(seen.vision.noisy_frame_indexes[0], student_pack.vision.noisy_frame_indexes[0])
+                assert seen.vision.timesteps.numel() > 0 and float(seen.vision.timesteps.abs().max()) == 0.0
     if kind == "wan_vae":
         # the target is the CLEAN latent patches (not the noised ones): recompute from the clean data
         flat, _ = net.patchify_and_pack_latents(clean.x0_tokens_vision, model.packs[0].vision.token_shapes, latent_channel=LATENT_C)
@@ -504,3 +549,151 @@ def test_get_self_init_teacher_net_builds_a_frozen_eval_copy_once():
     student_params = _canonical_params(student)
     for name, p in _canonical_params(teacher).items():
         torch.testing.assert_close(p, student_params[name], rtol=0, atol=0)
+
+
+# ---------------------------------------------------------------------------------------------
+# cosmos_hs11 v126+: dcp_init teacher (loaded from a DCP checkpoint) and the clean teacher packs
+# ---------------------------------------------------------------------------------------------
+def test_dcp_init_and_teacher_input_validation():
+    net = _net()
+    with pytest.raises(ValueError, match="teacher_input"):
+        RepaConfig(enabled=True, teacher="self_init", teacher_layer_index=10, teacher_input="noised")
+    m = _model(RepaConfig(enabled=True, teacher="dcp_init", teacher_layer_index=12, teacher_checkpoint_path="/x/iter", teacher_input="clean_context"), net)
+    assert m.repa_internal_teacher == "dcp_init" and m._repa_teacher_embed_dim() == 0
+    m._set_up_internal_repa_teacher("dcp_init")
+    assert m.repa_teacher.embed_dim == HIDDEN and m.repa_teacher.layer_index == 12 and m._repa_teacher_pack_mode() == "clean_context"
+    with pytest.raises(ValueError, match="teacher_checkpoint_path"):
+        _model(RepaConfig(enabled=True, teacher="dcp_init", teacher_layer_index=12), net)._set_up_internal_repa_teacher("dcp_init")
+    with pytest.raises(ValueError, match="teacher_layer_index"):
+        _model(RepaConfig(enabled=True, teacher="dcp_init", teacher_checkpoint_path="/x"), net)._set_up_internal_repa_teacher("dcp_init")
+    with pytest.raises(ValueError, match="only meaningful for the frozen-network"):
+        _model(RepaConfig(enabled=True, teacher="wan_vae", teacher_input="clean_t0"), net)._set_up_internal_repa_teacher("wan_vae")
+    # the pack mode is "same" for wan_vae / external teachers whatever teacher_input says, and for self_init by default
+    assert _model(RepaConfig(enabled=True, teacher="wan_vae"), net)._repa_teacher_pack_mode() == "same"
+    assert _model(RepaConfig(enabled=True, teacher="dinov2_vitb14", teacher_input_size=224), net)._repa_teacher_pack_mode() == "same"
+    assert _model(RepaConfig(enabled=True, teacher="self_init", teacher_layer_index=3), net)._repa_teacher_pack_mode() == "same"
+    assert _model(RepaConfig(enabled=False, teacher="self_init", teacher_input="clean_t0"), net)._repa_teacher_pack_mode() == "same"
+    with pytest.raises(ValueError, match="not a frozen network"):
+        _model(RepaConfig(enabled=True, teacher="wan_vae"), net)._get_frozen_teacher_net(0)
+
+
+def test_load_net_from_dcp_round_trip_and_strictness(tmp_path):
+    import torch.distributed.checkpoint as dcp
+    from torch.distributed.checkpoint.state_dict import get_model_state_dict
+
+    torch.manual_seed(21)
+    source = _net()
+    with torch.no_grad():
+        for p in source.parameters():
+            p.add_(0.3 * torch.randn_like(p))
+    # the DistributedCheckpointer layout: <iter>/model/ with keys net.<param> (+ net_ema.* and other extras to ignore)
+    state = {f"net.{k}": v for k, v in get_model_state_dict(source).items()}
+    extras = {"net_ema.some.weight": torch.zeros(3), "net.action2llm.other_domain": torch.ones(2)}
+    it = tmp_path / "iter_000001000"
+    dcp.save(state | extras, checkpoint_id=str(it / "model"), no_dist=True)
+    assert resolve_dcp_model_dir(str(it)) == it / "model" == resolve_dcp_model_dir(str(it / "model"))
+    with pytest.raises(FileNotFoundError, match="not a DCP"):
+        resolve_dcp_model_dir(str(tmp_path))
+
+    fresh = _net()
+    before = {k: v.clone() for k, v in fresh.state_dict().items()}
+    assert any(not torch.equal(before[k], v) for k, v in source.state_dict().items())
+    n = load_net_from_dcp(fresh, str(it))
+    assert n == len(state)
+    for k, v in source.state_dict().items():
+        torch.testing.assert_close(fresh.state_dict()[k], v, rtol=0, atol=0)
+    # strict on the network side: a checkpoint missing one tensor of the network is refused (no silently random teacher)
+    partial = {k: v for k, v in state.items() if "vae2llm" not in k}
+    dcp.save(partial, checkpoint_id=str(tmp_path / "partial" / "model"), no_dist=True)
+    with pytest.raises(KeyError, match="vae2llm"):
+        load_net_from_dcp(_net(), str(tmp_path / "partial"))
+
+
+def test_get_dcp_init_teacher_net_builds_loads_and_freezes_once(tmp_path, monkeypatch):
+    import cosmos_framework.model.generator.omni_mot_model as omm
+
+    fresh = _net()
+    builds, loads = [], []
+    monkeypatch.setattr(omm, "load_net_from_dcp", lambda net, path: (loads.append((net, path)), 7)[1])
+    model = SimpleNamespace(
+        net=_net(), precision=torch.bfloat16,
+        config=SimpleNamespace(repa=SimpleNamespace(teacher_layer_index=10, teacher_checkpoint_path=str(tmp_path / "ck"))),
+        build_net=lambda **kw: (builds.append(kw), fresh)[1],
+        repa_internal_teacher="dcp_init",
+    )
+    for name in ("_get_dcp_init_teacher_net", "_get_frozen_teacher_net"):
+        setattr(model, name, MethodType(getattr(OmniMoTModel, name), model))
+    teacher = model._get_frozen_teacher_net(0)
+    assert teacher is fresh and model._get_frozen_teacher_net(5) is fresh and len(builds) == 1
+    assert loads == [(fresh, str(tmp_path / "ck"))]
+    assert builds[0]["dtype"] == torch.bfloat16 and builds[0]["repa_enabled"] is False and builds[0]["ac_config"].mode == "none"
+    assert not teacher.training and all(not p.requires_grad for p in teacher.parameters())
+
+
+def _student_pack_with_noise(clean, timestep=0.5):
+    pack = _pack(clean)
+    pack.vision.tokens = [t + torch.randn_like(t) for t in pack.vision.tokens]
+    pack.action.tokens = [t + torch.randn_like(t) for t in pack.action.tokens]
+    return pack
+
+
+@pytest.mark.parametrize("mode", ["clean_context", "clean_t0"])
+def test_build_repa_teacher_pack_is_the_clean_clip_with_the_students_actions(mode):
+    torch.manual_seed(31)
+    net = _net()
+    clean = _clean(2)
+    student = _student_pack_with_noise(clean)
+    m = _model(RepaConfig(enabled=True, teacher="self_init", teacher_layer_index=10, teacher_input=mode), net)
+    special = {"bos_token_id": 1, "eos_token_id": 2, "start_of_generation": 3}
+    m._pack_input_sequence = lambda plans, text, data, times, **kw: pack_input_sequence(plans, text, data, times, special, latent_patch_size=PATCH)
+    plans = [SequencePlan(has_text=True, has_vision=True, has_action=True, condition_frame_indexes_vision=[0])] * 2
+    timesteps = torch.tensor([[0.5], [0.5]])
+    pack = m._build_repa_teacher_pack(plans, [[4, 5]] * 2, clean, timesteps, dict(skip_text=False, initial_temporal_offset=0), student)
+    assert pack is not student and int(pack.sequence_length) == int(student.sequence_length)
+    assert torch.equal(pack.vision.sequence_indexes, student.vision.sequence_indexes)
+    assert list(pack.vision.token_shapes) == list(student.vision.token_shapes)
+    for t, x0 in zip(pack.vision.tokens, clean.x0_tokens_vision):
+        torch.testing.assert_close(t, x0)  # clean latents, never replaced by the noised ones
+    for t, st in zip(pack.action.tokens, student.action.tokens):
+        assert t is st  # the student's (noised) action chunk
+    assert pack.action.timesteps is student.action.timesteps
+    assert torch.equal(pack.text_ids, student.text_ids)
+    if mode == "clean_context":
+        assert all(nfi.numel() == 0 for nfi in pack.vision.noisy_frame_indexes)
+        assert all(bool(torch.all(cm == 1)) for cm in pack.vision.condition_mask)
+        assert pack.vision.mse_loss_indexes.numel() == 0
+    else:
+        for a, b in zip(pack.vision.noisy_frame_indexes, student.vision.noisy_frame_indexes):
+            assert torch.equal(a, b)
+        assert pack.vision.timesteps.numel() == student.vision.timesteps.numel() and float(pack.vision.timesteps.abs().max()) == 0.0
+        assert float(student.vision.timesteps.abs().max()) > 0.0
+    # the frozen teacher runs on this pack and its rows are selected with the STUDENT's noisy indexes
+    with torch.no_grad():
+        hidden = net(pack, capture_only_layer=10)["captured_hidden"][student.vision.sequence_indexes]
+    sel, counts = select_noisy_vision_rows(hidden, student.vision.token_shapes, student.vision.noisy_frame_indexes)
+    assert counts == [32, 32] and sel.shape == (64, HIDDEN)
+    # a student pack with another layout is refused
+    other = pack_input_sequence(plans, [[4, 5, 6, 7]] * 2, clean, timesteps, special, latent_patch_size=PATCH)
+    with pytest.raises(RuntimeError, match="layout"):
+        m._build_repa_teacher_pack(plans, [[4, 5]] * 2, clean, timesteps, dict(skip_text=False, initial_temporal_offset=0), other)
+    with pytest.raises(ValueError, match="does not need a teacher pack"):
+        _model(RepaConfig(enabled=True, teacher="self_init", teacher_layer_index=10), net)._build_repa_teacher_pack(
+            plans, [[4, 5]] * 2, clean, timesteps, dict(skip_text=False, initial_temporal_offset=0), student
+        )
+
+
+def test_internal_targets_use_the_teacher_pack_when_given():
+    torch.manual_seed(41)
+    net = _net(projector_type="identity")
+    clean = _clean(1)
+    student = _student_pack_with_noise(clean)
+    teacher_pack = _pack(clean)  # clean latents (clean_t0-like: same plans)
+    m = _model(RepaConfig(enabled=True, teacher="self_init", teacher_layer_index=10, projector_type="identity", teacher_input="clean_t0"), net)
+    m._get_self_init_teacher_net = lambda iteration: net
+    on_student = m._internal_repa_targets(student, None, 0)
+    on_teacher_pack = m._internal_repa_targets(student, None, 0, teacher_pack=teacher_pack)
+    with torch.no_grad():
+        ref = net(teacher_pack, capture_only_layer=10)["captured_hidden"][student.vision.sequence_indexes]
+    ref, _ = select_noisy_vision_rows(ref, student.vision.token_shapes, student.vision.noisy_frame_indexes)
+    torch.testing.assert_close(on_teacher_pack.target, ref)
+    assert not torch.allclose(on_student.target, on_teacher_pack.target)  # noised vs clean input differ

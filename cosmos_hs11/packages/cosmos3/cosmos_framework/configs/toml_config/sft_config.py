@@ -421,17 +421,31 @@ class RepaTomlConfig(BaseModel):
         description=(
             "'vjepa2_1_vit_base_384' (ViT-B/16, default) or 'vjepa2_1_vit_large_384' (ViT-L/16); or 'dinov2_vitb14' "
             "(DINOv2 ViT-B/14 per frame; set teacher_input_size=224); or the INTERNAL teachers (cosmos_hs11 v115+): "
-            "'self_init' (frozen copy of the initial network, block teacher_layer_index) or 'wan_vae' (clean VAE latent "
-            "patches of the predicted frames)."
+            "'self_init' (frozen copy of the initial network, block teacher_layer_index), 'dcp_init' (frozen network "
+            "LOADED from teacher_checkpoint_path, e.g. the mid-trained Cosmos3-Edge DCP; block teacher_layer_index) or "
+            "'wan_vae' (clean VAE latent patches of the predicted frames)."
         ),
     )
     teacher_checkpoint_path: Optional[str] = Field(
-        default=None, description="Checkpoint file or dir; default $COSMOS_STORAGE/checkpoints/vjepa2_1/<release file>."
+        default=None,
+        description=(
+            "Checkpoint file or dir; default $COSMOS_STORAGE/checkpoints/vjepa2_1/<release file>. teacher='dcp_init': "
+            "REQUIRED, the DCP iteration dir holding model/ (e.g. '${oc.env:BASE_CHECKPOINT_PATH}')."
+        ),
     )
     teacher_layer_index: Optional[int] = Field(
         default=None,
         ge=1,
-        description="teacher='self_init' only: 1-based MoT block of the frozen initial network whose output is the target.",
+        description="teacher='self_init' / 'dcp_init' only: 1-based MoT block of the frozen network whose output is the target.",
+    )
+    teacher_input: Optional[str] = Field(
+        default=None,
+        description=(
+            "teacher='self_init' / 'dcp_init' only: what the frozen network sees for the predicted frames: 'same' (the "
+            "student's noised pack, default), 'clean_context' (the clean latents packed as conditioning frames: no noise, "
+            "no timestep embedding) or 'clean_t0' (the clean latents as generation frames at timestep 0). Text and action "
+            "tokens are always the student's."
+        ),
     )
     teacher_input_size: Optional[int] = Field(
         default=None, description="Square teacher input side (256 = native grid)."

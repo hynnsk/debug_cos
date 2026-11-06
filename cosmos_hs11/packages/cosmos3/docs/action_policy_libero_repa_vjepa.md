@@ -338,3 +338,61 @@ tokens at bs 128 per rank: 128 maps). (3) A resumed run would build the teacher 
 internal teachers. Tests: `repa/internal_teacher_test.py` (registry, identity projector, token targets through the network,
 capture-only forward, wan_vae/self_init targets, loss block with different widths, six end-to-end training steps on the tiny
 model), `toml_config/internal_teacher_toml_test.py`. Not GPU-smoked.
+
+## Clean-frame targets: frozen-network teachers on the un-noised predicted frames, the mid-trained Cosmos3-Edge teacher and DINOv2 (cosmos_hs11 v126-v137, 2026-11-06)
+
+Why: in v115-v120 the `self_init` teacher ran on the SAME noised packed sequence as the student, so its target was a feature
+of noisy frames. v126+ aligns the student's noised predicted frames (latent frames 1..4 = raw frames 2..17) with a teacher
+feature of the CLEAN frames 2..17: the student denoises, the teacher looks at the answer. Three teachers, one knob:
+
+| `[model.repa] teacher` | frozen network | weights | new pieces |
+| --- | --- | --- | --- |
+| `"self_init"` | the network as loaded (Reptile theta + fresh heads) | copied at the first step (v115+) | `teacher_input` |
+| `"dcp_init"` (new) | the same architecture | LOADED from `teacher_checkpoint_path` = a DCP iteration dir holding `model/` (recipes: `${oc.env:BASE_CHECKPOINT_PATH}` = the mid-trained Cosmos3-Edge). Every tensor of the network must exist in the checkpoint (strict, `load_net_from_dcp`); `net_ema.*` / extra keys are ignored. Built lazily at the first step like `self_init`, sharded like the student, bf16, never trained | `NETWORK_REPA_TEACHERS`, `_get_dcp_init_teacher_net`, `load_net_from_dcp` |
+| `"dinov2_vitb14"` | external image encoder | HF `facebook/dinov2-base` | unchanged (v113 setting: 224 px, avgpool to 4x5x5 per view); it already reads the clean raw frames 2..17 |
+
+`teacher_input` (frozen-network teachers only; `RepaConfig.teacher_input`, TOML `[model.repa] teacher_input`):
+
+* `"same"` (default) -- the student's pack (v115-v120 behaviour, bit-identical).
+* `"clean_context"` (the v126-v133 recipes) -- a second pack is built from the same text / plans with EVERY latent frame
+  listed as a conditioning frame (`condition_frame_indexes_vision = all`): the clean latents are never replaced by the
+  noised ones and no timestep embedding is added, i.e. the inverse-dynamics view of the clip. The token layout is identical
+  (the packer's vision layout does not depend on the condition set; checked at runtime), so the student's
+  `noisy_frame_indexes` select the target rows from the teacher's captured hidden state as before.
+* `"clean_t0"` -- the same plans as the student, clean latents, timesteps 0 (the t=0 embedding IS added to the predicted frames).
+
+In both clean modes the action tokens and their timesteps are copied from the student's pack (its noised action chunk) and
+the text is the student's (CFG dropout included), so the teacher input differs from the student's in the video noise only.
+Cost: one extra pack per step (CPU) on top of the teacher forward of v115+. Pieces: `OmniMoTModel._build_repa_teacher_pack`,
+`_repa_teacher_pack_mode`, `_internal_repa_targets(..., teacher_pack=)`, `_get_frozen_teacher_net`.
+
+Recipes (= `action_policy_libero_10_edge_reptileinit_v111.toml`: fresh heads, head LR x5, ranking hinge relative 0.3 / w 1.0,
+with `experiment = action_policy_libero_edge_repa`, the `[model.repa]` block and `"repa_"` in `keys_to_skip_loading`);
+launchers `examples/launch_sft_action_policy_libero_10_edge_reptileinit_v126..v137.sh` (= the v111 launcher, ports
+50847-50858). All use the REPA MLP projector on the student side; the relation maps are computed on its output.
+
+| recipe | teacher | student block | teacher block | feature cosine w | cosine-map L1 w (margin 0.1) |
+| --- | --- | --- | --- | --- | --- |
+| v126 | self_init, clean_context | 14 | 14 | 5.0 | 0 |
+| v127 | self_init, clean_context | 24 | 24 | 5.0 | 0 |
+| v128 | self_init, clean_context | 14 | 14 | 0 | 5.0 |
+| v129 | self_init, clean_context | 24 | 24 | 0 | 5.0 |
+| v130 | dcp_init (Cosmos3-Edge), clean_context | 14 | 14 | 5.0 | 0 |
+| v131 | dcp_init (Cosmos3-Edge), clean_context | 24 | 24 | 5.0 | 0 |
+| v132 | dcp_init (Cosmos3-Edge), clean_context | 14 | 14 | 0 | 5.0 |
+| v133 | dcp_init (Cosmos3-Edge), clean_context | 24 | 24 | 0 | 5.0 |
+| v134 | dinov2_vitb14 | 14 | - | 5.0 | 0 |
+| v135 | dinov2_vitb14 | 24 | - | 5.0 | 0 |
+| v136 | dinov2_vitb14 | 14 | - | 0 | 5.0 |
+| v137 | dinov2_vitb14 | 24 | - | 0 | 5.0 |
+
+Env: as v111 (`LIBERO_ROOT`, `REPTILE_CKPT_PATH`, `META_ACTION_INIT_PATH` is checked by the launcher although the heads are
+fresh) plus, for v130-v133, `BASE_CHECKPOINT_PATH` = the mid-trained Cosmos3-Edge DCP dir (the launcher requires it
+explicitly and refuses `BASE_CHECKPOINT_PATH == REPTILE_CKPT_PATH`; the other reptileinit launchers default it to the Reptile
+dir, which would silently turn the teacher into `self_init`). v134-v137 need the DINOv2 weights in `$HF_HUB_CACHE`.
+Notes. (1) v126 / v130 at iteration 0: student (noised input) != teacher (clean input) even with identical weights, so the
+loss starts above 0 unlike v118. (2) Memory: like v115+ (a second bf16 copy of the network, one extra no-grad forward up to
+the teacher block); the clean pack adds the action / text / clean-latent tensors of one more packed sequence.
+Tests: `repa/internal_teacher_test.py` (registry, dcp_init validation, DCP load into a fresh tiny network, the two clean
+packs vs the student pack, end-to-end training steps with self_init + clean modes and dcp_init),
+`toml_config/clean_teacher_toml_test.py` (v126-v137 = v111 + the repa block, launchers, ports). Not GPU-smoked.

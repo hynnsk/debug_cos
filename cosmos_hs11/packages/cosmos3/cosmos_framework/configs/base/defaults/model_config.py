@@ -233,12 +233,28 @@ class RepaConfig:
     # patches (vae2llm input, C * p * p per token) of the predicted frames. Targets are built in MoT token order
     # (RepaTokenTargets), so teacher_input_size / teacher_num_frames / target_adapter / the teacher grid are unused;
     # projector_type="identity" compares h_k itself (self_init, or any relation-map-only arm).
+    # cosmos_hs11 v130+: "dcp_init" = like "self_init", but the frozen network is LOADED from the DCP checkpoint
+    # ``teacher_checkpoint_path`` (e.g. the mid-trained Cosmos3-Edge) instead of being a copy of the weights as loaded.
     teacher: str = "vjepa2_1_vit_base_384"
     # Explicit checkpoint file/dir. None = $COSMOS_STORAGE/checkpoints/vjepa2_1/<release file> (download if absent).
+    # teacher="dcp_init": REQUIRED, the DCP iteration dir holding model/ (or that model/ dir itself) the frozen teacher
+    # network is loaded from; every tensor of the network must exist in it (extra keys such as net_ema.* are ignored).
     teacher_checkpoint_path: str | None = None
-    # teacher="self_init" only: 1-based MoT block whose output the frozen initial network provides as the target
+    # teacher="self_init" / "dcp_init" only: 1-based MoT block whose output the frozen network provides as the target
     # (e.g. 28 = the last block, 14 = the same depth as layer_index). None for every other teacher.
     teacher_layer_index: int | None = None
+    # cosmos_hs11 v126+ (frozen-network teachers self_init / dcp_init only): what the teacher sees for the PREDICTED
+    # frames (latent frames 1..4 = raw frames 2..17):
+    #   same          -- the student's packed sequence itself (same noised latents, same t; the v115-v120 behaviour);
+    #   clean_context -- the CLEAN latents packed as conditioning frames (condition_mask 1, no timestep embedding),
+    #                    i.e. the inverse-dynamics view of the clip: the raw frames 2..17 without any noise;
+    #   clean_t0      -- the CLEAN latents kept as generation frames with timestep 0 (the t=0 embedding is added).
+    # Text and action tokens are the student's in every mode (the noised action chunk included), so the teacher input
+    # differs from the student's in the video noise only. Must stay "same" for wan_vae and the external encoders
+    # (DINOv2 / V-JEPA already read the clean raw frames).
+    teacher_input: str = attrs.field(
+        default="same", validator=attrs.validators.in_({"same", "clean_context", "clean_t0"})
+    )
     # Square input side for the teacher. 256 = the V-JEPA 2.1 pretraining RoPE grid (16x16 patches) and LIBERO's
     # native camera resolution; other sizes are resized bilinearly and handled by RoPE interpolation.
     teacher_input_size: int = 256

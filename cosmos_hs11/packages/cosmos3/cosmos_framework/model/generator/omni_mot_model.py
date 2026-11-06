@@ -84,6 +84,7 @@ from cosmos_framework.model.generator.repa.masked_prediction import (
 )
 from cosmos_framework.model.generator.repa.sigreg import sigreg_loss
 from cosmos_framework.model.generator.repa.teachers import (
+    NETWORK_REPA_TEACHERS,
     InternalRepaTeacher,
     build_repa_teacher,
     is_internal_repa_teacher,
@@ -544,7 +545,7 @@ class OmniMoTModel(ImaginaireModel):
         ``self_init``, ``C * p * p`` (the vae2llm input width) for ``wan_vae``."""
         repa_cfg = self.config.repa
         kind = self.repa_internal_teacher
-        if kind == "self_init":
+        if kind in NETWORK_REPA_TEACHERS:
             return 0
         if kind == "wan_vae":
             p = int(self.config.diffusion_expert_config.patch_spatial)
@@ -663,22 +664,48 @@ class OmniMoTModel(ImaginaireModel):
         if str(getattr(repa_cfg, "student_upsampler", "none")) != "none" or tuple(repa_cfg.target_subgrid_thw) != (1, 1, 1):
             raise NotImplementedError("internal REPA teachers compare the MoT tokens themselves (no upsampler / sub-grid)")
         layer = getattr(repa_cfg, "teacher_layer_index", None)
-        if kind == "self_init":
+        teacher_input = str(getattr(repa_cfg, "teacher_input", "same"))
+        if kind in NETWORK_REPA_TEACHERS:
             if layer is None or int(layer) < 1:
                 raise ValueError(
-                    "repa.teacher='self_init' needs repa.teacher_layer_index: the 1-based MoT block of the frozen "
-                    "initial network whose output is the target (e.g. 28 = last block, 14 = same depth as layer_index)"
+                    f"repa.teacher={kind!r} needs repa.teacher_layer_index: the 1-based MoT block of the frozen "
+                    "network whose output is the target (e.g. 28 = last block, 14 = same depth as layer_index)"
                 )
-        elif layer is not None:
-            raise ValueError("repa.teacher_layer_index is only meaningful for repa.teacher='self_init'")
+            if teacher_input not in ("same", "clean_context", "clean_t0"):
+                raise ValueError(
+                    f"repa.teacher_input must be 'same', 'clean_context' or 'clean_t0', got {teacher_input!r}"
+                )
+        else:
+            if layer is not None:
+                raise ValueError("repa.teacher_layer_index is only meaningful for repa.teacher='self_init' / 'dcp_init'")
+            if teacher_input != "same":
+                raise ValueError(
+                    f"repa.teacher_input={teacher_input!r} is only meaningful for the frozen-network teachers "
+                    "('self_init' / 'dcp_init'); wan_vae reads the clean latents anyway"
+                )
+        if kind == "dcp_init" and not str(getattr(repa_cfg, "teacher_checkpoint_path", None) or "").strip():
+            raise ValueError(
+                "repa.teacher='dcp_init' needs repa.teacher_checkpoint_path: the DCP iteration dir (holding model/) the "
+                "frozen teacher network is loaded from, e.g. the mid-trained Cosmos3-Edge checkpoint"
+            )
         embed_dim = self._repa_teacher_embed_dim() or int(getattr(self.net, "hidden_size", 0))
         handle = InternalRepaTeacher(kind, embed_dim, self._repa_teacher_grid_thw(), None if layer is None else int(layer))
         object.__setattr__(self, "repa_teacher", handle)
-        what = (
-            f"frozen copy of the network as loaded (built lazily at the first step), MoT block {layer} residual stream"
-            if kind == "self_init"
-            else "clean Wan VAE latent patches of the predicted frames (vae2llm input)"
-        )
+        if kind == "self_init":
+            what = f"frozen copy of the network as loaded (built lazily at the first step), MoT block {layer} residual stream"
+        elif kind == "dcp_init":
+            what = (
+                f"frozen network loaded from {repa_cfg.teacher_checkpoint_path} (built lazily at the first step), "
+                f"MoT block {layer} residual stream"
+            )
+        else:
+            what = "clean Wan VAE latent patches of the predicted frames (vae2llm input)"
+        if kind in NETWORK_REPA_TEACHERS:
+            what += "; predicted frames seen by the teacher = " + {
+                "same": "the student's noised pack",
+                "clean_context": "the CLEAN latents as conditioning frames (no noise, no timestep embedding)",
+                "clean_t0": "the CLEAN latents as generation frames at timestep 0",
+            }[teacher_input]
         log.info(
             f"REPA enabled with INTERNAL teacher {kind!r}: target = {what} (D={embed_dim}), student = MoT block "
             f"{repa_cfg.layer_index}, projector={repa_cfg.projector_type}, loss_weight={repa_cfg.loss_weight}, "
@@ -766,21 +793,144 @@ class OmniMoTModel(ImaginaireModel):
         )
         return net
 
+    def _get_dcp_init_teacher_net(self, iteration: int) -> torch.nn.Module:
+        """cosmos_hs11 v130+ (``repa.teacher="dcp_init"``): a frozen network with the architecture of the student, LOADED
+        from the DCP checkpoint ``repa.teacher_checkpoint_path`` (e.g. the mid-trained Cosmos3-Edge). Built once at first
+        use, sharded like the student, outside the module registry (not trained, not checkpointed)."""
+        net = getattr(self, "_dcp_init_teacher_net", None)
+        if net is not None:
+            return net
+        path = str(self.config.repa.teacher_checkpoint_path)
+        dtype = self.precision if self.precision in (torch.bfloat16, torch.float16) else torch.float32
+        with misc.timer("REPA dcp_init teacher: build a frozen copy of the network and load it from DCP"):
+            net = self.build_net(
+                dtype=dtype, mp_policy=None, ac_config=ActivationCheckpointingConfig(mode="none"), repa_enabled=False
+            )
+            loaded = load_net_from_dcp(net, path)
+            net.requires_grad_(False)
+            net.eval()
+        object.__setattr__(self, "_dcp_init_teacher_net", net)
+        log.info(
+            f"REPA dcp_init teacher ready: {loaded} tensors loaded from {path} into a frozen {dtype} network; its MoT "
+            f"block {self.config.repa.teacher_layer_index} output is the target (iteration {iteration})"
+        )
+        return net
+
+    def _get_frozen_teacher_net(self, iteration: int) -> torch.nn.Module:
+        """The frozen NETWORK teacher of the internal REPA teachers: ``self_init`` (copy of the loaded weights) or
+        ``dcp_init`` (loaded from ``repa.teacher_checkpoint_path``)."""
+        kind = self.repa_internal_teacher
+        if kind == "self_init":
+            return self._get_self_init_teacher_net(iteration)
+        if kind == "dcp_init":
+            return self._get_dcp_init_teacher_net(iteration)
+        raise ValueError(f"REPA teacher {kind!r} is not a frozen network teacher ({NETWORK_REPA_TEACHERS})")
+
+    def _repa_teacher_pack_mode(self) -> str:
+        """``repa.teacher_input`` when a frozen-network teacher gets its OWN packed sequence (``clean_context`` /
+        ``clean_t0``), else ``"same"`` (the student's pack; also for wan_vae and every external teacher)."""
+        if getattr(self, "repa_internal_teacher", None) not in NETWORK_REPA_TEACHERS:
+            return "same"
+        return str(getattr(self.config.repa, "teacher_input", "same"))
+
+    def _build_repa_teacher_pack(
+        self,
+        sequence_plans: list[SequencePlan],
+        input_text_indexes: list[list[int]],
+        gen_data_clean: GenerationDataClean,
+        timesteps_vision: torch.Tensor,
+        memory_info: dict,
+        student_pack: PackedSequence,
+    ) -> PackedSequence:
+        """cosmos_hs11 v126+: the packed sequence a frozen-network REPA teacher runs on when ``repa.teacher_input`` asks for
+        the CLEAN predicted frames. Same text (CFG dropout included) and plans as the student, the vision tokens are the
+        clean latents (never replaced by the noised ones):
+
+        * ``clean_context`` -- every latent frame is packed as a conditioning frame (condition_mask 1, no timestep
+          embedding; the inverse-dynamics view of the clip);
+        * ``clean_t0`` -- the student's plans with timestep 0 on the predicted frames (the t=0 embedding is added).
+
+        The action tokens and timesteps are the student's (its noised chunk), so the teacher input differs from the
+        student's in the video noise only. The vision token layout must match the student's (the student's
+        ``noisy_frame_indexes`` select the target rows from the teacher's hidden state); the packer's layout does not
+        depend on the condition set, which is checked here anyway. CPU tensors in, CPU pack out (``to_cuda`` by the caller).
+        """
+        mode = self._repa_teacher_pack_mode()
+        if mode == "clean_context":
+            items = getattr(gen_data_clean, "num_vision_items_per_sample", None)
+            if items is not None and any(int(n) != 1 for n in items):
+                raise NotImplementedError("repa.teacher_input='clean_context' expects one vision item per sample")
+            plans: list[SequencePlan] = []
+            cursor = 0
+            for plan in sequence_plans:
+                if plan.has_vision:
+                    num_latent_frames = int(gen_data_clean.x0_tokens_vision[cursor].shape[2])
+                    cursor += 1
+                    plans.append(
+                        dataclasses.replace(plan, condition_frame_indexes_vision=list(range(num_latent_frames)))
+                    )
+                else:
+                    plans.append(plan)
+            timesteps = timesteps_vision
+        elif mode == "clean_t0":
+            plans = list(sequence_plans)
+            timesteps = torch.zeros_like(timesteps_vision)
+        else:
+            raise ValueError(f"repa.teacher_input={mode!r} does not need a teacher pack")
+        pack = self._pack_input_sequence(
+            plans,
+            input_text_indexes,
+            gen_data_clean,
+            timesteps.cpu(),
+            skip_text_tokens=memory_info["skip_text"],
+            initial_mrope_temporal_offset=memory_info["initial_temporal_offset"],
+        )
+        if pack.action is not None and student_pack.action is not None:
+            pack.action.tokens = list(student_pack.action.tokens)
+            pack.action.timesteps = student_pack.action.timesteps
+        s, t = student_pack.vision, pack.vision
+        same_layout = (
+            (s is None) == (t is None)
+            and int(pack.sequence_length) == int(student_pack.sequence_length)
+            and (
+                s is None
+                or (
+                    list(s.token_shapes) == list(t.token_shapes)
+                    and torch.equal(
+                        torch.as_tensor(s.sequence_indexes).cpu(), torch.as_tensor(t.sequence_indexes).cpu()
+                    )
+                )
+            )
+        )
+        if not same_layout:
+            raise RuntimeError(
+                f"REPA teacher pack ({mode}) does not share the student's vision token layout; the student's "
+                "noisy_frame_indexes could not select the teacher rows"
+            )
+        return pack
+
     def _internal_repa_targets(
-        self, packed_sequence: PackedSequence, clean_vision_tokens: list[torch.Tensor] | None, iteration: int
+        self,
+        packed_sequence: PackedSequence,
+        clean_vision_tokens: list[torch.Tensor] | None,
+        iteration: int,
+        teacher_pack: PackedSequence | None = None,
     ) -> RepaTokenTargets | None:
         """Targets of the internal teachers in MoT token order (predicted-frame vision tokens only, sample-major):
-        ``self_init`` runs the frozen initial network on the SAME noised packed sequence up to block
-        ``teacher_layer_index``; ``wan_vae`` patchifies the CLEAN latents exactly like ``_encode_vision`` does."""
+        ``self_init`` / ``dcp_init`` run the frozen network up to block ``teacher_layer_index`` on the student's noised
+        packed sequence, or on ``teacher_pack`` when given (cosmos_hs11 v126+: the clean-frame pack of
+        :meth:`_build_repa_teacher_pack`, same token layout); ``wan_vae`` patchifies the CLEAN latents exactly like
+        ``_encode_vision`` does."""
         kind = self.repa_internal_teacher
         vision = packed_sequence.vision
         if kind is None or vision is None or vision.tokens is None:
             return None
         with torch.no_grad():
-            if kind == "self_init":
-                teacher = self._get_self_init_teacher_net(iteration)
-                out = teacher(packed_seq=packed_sequence, capture_only_layer=int(self.config.repa.teacher_layer_index))
-                rows = out["captured_hidden"][vision.sequence_indexes]  # [N_vision, hidden_size]
+            if kind in NETWORK_REPA_TEACHERS:
+                teacher = self._get_frozen_teacher_net(iteration)
+                source = packed_sequence if teacher_pack is None else teacher_pack
+                out = teacher(packed_seq=source, capture_only_layer=int(self.config.repa.teacher_layer_index))
+                rows = out["captured_hidden"][vision.sequence_indexes]  # [N_vision, hidden_size] (same layout)
             else:
                 if clean_vision_tokens is None:
                     raise RuntimeError("wan_vae REPA teacher needs the clean latents captured before the noise replacement")
@@ -1866,6 +2016,11 @@ class OmniMoTModel(ImaginaireModel):
             skip_text_tokens=memory_info["skip_text"],
             initial_mrope_temporal_offset=memory_info["initial_temporal_offset"],
         )
+        # cosmos_hs11 v126+: a frozen-network REPA teacher may get its own pack of the CLEAN predicted frames
+        # (repa.teacher_input); it is built below, once the student's action tokens are noised.
+        repa_teacher_pack_timesteps = None
+        if getattr(self, "repa_internal_teacher", None) in NETWORK_REPA_TEACHERS and self._repa_teacher_pack_mode() != "same":
+            repa_teacher_pack_timesteps = timesteps_vision.cpu()
 
         # Under independent_action_schedule, overwrite the vision-based action timestep the
         # packer injected with the action timestep, so the denoiser's action timestep embedding
@@ -1954,6 +2109,13 @@ class OmniMoTModel(ImaginaireModel):
             clean_vision_tokens = list(packed_sequence.vision.tokens)
         self._replace_clean_with_noised(packed_sequence, gen_data_noised)
 
+        repa_teacher_pack: PackedSequence | None = None
+        if repa_teacher_pack_timesteps is not None:
+            repa_teacher_pack = self._build_repa_teacher_pack(
+                sequence_plans, input_text_indexes, gen_data_clean, repa_teacher_pack_timesteps, memory_info, packed_sequence
+            )
+            repa_teacher_pack.to_cuda()
+
         # Move packed sequence to CUDA
         packed_sequence.to_cuda()
 
@@ -1981,7 +2143,9 @@ class OmniMoTModel(ImaginaireModel):
             # cosmos_hs11 v115+: targets from the frozen initial network / the clean VAE latents, in MoT token order
             if data_batch is not None:
                 data_batch.pop(getattr(self.config.repa, "native_video_key", "video_native"), None)  # not needed
-            repa_teacher_tokens = self._internal_repa_targets(packed_sequence, clean_vision_tokens, iteration)
+            repa_teacher_tokens = self._internal_repa_targets(
+                packed_sequence, clean_vision_tokens, iteration, teacher_pack=repa_teacher_pack
+            )
         else:
             repa_teacher_tokens = self._resolve_repa_teacher_tokens(data_batch, sequence_plans, repa_teacher_tokens)
 
@@ -7372,6 +7536,57 @@ def _canonical_net_param_name(name: str) -> str:
     disagree on every block parameter name although they hold the same tensors (the cosmos_hs11 v115-v120 ``self_init``
     teacher is built without AC; the loaded network runs under the recipe's AC and, when enabled, torch.compile)."""
     return name.replace("_orig_mod.", "").replace("_checkpoint_wrapped_module.", "")
+
+
+def resolve_dcp_model_dir(path: str) -> "Path":
+    """``<iteration dir>`` (holding ``model/``) or the ``model/`` dir itself -> the DCP ``model`` directory."""
+    from pathlib import Path
+
+    p = Path(str(path)).expanduser()
+    if (p / "model").is_dir():
+        p = p / "model"
+    if not (p / ".metadata").is_file():
+        raise FileNotFoundError(
+            f"{path} is not a DCP model checkpoint: expected <iteration dir>/model/.metadata or <model dir>/.metadata"
+        )
+    return p
+
+
+def load_net_from_dcp(net: torch.nn.Module, path: str, *, key_prefix: str = "net.") -> int:
+    """Load the weights of a DCP ``model`` checkpoint (keys ``net.<param>``, as ``DistributedCheckpointer`` saves the
+    ImaginaireModel) into a freshly built network ``net`` (rank-local shards; the same parallelism as the student).
+
+    cosmos_hs11 v130+ (``repa.teacher="dcp_init"``): the frozen REPA teacher network loaded from another checkpoint,
+    e.g. the mid-trained Cosmos3-Edge. STRICT on the network side: every parameter / buffer of ``net`` must exist in
+    the checkpoint (a silently random teacher would be worse than a crash); extra checkpoint keys (``net_ema.*``,
+    heads of other domains) are ignored. Returns the number of tensors loaded."""
+    import torch.distributed.checkpoint as dcp
+    from torch.distributed.checkpoint import FileSystemReader
+    from torch.distributed.checkpoint.state_dict import StateDictOptions, get_model_state_dict, set_model_state_dict
+
+    model_dir = resolve_dcp_model_dir(path)
+    reader = FileSystemReader(str(model_dir))
+    available = set(reader.read_metadata().state_dict_metadata)
+    state = get_model_state_dict(net)  # canonical names (no AC / compile wrapper prefixes), sharded like ``net``
+    prefixed = {f"{key_prefix}{k}": v for k, v in state.items()}
+    missing = sorted(k for k in prefixed if k not in available)
+    if missing:
+        raise KeyError(
+            f"{len(missing)} of {len(prefixed)} network tensors are not in the DCP checkpoint {model_dir} "
+            f"(first: {missing[:5]}); the teacher must have the architecture of the checkpoint"
+        )
+    dcp.load(
+        prefixed,
+        storage_reader=reader,
+        planner=dcp.DefaultLoadPlanner(allow_partial_load=False),
+        no_dist=True,
+    )
+    set_model_state_dict(
+        net,
+        model_state_dict={k[len(key_prefix) :]: v for k, v in prefixed.items()},
+        options=StateDictOptions(strict=False),
+    )
+    return len(prefixed)
 
 
 def _is_reasoner_state_dict_key(key: str) -> bool:
