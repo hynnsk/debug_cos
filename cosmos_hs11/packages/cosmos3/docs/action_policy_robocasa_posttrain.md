@@ -107,6 +107,26 @@ Runs land in `$IMAGINAIRE_OUTPUT_ROOT/cosmos3_action_robocasa/edge_robocasa365_a
 (DCP every 1000 iterations, ~24 GB each; `[checkpoint].save_iter`). Re-running the same launcher auto-resumes.
 `EXTRA_TAIL_OVERRIDES="trainer.max_iter=5 trainer.run_validation_on_start=false"` is the smoke idiom.
 
+### Image augmentation (`[dataloader_train].use_image_augmentation`, 2026-11-06)
+
+`use_image_augmentation = true` in a TOML turns on the DROID-recipe train-time augmentation in `RoboCasaLeRobotDataset`
+(ported from `DROIDLeRobotDataset`, the same numbers as GR00T N1.5's RoboCasa365 data config and NVIDIA's own DROID
+policy post-training): random crop to 95 % of each view + resize back + ColorJitter(brightness 0.3, contrast 0.4,
+saturation 0.5, hue 0.08). One parameter draw per window is applied to all 17 frames of both views (the views are
+stacked along T before the transform; the crop never runs across the tile seam). The key is remapped to the
+`robocasa` TRAIN dataset node only; the val loader never augments (the reader also ignores the flag for
+`split != "train"`). Off by default, so the v1 runs (`*_10pct.toml` etc.) are unchanged; `*_baseinit_10pct_v2.toml`
+has it on. Unit tests: `robocasa_lerobot_dataset_augment_test.py` + the routing test in `robocasa_toml_test.py`.
+
+### Flow-matching loss weights (`[model.rectified_flow_training_config]`, 2026-11-06)
+
+`action_loss_weight`, `loss_scale` and `normalize_loss_by_active` are now TOML keys (section
+`[model.rectified_flow_training_config]`, routed to `model.config.rectified_flow_training_config.*`; omitted keys keep the
+experiment's values 10 / 10 / false). The `*_baseinit_*pct_v2.toml` recipes set `action_loss_weight = 100.0`: the Cosmos 3
+report calibrated the x10 for NORMALISED actions, while these recipes regress un-normalised 15D actions whose per-element
+MSE is ~10x smaller (5 constant dims, near-identity rot6d), so at 10 the action term is ~9 % of the objective against
+the vision term and at 100 roughly 50/50. Untested as an ablation so far; `--dryrun` shows the composed value.
+
 ## 3. Closed-loop evaluation (1 GPU; 30 rollouts/task by default)
 
 ```bash
@@ -144,3 +164,42 @@ Notes:
 - In an interactive zsh, `RUN=name   # comment` is NOT an assignment plus a comment (zsh runs `#` as a command and
   drops the assignment, so `$RUN` stays empty and `OUT_DIR` becomes `.../eval_robocasa/_iter3000`). Keep the
   assignment on its own line without a trailing comment, or `setopt interactive_comments`.
+
+## 4. Open-loop accuracy (no simulator; 4 GPUs, ~6 min)
+
+The closed-loop success rate of these recipes is near the floor (baseinit 10 %: 7.6 % mean over 18 tasks x 30 rollouts
+on 2026-11-02; the collaborator's 10 % freshheads / 30 % baseinit / 30 % freshheads / 100 % baseinit: 7 / 3.3 / 1.7 /
+2.4 %), while the validation flow-matching loss (0.014-0.02) looks fine. The FM loss is a velocity-regression error at
+random noise levels and says nothing about the SAMPLED chunk, so `cosmos_framework/simulation/robocasa/openloop_eval.py`
+measures that directly: for 12 windows per task it sends the first frame + language + EEF state token of a demo window
+to the normal policy server and compares the sampled 16-step chunk with the demonstrator's actions in the env's 12D
+space (`decode_15d_armfirst_to_env12`), against two trivial baselines (zero action, per-task mean action).
+
+```bash
+RUN_ROOT=$COSMOS_STORAGE/outputs/cosmos3_action_robocasa/edge_robocasa365_atomic/$RUN ITER=3000 \
+  sr 4 48 --qos=<qos> examples/eval_robocasa_openloop.sh                      # SPLIT=val (held-out demos, default)
+SPLIT=train EPISODES_PER_TASK=50 RUN_ROOT=... sr 4 48 examples/eval_robocasa_openloop.sh   # the run's own training demos
+```
+
+One `action_policy_server_robocasa` per allocated GPU (ports 8901+); results in
+`$COSMOS_STORAGE/outputs/eval_robocasa_openloop/<run>_iter<ITER>_<split>/openloop_summary.json` (+ `openloop.log`,
+`openloop_predictions.npz`). `~/.local/bin` (uv) must be on PATH, the server's HF download step shells out to it.
+Reading: small errors + high correlation = the policy fits the demos and closed-loop failure is compounding / precision;
+errors at the baseline level = the action head never fit the demos (recipe problem). val vs train separates
+underfitting (both bad) from overfitting (train good, val bad).
+
+Result for baseinit 10 % iter 3000, val split (216 windows, 2026-11-06): pos MAE 0.234 vs zero-action 0.242 vs
+per-task-mean 0.234 (R^2 vs task mean 0.07, corr 0.60); rot MAE 0.078, WORSE than zero (0.069); chunk-mean pos MAE
+0.19 vs task-mean 0.21; gripper sign accuracy 0.96 overall but 0.73 on windows with a gripper transition; |pred| ~ |gt|
+(not sluggish); error flat across the 16 steps; the sampler is deterministic (two queries of one input agree exactly).
+Variance structure of the 15D training actions (what the FM loss sees): gripper 60 %, eef_pos 29 %, rot6d 6 %,
+base + mode 5 % (five constant dims), so the action term (`action_loss_weight` 10 x ~0.009) is ~9 % of the training
+objective against the vision term (10 x ~0.094); on the LIBERO recipe (quantile_rot-normalised 10D actions) the two
+terms are of the same order. `action_loss_weight` / `normalize_loss_by_active` are not TOML keys but compose through
+the launcher's tail overrides, e.g.
+`EXTRA_TAIL_OVERRIDES="model.config.rectified_flow_training_config.action_loss_weight=100"`.
+Same checkpoint on its OWN training demos (`SPLIT=train EPISODES_PER_TASK=50`, 216 windows): pos MAE 0.172 vs
+zero-action 0.268 vs task-mean 0.261 (corr 0.82), rot MAE 0.063 < zero 0.071, gripper transition accuracy 0.81. So the
+head does fit the demos it was trained on and loses almost all of it on new demos of the same tasks and kitchens
+(val corr 0.60, R^2 0.07): the 10 % run (7.5 epochs over 50 demos/task) memorises trajectories instead of learning a
+visually grounded policy; it is a generalisation failure, not "not converged".

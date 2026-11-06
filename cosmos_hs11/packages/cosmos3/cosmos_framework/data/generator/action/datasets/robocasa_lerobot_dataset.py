@@ -36,6 +36,7 @@ from typing import Any
 
 import torch
 import torch.nn.functional as F
+import torchvision.transforms.v2 as T
 
 from cosmos_framework.data.generator.action.datasets.cosmos3_action_lerobot import (
     ActionNormalization,
@@ -271,6 +272,8 @@ class RoboCasaLeRobotDataset(BaseActionLeRobotDataset):
         base_encoding: str = "ego",
         episodes_per_task: int | None = None,
         episode_subset_seed: int = 42,
+        use_image_augmentation: bool = False,
+        jitter_after_compose: bool = False,
     ) -> None:
         if rotation_format != "rot6d":
             raise NotImplementedError(f"RoboCasa loader only supports rotation_format='rot6d', got {rotation_format!r}.")
@@ -293,6 +296,18 @@ class RoboCasaLeRobotDataset(BaseActionLeRobotDataset):
             enable_fast_init=enable_fast_init,
         )
         self._use_state = use_state
+        # cosmos_hs11: train-time image augmentation, the DROIDLeRobotDataset recipe (= GR00T N1.5's RoboCasa365
+        # data config: random crop to 95 % + resize back + ColorJitter 0.3/0.4/0.5/0.08). One parameter draw per
+        # window is applied to every frame of every view (the views are stacked along T before the transform), so
+        # the views keep agreeing on framing and lighting. Never applied to the val split: that loader must see the
+        # same windows every pass. TOML: [dataloader_train].use_image_augmentation.
+        if use_image_augmentation and split != "train":
+            log.warning(f"RoboCasa: use_image_augmentation ignored for split={split!r} (train only).")
+            use_image_augmentation = False
+        self._use_image_augmentation = use_image_augmentation
+        self._jitter_after_compose = jitter_after_compose
+        self._image_augmentor: T.Compose | None = None
+        self._color_augmentor: T.ColorJitter | None = None
         # use_base_action: widen the arm-only 10D contract so mobile tasks
         # (NavigateKitchen et al.) are representable. ``base_encoding`` selects HOW:
         #
@@ -540,6 +555,34 @@ class RoboCasaLeRobotDataset(BaseActionLeRobotDataset):
 
     # ---- video -------------------------------------------------------------
 
+    def _augment_views(self, views: list[torch.Tensor]) -> list[torch.Tensor]:
+        """Random crop (95 %) + resize back (+ ColorJitter unless ``jitter_after_compose``) on every view at once.
+
+        Mirrors ``DROIDLeRobotDataset._compose_multi_view``: the views are concatenated along T and pushed through one
+        ``T.Compose`` call, so torchvision v2 samples ONE crop window / one set of colour factors per call and applies
+        it to all frames of all views. Identity when augmentation is off, so existing runs are byte-identical.
+        """
+        if not self._use_image_augmentation:
+            return views
+        if self._image_augmentor is None:
+            _, _, h, w = views[0].shape
+            transforms: list[Any] = [
+                T.RandomCrop((int(h * 0.95), int(w * 0.95))),
+                T.Resize((h, w), antialias=True),
+            ]
+            color_jitter = T.ColorJitter(brightness=0.3, contrast=0.4, saturation=0.5, hue=0.08)
+            if self._jitter_after_compose:
+                self._color_augmentor = color_jitter
+            else:
+                transforms.append(color_jitter)
+            self._image_augmentor = T.Compose(transforms)
+        combined = self._image_augmentor(torch.cat(views, dim=0))
+        out, start = [], 0
+        for v in views:
+            out.append(combined[start : start + v.shape[0]])
+            start += v.shape[0]
+        return out
+
     def _compose_multi_view(self, sample: dict[str, Any]) -> torch.Tensor:
         """Tile wrist (top) + left/right third-person (bottom) into one frame.
 
@@ -554,13 +597,17 @@ class RoboCasaLeRobotDataset(BaseActionLeRobotDataset):
         wrist = sample[self._image_features["wrist"]]  # [T,C,H,W]
         left = sample[self._image_features["left"]]  # [T,C,H,W]
         right = sample[self._image_features["right"]]  # [T,C,H,W]
+        wrist, left, right = self._augment_views([wrist, left, right])
 
         _, _, h_w, w_w = wrist.shape
         half_h, half_w = h_w // 2, w_w // 2
         left = F.interpolate(left, size=(half_h, half_w), mode="bilinear", align_corners=False)
         right = F.interpolate(right, size=(half_h, half_w), mode="bilinear", align_corners=False)
         bottom = torch.cat([left, right], dim=-1)  # [T,C,H/2,W]
-        return torch.cat([wrist, bottom], dim=-2)  # [T,C,3H/2,W]
+        composite = torch.cat([wrist, bottom], dim=-2)  # [T,C,3H/2,W]
+        if self._color_augmentor is not None:
+            composite = self._color_augmentor(composite)
+        return composite
 
     def _compose_left_wrist(self, sample: dict[str, Any]) -> torch.Tensor:
         """LIBERO-style: agentview_left (left) + wrist (right), full-res, horizontal.
@@ -571,7 +618,11 @@ class RoboCasaLeRobotDataset(BaseActionLeRobotDataset):
         """
         left = sample[self._image_features["left"]]  # [T,C,H,W]
         wrist = sample[self._image_features["wrist"]]  # [T,C,H,W]
-        return torch.cat([left, wrist], dim=-1)  # [T,C,H,2W]
+        left, wrist = self._augment_views([left, wrist])  # crop per view (never across the tile seam)
+        composite = torch.cat([left, wrist], dim=-1)  # [T,C,H,2W]
+        if self._color_augmentor is not None:
+            composite = self._color_augmentor(composite)
+        return composite
 
 
     # ---- sample build ------------------------------------------------------

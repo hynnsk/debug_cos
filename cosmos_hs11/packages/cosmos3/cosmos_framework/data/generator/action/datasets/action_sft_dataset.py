@@ -313,6 +313,8 @@ def get_action_robocasa_sft_dataset(
     format_prompt_as_json: bool = False,
     iterable_shuffle: bool = False,
     episode_shuffle_seed: int = 42,
+    use_image_augmentation: bool = False,
+    jitter_after_compose: bool = False,
 ) -> Dataset:
     """Build the RoboCasa fixed-base action-policy SFT dataset.
 
@@ -362,6 +364,8 @@ def get_action_robocasa_sft_dataset(
         split=split,
         split_val_ratio=split_val_ratio,
         split_seed=split_seed,
+        use_image_augmentation=use_image_augmentation,  # train only; DROID / GR00T crop 0.95 + ColorJitter
+        jitter_after_compose=jitter_after_compose,
     )
     transform = ActionTransformPipeline(
         tokenizer_config=tokenizer_config,

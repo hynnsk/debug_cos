@@ -57,6 +57,7 @@ def _robocasa_packing_loader(
     max_samples_per_batch: int,
     num_workers: int,
     prefetch_factor: int,
+    use_image_augmentation: bool = False,
 ):
     """RoboCasa365 PackingDataLoader; train and val share everything but the split / fraction / dropout / seed.
 
@@ -106,6 +107,9 @@ def _robocasa_packing_loader(
                         episode_subset_seed=42,
                         iterable_shuffle=True,
                         episode_shuffle_seed=episode_shuffle_seed,
+                        # Train-time random crop (95 %) + resize + ColorJitter, the DROID recipe / GR00T N1.5's RoboCasa365
+                        # transform; off by default (the v1 runs had none), TOML [dataloader_train].use_image_augmentation.
+                        use_image_augmentation=use_image_augmentation,
                         resolution=None,  # keep 256x512 horizontal concat un-squished
                         max_action_dim="${model.config.max_action_dim}",
                         cfg_dropout_rate=cfg_dropout_rate,
@@ -260,6 +264,7 @@ action_policy_robocasa_edge = LazyDict(
             max_samples_per_batch=128,  # binding (token packing off): 128 windows/rank x 4 ranks = global 512
             num_workers=4,
             prefetch_factor=4,
+            use_image_augmentation=False,  # TOML [dataloader_train].use_image_augmentation = true to enable
         ),
         # Held-out validation: the seeded 1 % val split (5 demos/task = 90 episodes), no prompt dropout, its own shuffle
         # seed; every pass restarts at epoch 0 so successive val numbers use the same windows. Enabled from the TOML

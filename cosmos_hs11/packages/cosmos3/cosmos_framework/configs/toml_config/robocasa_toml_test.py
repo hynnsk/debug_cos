@@ -359,3 +359,46 @@ def test_robocasa_downloader_has_a_verified_hf_mirror_fallback(monkeypatch, tmp_
     setup = (ROOT / "examples" / "setup_robocasa365.sh").read_text()
     assert 'DOWNLOAD_SOURCE="${DOWNLOAD_SOURCE:-auto}"' in setup
     assert setup.count('--source "$DOWNLOAD_SOURCE"') == 2
+
+
+_AUG_NODE = "dataloader_train.dataloader.datasets.robocasa.dataset.use_image_augmentation"
+
+
+def test_toml_image_augmentation_switch_routes_to_the_train_dataset_only() -> None:
+    """[dataloader_train].use_image_augmentation -> the robocasa TRAIN dataset node (the val loader never augments);
+    the v1 TOMLs do not set it, so their composed config is unchanged."""
+    raw = tomllib.load(open(TOML_DIR / "action_policy_robocasa_edge_baseinit_10pct_v2.toml", "rb"))
+    assert raw["dataloader_train"]["use_image_augmentation"] is True
+    SFTExperimentConfig.model_validate(raw)
+    overrides = build_hydra_overrides(raw)
+    assert f"{_AUG_NODE}=True" in overrides or f"{_AUG_NODE}=true" in overrides
+    assert not any(o.startswith("dataloader_val") and "use_image_augmentation" in o for o in overrides)
+    for init in INITS:
+        v1 = _toml(init, 10)
+        assert "use_image_augmentation" not in v1["dataloader_train"]
+        assert not any(o.startswith(_AUG_NODE) for o in build_hydra_overrides(v1))
+
+
+_ALW_NODE = "model.config.rectified_flow_training_config.action_loss_weight"
+
+
+@pytest.mark.parametrize("frac", (10, 30, 100))
+def test_v2_baseinit_tomls_carry_the_v2_recipe_and_route_the_action_loss_weight(frac: int) -> None:
+    """v2 = the 2026-11-06 recipe: lr 2e-5, near-constant lr, image augmentation, action_loss_weight 100 from the TOML
+    ([model.rectified_flow_training_config] -> model.config.rectified_flow_training_config.*), fraction by name."""
+    raw = tomllib.load(open(TOML_DIR / f"action_policy_robocasa_edge_baseinit_{frac}pct_v2.toml", "rb"))
+    SFTExperimentConfig.model_validate(raw)
+    overrides = build_hydra_overrides(raw)
+    assert raw["model"]["rectified_flow_training_config"]["action_loss_weight"] == 100.0
+    assert f"{_ALW_NODE}=100.0" in overrides
+    assert raw["optimizer"]["lr"] == 2.0e-05 and raw["scheduler"]["cycle_lengths"] == [100000]
+    assert raw["dataloader_train"]["use_image_augmentation"] is True
+    assert raw["dataloader_train"].get("episodes_per_task") == FRACTIONS[frac]  # 50 / 150 / absent
+    assert _global_batch(raw) == GLOBAL_BATCH
+    assert raw["job"]["name"] == f"edge_robocasa365_atomic_{frac}pct_fullft_baseinit_v2"
+    # the v1 TOMLs do not touch the loss weights
+    assert "rectified_flow_training_config" not in _toml("baseinit", frac)["model"]
+    assert not any(
+        o.startswith("model.config.rectified_flow_training_config")
+        for o in build_hydra_overrides(_toml("baseinit", frac))
+    )

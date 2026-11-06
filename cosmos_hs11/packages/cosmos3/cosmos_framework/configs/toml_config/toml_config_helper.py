@@ -74,6 +74,9 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         ("dataloader_train", "episodes_per_task"): (
             "dataloader_train", "dataloader", "datasets", "robocasa", "dataset", "episodes_per_task",
         ),
+        ("dataloader_train", "use_image_augmentation"): (
+            "dataloader_train", "dataloader", "datasets", "robocasa", "dataset", "use_image_augmentation",
+        ),
         ("model",): ("model", "config"),
     },
     # VLM (VLMModelConfig): model.config.{parallelism, compile,
@@ -98,6 +101,7 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         ("model", "repa"): None,                                               # VFM-only REPA (V-JEPA) loss knobs
         ("model", "sigreg"): None,                                             # VFM-only visual-token SIGReg knobs
         ("model", "language_ranking"): None,                                   # VFM-only action-language ranking
+        ("model", "rectified_flow_training_config"): None,                     # VFM-only FM loss weights (cosmos_hs11)
         ("dataloader_train", "seed"): None,
         ("dataloader_train", "episode_balanced_sampling"): None,                # VFM/LIBERO-only knob
         ("optimizer", "eps"): None,                                            # VLM_OPTIMIZER_KWARGS has no eps field
@@ -116,6 +120,7 @@ PATH_REMAPS: dict[str, dict[tuple[str, ...], "tuple[str, ...] | None"]] = {
         ("dataloader_train", "max_caption_tokens"): None,                       # VFM-only knob — VLM packer caps via max_sequence_length
         ("dataloader_train", "episode_subset_path"): None,                      # LIBERO action-SFT-only knob
         ("dataloader_train", "episodes_per_task"): None,                        # RoboCasa action-SFT-only knob
+        ("dataloader_train", "use_image_augmentation"): None,                   # RoboCasa action-SFT-only knob
         ("dataloader_val",): None,                                             # VFM action-SFT-only section (cosmos_hs09)
         # Catch-all for any other model.* sub-keys
         ("model",): ("model", "config"),

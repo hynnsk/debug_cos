@@ -355,6 +355,32 @@ class LanguageRankingTomlConfig(BaseModel):
     )
 
 
+class RectifiedFlowTomlConfig(BaseModel):
+    """Flow-matching loss weights (cosmos_hs11). VFM only; lands at ``model.config.rectified_flow_training_config.*``
+    (``RectifiedFlowTrainingConfig`` in ``cosmos_framework/configs/base/defaults/model_config.py``). Omitted fields keep
+    the experiment's values (action_loss_weight 10, loss_scale 10)."""
+
+    model_config = _PYDANTIC_MODEL_CONFIG
+
+    action_loss_weight: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        description=(
+            "Multiplier of the action flow-matching loss in the total loss (the vision term is scaled by "
+            "``loss_scale``). The Cosmos 3 report sets 10 to balance NORMALISED actions against the vision term; the "
+            "RoboCasa365 recipes regress un-normalised 15D actions whose per-element MSE is ~10x smaller (5 constant "
+            "dims, near-identity rot6d), so the action term is ~9 % of the objective at 10 and ~50 % at 100."
+        ),
+    )
+    loss_scale: Optional[float] = Field(
+        default=None, ge=0.0, description="Multiplier of the vision (video) flow-matching loss. Recipe default 10."
+    )
+    normalize_loss_by_active: Optional[bool] = Field(
+        default=None,
+        description="Average each sample's FM loss over its active (noisy) tokens / valid channels only. Default False.",
+    )
+
+
 class RepaTomlConfig(BaseModel):
     """V-JEPA 2.1 representation-alignment (REPA) loss knobs. VFM only; lands at ``model.config.repa.*``
     (``cosmos_framework/configs/base/defaults/model_config.py::RepaConfig``). Omitted fields keep the
@@ -368,11 +394,15 @@ class RepaTomlConfig(BaseModel):
         description="Weight of the unweighted cosine loss (1 - cos) in the total loss. Recipe default 0.5.",
     )
     sigma_min: Optional[float] = Field(
-        default=None, ge=0.0, le=1.0,
+        default=None,
+        ge=0.0,
+        le=1.0,
         description="Apply the REPA terms only to samples with vision noise level sigma >= sigma_min (0 = clean). Default 0.",
     )
     sigma_max: Optional[float] = Field(
-        default=None, ge=0.0, le=1.0,
+        default=None,
+        ge=0.0,
+        le=1.0,
         description="Apply the REPA terms only to samples with vision noise level sigma <= sigma_max (1 = pure noise). Default 1.",
     )
     loss_weight_warmup_steps: Optional[int] = Field(
@@ -409,7 +439,8 @@ class RepaTomlConfig(BaseModel):
         description="Entry-wise distance of the relation loss: 'l2' (squared, default) or 'l1' (absolute).",
     )
     relation_margin: Optional[float] = Field(
-        default=None, ge=0.0,
+        default=None,
+        ge=0.0,
         description="VideoREPA TRD margin: relation-map differences within +-margin are not penalized (0 = plain distance; VideoREPA uses 0.1).",
     )
     layer_index: Optional[int] = Field(
@@ -614,6 +645,7 @@ class ModelConfig(BaseModel):
     repa: RepaTomlConfig = Field(default_factory=RepaTomlConfig)
     language_ranking: LanguageRankingTomlConfig = Field(default_factory=LanguageRankingTomlConfig)
     sigreg: SigRegTomlConfig = Field(default_factory=SigRegTomlConfig)
+    rectified_flow_training_config: RectifiedFlowTomlConfig = Field(default_factory=RectifiedFlowTomlConfig)
 
 
 # ---------------------------------------------------------------- optimizer
@@ -798,7 +830,9 @@ class TrainerConfig(BaseModel):
 
     model_config = _PYDANTIC_MODEL_CONFIG
 
-    seed: Optional[int] = Field(default=None, ge=0, description="Training RNG seed; omitted keeps the experiment default.")
+    seed: Optional[int] = Field(
+        default=None, ge=0, description="Training RNG seed; omitted keeps the experiment default."
+    )
 
     distributed_parallelism: str = Field(
         default="fsdp",
@@ -967,6 +1001,16 @@ class DataloaderTrainConfig(BaseModel):
             "this many seeded train episodes of EACH task shard (nested subsets; 50 = the RoboCasa365 paper's 10 %, "
             "150 = 30 %). Remapped to the 'robocasa' dataset node's 'episodes_per_task' (RoboCasaLeRobotDataset). "
             "None = every train episode (100 % = all but the seeded 1 % val hold-out). Skipped on VLM."
+        ),
+    )
+    use_image_augmentation: Optional[bool] = Field(
+        default=None,
+        description=(
+            "RoboCasa365 action-policy SFT only (action_policy_robocasa_edge, cosmos_hs11). Train-time image "
+            "augmentation of the DROID recipe (= GR00T N1.5's RoboCasa365 data config): random crop to 95 % + resize "
+            "back + ColorJitter(0.3, 0.4, 0.5, 0.08), one draw per window applied to every frame of both views. "
+            "Remapped to the 'robocasa' dataset node (RoboCasaLeRobotDataset.use_image_augmentation); the val loader "
+            "never augments. Default (None/false) = the un-augmented v1 runs. Skipped on VLM."
         ),
     )
 
