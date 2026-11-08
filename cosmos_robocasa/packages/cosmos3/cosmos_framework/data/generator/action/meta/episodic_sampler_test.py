@@ -1,0 +1,380 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+"""CPU tests for the episodic embodiment sampler and the batch packer."""
+
+import numpy as np
+import pytest
+import torch
+
+from cosmos_framework.data.generator.action.meta.episodic_sampler import (
+    EpisodicEmbodimentSampler,
+    pack_samples_into_batch,
+)
+from cosmos_framework.data.generator.action.meta.lazy_rows import (
+    EpisodeEntry,
+    EpisodeTable,
+    build_episode_table_from_rows,
+)
+
+
+def _table(num_episodes: int, num_tasks: int, frames: int, chunk: int = 16) -> EpisodeTable:
+    entries, flat = [], 0
+    for ep in range(num_episodes):
+        n = frames + (ep % 5)  # slightly varying lengths
+        entries.append(EpisodeEntry(ep, ep % num_tasks, flat, max(0, n - chunk), n))
+        flat += max(0, n - chunk)
+    return EpisodeTable(entries)
+
+
+def test_build_episode_table_from_rows() -> None:
+    episode_index = np.array([0, 0, 0, 0, 0, 1, 1, 1, 2, 2, 2, 2, 2, 2])
+    task_index = np.array([7] * 5 + [3] * 3 + [7] * 6)
+    table = build_episode_table_from_rows(episode_index, task_index, chunk_length=2)
+    assert [e.first_flat_index for e in table] == [0, 5, 8]
+    assert [e.num_windows for e in table] == [3, 1, 4]
+    assert [e.task_index for e in table] == [7, 3, 7]
+    assert table.blocks() == [(0, 3), (5, 1), (8, 4)]
+    assert table.by_task() == {7: [0, 2], 3: [1]}
+
+
+def test_sampler_disjointness_and_uniform_embodiments() -> None:
+    tables = {
+        "many_tasks": _table(200, 40, 60),
+        "two_tasks": _table(50, 2, 60),
+    }
+    sampler = EpisodicEmbodimentSampler(
+        tables, {"many_tasks": 20, "two_tasks": 8}, k_shot=5, q_query=4, windows_per_demo=8, disjoint_tasks="auto"
+    )
+    assert sampler.uses_disjoint_tasks("many_tasks") and not sampler.uses_disjoint_tasks("two_tasks")
+    rng = np.random.default_rng(0)
+    counts = {"many_tasks": 0, "two_tasks": 0}
+    for _ in range(400):
+        spec = sampler.sample(rng)
+        counts[spec.embodiment] += 1
+        assert len(spec.support) == 5 and len(spec.query) == 4
+        support_eps = {d.episode_index for d in spec.support}
+        query_eps = {d.episode_index for d in spec.query}
+        assert not (support_eps & query_eps)  # demonstrations never overlap
+        assert len(support_eps) == 5 and len(query_eps) == 4
+        table = sampler.tables[spec.embodiment]
+        by_ep = {e.episode_index: e for e in table}
+        for demo in spec.support + spec.query:
+            e = by_ep[demo.episode_index]
+            assert len(demo.window_indices) == 8
+            assert all(i in e.flat_indices for i in demo.window_indices)
+            assert len(set(demo.window_indices)) == 8  # enough windows -> no repeats
+        if spec.embodiment == "many_tasks":
+            assert spec.disjoint_tasks
+            assert not ({d.task_index for d in spec.support} & {d.task_index for d in spec.query})
+        else:
+            assert not spec.disjoint_tasks
+    # Uniform over embodiments (binomial(400, 0.5): 200 +- ~10 std).
+    assert abs(counts["many_tasks"] - 200) < 50, counts
+
+
+def test_sampler_short_demos_repeat_windows() -> None:
+    table = EpisodeTable([EpisodeEntry(i, i % 3, i * 3, 3, 19) for i in range(12)])
+    sampler = EpisodicEmbodimentSampler({"e": table}, {"e": 1}, k_shot=2, q_query=2, windows_per_demo=8)
+    spec = sampler.sample(np.random.default_rng(1))
+    for demo in spec.support:
+        assert len(demo.window_indices) == 8
+        assert set(demo.window_indices) <= set(range(demo.episode_index * 3, demo.episode_index * 3 + 3))
+
+
+def _fake_sample(domain: int, caption: str = "pick") -> dict:
+    return {
+        "video": torch.zeros(3, 17, 32, 32, dtype=torch.uint8),
+        "action": torch.zeros(16, 64),
+        "action_raw": torch.zeros(16, 10),
+        "text_token_ids": torch.tensor([1, 2, 3]),
+        "domain_id": torch.tensor(domain),
+        "raw_action_dim": torch.tensor(10),
+        "conditioning_fps": torch.tensor(20),
+        "image_size": torch.tensor([32.0, 32.0, 32.0, 32.0]),
+        "sequence_plan": {"has_text": True},
+        "ai_caption": caption,
+        "mode": "wam",
+        "viewpoint": "ego_view",
+        "idle_frames": torch.tensor(0),
+        "action_processing_record": object(),
+    }
+
+
+def test_pack_samples_into_batch_matches_packing_dataloader_layout() -> None:
+    batch = pack_samples_into_batch([_fake_sample(7), _fake_sample(7, "place")], "fractal")
+    assert batch["_num_samples"] == 2
+    assert isinstance(batch["video"], list) and len(batch["video"]) == 2
+    assert isinstance(batch["video"][0], list) and batch["video"][0][0].shape == (3, 17, 32, 32)
+    assert isinstance(batch["action"][0], list) and batch["action"][0][0].shape == (16, 64)
+    assert [int(d) for d in batch["domain_id"]] == [7, 7]
+    assert len(batch["sequence_plan"]) == 2 and isinstance(batch["sequence_plan"][0], dict)
+    assert len(batch["image_size"]) == 2 and batch["image_size"][0].shape == (4,)
+    assert batch["conditioning_fps"][0].shape == (1,)
+    assert batch["dataset_name"] == ["fractal", "fractal"]
+    assert batch["raw_action_dim"][0].item() == 10
+
+
+def test_pack_samples_into_batch_keeps_native_video_per_sample() -> None:
+    """cosmos_hs11 v11: the native REPA-teacher frames travel like ``video`` (one [C,T,H,W] uint8 per sample)."""
+    a, b = _fake_sample(7), _fake_sample(7, "place")
+    a["video_native"] = torch.full((3, 17, 48, 64), 1, dtype=torch.uint8)
+    b["video_native"] = torch.full((3, 17, 48, 64), 2, dtype=torch.uint8)
+    batch = pack_samples_into_batch([a, b], "fractal")
+    assert isinstance(batch["video_native"], list) and len(batch["video_native"]) == 2
+    first = batch["video_native"][0]
+    first = first[0] if isinstance(first, list) else first
+    assert first.dtype == torch.uint8 and tuple(first.shape)[-4:] == (3, 17, 48, 64) and int(first.max()) == 1
+    plain = pack_samples_into_batch([_fake_sample(7)], "fractal")
+    assert "video_native" not in plain  # keep_native_video off -> byte-identical layout to before
+
+
+def test_resize_native_video_clip_matches_the_teacher_resize() -> None:
+    from cosmos_framework.data.generator.action.meta.episodic_sampler import resize_native_video_clip
+
+    g = torch.Generator().manual_seed(0)
+    clip = torch.randint(0, 256, (3, 5, 48, 64), generator=g, dtype=torch.uint8)
+    out = resize_native_video_clip(clip, 16)
+    assert out.shape == (3, 5, 16, 16) and out.dtype == torch.uint8 and out.is_contiguous()
+    # what the DINOv2 teacher computes from the native clip (per frame, antialiased bilinear) up to uint8 rounding
+    ref = torch.nn.functional.interpolate(
+        clip.permute(1, 0, 2, 3).float(), size=(16, 16), mode="bilinear", align_corners=False, antialias=True
+    ).permute(1, 0, 2, 3)
+    assert (out.float() - ref).abs().max() <= 0.5 + 1e-4
+    same = resize_native_video_clip(out, 16)
+    assert same is out  # already the right size: no copy
+    with pytest.raises(ValueError):
+        resize_native_video_clip(clip[0], 16)
+
+
+def test_synchronized_dataset_resizes_native_video_in_load() -> None:
+    from cosmos_framework.data.generator.action.meta.episodic_sampler import (
+        EpisodicEmbodimentSampler,
+        SynchronizedMetaEpisodeIterableDataset,
+    )
+
+    class _DS:
+        def __getitem__(self, i):
+            s = _fake_sample(1)
+            s["video_native"] = torch.zeros(3, 17, 40, 56, dtype=torch.uint8)
+            return s
+
+    sampler = EpisodicEmbodimentSampler({"a": _table(20, 5, 100)}, {"a": 1}, k_shot=2, q_query=1, windows_per_demo=2)
+    d = SynchronizedMetaEpisodeIterableDataset({"a": _DS()}, sampler, max_samples_per_batch=4, seed=7, native_video_size=16)
+    s = d._load("a", [0, 1])
+    assert all(tuple(x["video_native"].shape) == (3, 17, 16, 16) for x in s)
+    d0 = SynchronizedMetaEpisodeIterableDataset({"a": _DS()}, sampler, max_samples_per_batch=4, seed=7)
+    assert tuple(d0._load("a", [0])[0]["video_native"].shape) == (3, 17, 40, 56)  # default: untouched
+    dfull = SynchronizedMetaEpisodeIterableDataset(
+        {"a": _DS()}, sampler, max_samples_per_batch=4, seed=7, native_video_size=16, native_video_full_res=["a"]
+    )
+    assert tuple(dfull._load("a", [0])[0]["video_native"].shape) == (3, 17, 40, 56)  # composite canvas: camera resolution kept
+
+
+def test_synchronized_dataset_specs_identical_across_ranks_and_shards_disjoint() -> None:
+    from cosmos_framework.data.generator.action.meta.episodic_sampler import (
+        EpisodicEmbodimentSampler,
+        SynchronizedMetaEpisodeIterableDataset,
+    )
+
+    tables = {"a": _table(20, 5, 100), "b": _table(24, 6, 100)}
+    sampler = EpisodicEmbodimentSampler(tables, {"a": 1, "b": 2}, k_shot=2, q_query=2, windows_per_demo=4)
+    ranks = []
+    for r in range(2):
+        d = SynchronizedMetaEpisodeIterableDataset({}, sampler, max_samples_per_batch=4, seed=7)
+        d.shard_rank, d.shard_world_size = r, 2
+        ranks.append(d)
+    for j in range(6):
+        s0, s1 = ranks[0].spec_for(j), ranks[1].spec_for(j)
+        assert s0.embodiment == s1.embodiment and s0.support_indices == s1.support_indices and s0.query_indices == s1.query_indices
+        sh0, sh1 = ranks[0].shard(s0.support_indices), ranks[1].shard(s0.support_indices)
+        assert not set(sh0) & set(sh1) and sorted(sh0 + sh1) == sorted(s0.support_indices)
+    # a resumed run (spec_offset) continues with different episodes
+    resumed = SynchronizedMetaEpisodeIterableDataset({}, sampler, max_samples_per_batch=4, seed=7, spec_offset=100)
+    assert any(resumed.spec_for(j).support_indices != ranks[0].spec_for(j).support_indices for j in range(3))
+    # a materialization failure is reported for the SAME spec id instead of desynchronizing the stream
+    item = next(iter(ranks[0]))  # datasets == {} -> _load raises
+    assert item["failed"] is True and item["spec_id"] == 0 and item["support"] == [] and "error" in item
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# cosmos_hs11 v4.1: grouped ("T tasks x d demos") meta-episodes
+# ---------------------------------------------------------------------------------------------------------------
+def _grouped_sampler(**kwargs) -> EpisodicEmbodimentSampler:
+    tables = {"many_tasks": _table(200, 40, 60), "two_tasks": _table(50, 2, 60)}  # 5 demos/task and 25 demos/task
+    return EpisodicEmbodimentSampler(
+        tables, {"many_tasks": 20, "two_tasks": 8}, k_shot=8, q_query=4, windows_per_demo=8, **kwargs
+    )
+
+
+def test_grouped_fraction_zero_reproduces_the_original_episode_stream() -> None:
+    base, off = _grouped_sampler(), _grouped_sampler(tasks_per_episode=4, grouped_episode_fraction=0.0)
+    for seed in range(20):
+        a, b = base.sample(np.random.default_rng(seed)), off.sample(np.random.default_rng(seed))
+        assert a == b and not b.grouped and b.summary()["grouped"] is False
+
+
+def test_grouped_episodes_are_tasks_times_demos_with_uniform_fill_when_tasks_are_scarce() -> None:
+    from collections import Counter
+
+    on = _grouped_sampler(tasks_per_episode=4, grouped_episode_fraction=1.0)
+    rng = np.random.default_rng(1)
+    seen = {"many_tasks": 0, "two_tasks": 0}
+    for _ in range(200):
+        spec = on.sample(rng)
+        seen[spec.embodiment] += 1
+        assert spec.grouped and spec.summary()["grouped"] is True
+        support_eps = {d.episode_index for d in spec.support}
+        assert len(spec.support) == 8 and len(support_eps) == 8  # always k_shot distinct demonstrations
+        assert not (support_eps & {d.episode_index for d in spec.query}) and len(spec.query) == 4
+        counts = Counter(d.task_index for d in spec.support)
+        if spec.embodiment == "many_tasks":
+            assert sorted(counts.values()) == [2, 2, 2, 2]  # 4 tasks x 2 demos, every task has 5 demos
+            assert spec.summary()["num_support_tasks"] == 4
+            assert not ({d.task_index for d in spec.support} & {d.task_index for d in spec.query})  # disjoint auto
+        else:
+            assert set(counts) == {0, 1} and all(c >= 2 for c in counts.values())  # 2 x 2 grouped + 4 uniform fill
+        for demo in spec.support:
+            assert len(demo.window_indices) == 8
+    assert min(seen.values()) > 0
+
+
+def test_grouped_fraction_mixes_episode_kinds_and_bad_settings_fail() -> None:
+    mixed = _grouped_sampler(tasks_per_episode=4, grouped_episode_fraction=0.5)
+    rng = np.random.default_rng(3)
+    grouped = sum(mixed.sample(rng).grouped for _ in range(400))
+    assert abs(grouped - 200) < 50, grouped  # binomial(400, 0.5)
+    with pytest.raises(ValueError):
+        _grouped_sampler(tasks_per_episode=4, grouped_episode_fraction=1.5)
+    with pytest.raises(ValueError):
+        _grouped_sampler(grouped_episode_fraction=0.5)  # tasks_per_episode required
+    with pytest.raises(ValueError):
+        _grouped_sampler(tasks_per_episode=3, grouped_episode_fraction=0.5)  # 8 % 3 != 0
+
+
+def test_meta_sampler_config_and_override_keys_carry_the_grouped_knobs() -> None:
+    from cosmos_framework.data.generator.action.meta.episodic_sampler import MetaSamplerConfig
+    from cosmos_framework.scripts.train_action_meta import SAMPLER_OVERRIDE_KEYS
+
+    cfg = MetaSamplerConfig()
+    assert cfg.tasks_per_episode is None and cfg.grouped_episode_fraction == 0.0
+    assert {"tasks_per_episode", "grouped_episode_fraction", "cfg_dropout_rate", "embodiment_weights"} <= SAMPLER_OVERRIDE_KEYS
+
+
+# ---------------------------------------------------------------------------------------------------------------
+# cosmos_hs11 v18: language-ranking negatives inside a meta-episode
+# ---------------------------------------------------------------------------------------------------------------
+def _spec(support, query, disjoint=True):
+    from cosmos_framework.data.generator.action.meta.episodic_sampler import MetaEpisodeSpec, SampledDemo
+
+    return MetaEpisodeSpec(
+        embodiment="a",
+        domain_id=1,
+        support=[SampledDemo(e, t, w) for e, t, w in support],
+        query=[SampledDemo(e, t, w) for e, t, w in query],
+        disjoint_tasks=disjoint,
+        grouped=True,
+    )
+
+
+_TEXTS = {0: "open the drawer", 1: "close the drawer | shut the drawer", 2: "pick the cup", 5: "held-out sentence"}
+
+
+def test_episode_ranking_negatives_come_from_the_other_support_tasks() -> None:
+    from cosmos_framework.data.generator.action.meta.episodic_sampler import _paraphrases, episode_ranking_negatives
+
+    spec = _spec(
+        support=[(0, 0, (0, 1)), (1, 1, (2, 3)), (2, 2, (4,))],
+        query=[(3, 5, (10, 11)), (4, 1, (12,))],  # task 5 = held-out instruction, task 1 = also in the support
+    )
+    neg = episode_ranking_negatives(spec, _TEXTS, np.random.default_rng(0))
+    assert set(neg) == {0, 1, 2, 3, 4, 10, 11, 12}
+    support_text = {t: set(_paraphrases(_TEXTS[t])) for t in (0, 1, 2)}
+    for window, own in [(0, 0), (1, 0), (2, 1), (3, 1), (4, 2), (12, 1)]:
+        text, valid = neg[window]
+        assert valid and text not in support_text[own]
+        assert any(text in support_text[t] for t in (0, 1, 2) if t != own)
+    for window in (10, 11):  # held-out query windows: negatives are support instructions, never their own
+        text, valid = neg[window]
+        assert valid and text in support_text[0] | support_text[1] | support_text[2]
+    # deterministic for a given rng seed (every rank draws the same map)
+    again = episode_ranking_negatives(spec, _TEXTS, np.random.default_rng(0))
+    assert again == neg
+    # paraphrases of a " | " task are sampled, not only the first one
+    draws = {episode_ranking_negatives(spec, _TEXTS, np.random.default_rng(s))[0][0] for s in range(40)}
+    assert {"close the drawer", "shut the drawer", "pick the cup"} <= draws
+
+
+def test_episode_ranking_negatives_mask_windows_without_an_eligible_task() -> None:
+    from cosmos_framework.data.generator.action.meta.episodic_sampler import episode_ranking_negatives
+
+    single = _spec(support=[(0, 0, (0,)), (1, 0, (1,))], query=[(2, 0, (2,)), (3, 3, (3,))], disjoint=False)
+    neg = episode_ranking_negatives(single, _TEXTS, np.random.default_rng(0))
+    assert neg[0] == (None, False) and neg[1] == (None, False) and neg[2] == (None, False)  # only task 0 in support
+    assert neg[3] == ("open the drawer", True)  # query of another task: the support instruction is its negative
+    unknown = _spec(support=[(0, -1, (0,)), (1, 2, (1,))], query=[])  # task_index -1 (unknown) is never a candidate
+    neg = episode_ranking_negatives(unknown, _TEXTS, np.random.default_rng(0))
+    assert neg[0] == ("pick the cup", True) and neg[1] == (None, False)
+    assert all(v == (None, False) for v in episode_ranking_negatives(single, None, np.random.default_rng(0)).values())
+
+
+def test_synchronized_dataset_ships_negatives_and_masks_invalid_windows() -> None:
+    from cosmos_framework.data.generator.action.meta.episodic_sampler import (
+        EpisodicEmbodimentSampler,
+        SynchronizedMetaEpisodeIterableDataset,
+    )
+
+    class _DS:
+        def __init__(self):
+            self.calls = []
+
+        def __getitem__(self, i):
+            raise AssertionError("language_ranking must go through getitem_with_extras")
+
+        def getitem_with_extras(self, i, extras):
+            self.calls.append((i, dict(extras)))
+            s = _fake_sample(1)
+            neg = extras["ranking_negative_instruction"]
+            s["negative_text_token_ids"] = torch.tensor([9, 9]) if neg is not None else torch.tensor([1, 2, 3])
+            s["ranking_valid"] = True  # what the transform sets for a non-dropped positive
+            return s
+
+    tables = {"a": _table(24, 6, 100)}
+    texts = {"a": {t: f"task {t}" for t in range(6)}}
+    sampler = EpisodicEmbodimentSampler(
+        tables, {"a": 1}, k_shot=4, q_query=2, windows_per_demo=2, disjoint_tasks=True, tasks_per_episode=2,
+        grouped_episode_fraction=1.0,
+    )
+    ranks = []
+    for r in range(2):
+        ds = _DS()
+        d = SynchronizedMetaEpisodeIterableDataset(
+            {"a": ds}, sampler, max_samples_per_batch=4, seed=7, language_ranking=True, task_texts=texts
+        )
+        d.shard_rank, d.shard_world_size = r, 2
+        ranks.append((d, ds))
+    spec = ranks[0][0].spec_for(3)
+    assert ranks[1][0].spec_for(3).support_indices == spec.support_indices
+    maps = [d.ranking_negatives(spec, np.random.default_rng([7, 3, 7919])) for d, _ in ranks]
+    assert maps[0] == maps[1] and set(maps[0]) == set(spec.support_indices) | set(spec.query_indices)
+    item = ranks[0][0].materialize_shard(spec, 3)
+    assert item["failed"] is False and item["support"] and item["query"]
+    seen = dict(ranks[0][1].calls)
+    assert set(seen) == set(ranks[0][0].shard(spec.support_indices)) | set(ranks[0][0].shard(spec.query_indices))
+    for i, extras in seen.items():
+        assert extras == {"ranking_negative_instruction": maps[0][i][0]}
+    for batch in item["support"] + item["query"]:
+        assert "negative_text_token_ids" in batch and len(batch["ranking_valid"]) == batch["_num_samples"]
+    # two support tasks -> every support window has a negative from the other task
+    assert all(maps[0][i][1] for i in spec.support_indices)
+    with pytest.raises(ValueError, match="task_texts"):
+        SynchronizedMetaEpisodeIterableDataset({"a": _DS()}, sampler, max_samples_per_batch=4, seed=7, language_ranking=True)
+    # ranking off: the plain __getitem__ path and no ranking keys (every existing recipe)
+    class _Plain:
+        def __getitem__(self, i):
+            return _fake_sample(1)
+
+    plain = SynchronizedMetaEpisodeIterableDataset({"a": _Plain()}, sampler, max_samples_per_batch=4, seed=7)
+    plain.shard_rank, plain.shard_world_size = 0, 2
+    item = plain.materialize_shard(spec, 3)
+    assert all("ranking_valid" not in b and "negative_text_token_ids" not in b for b in item["support"] + item["query"])

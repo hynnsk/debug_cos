@@ -165,6 +165,31 @@ Notes:
   drops the assignment, so `$RUN` stays empty and `OUT_DIR` becomes `.../eval_robocasa/_iter3000`). Keep the
   assignment on its own line without a trailing comment, or `setopt interactive_comments`.
 
+## 3b. Train/eval consistency check by demo replay (CPU, ~1 min per demo)
+
+`cosmos_framework/simulation/robocasa/replay_consistency_check.py` (robocasa-eval env, `MUJOCO_GL=osmesa` works on a
+CPU node) restores recorded demos in the exact eval environment (`closed_loop_eval.make_env`, Atomic-Seen) from the
+LeRobot v2.1 `extras/episode_XXXXXX/{ep_meta.json, model.xml.gz, states.npz}` and compares the eval side with the
+dataset: first observation vs video frame 0 (pixel diff), `build_state_token` vs `observation.state`, the prompt
+`get_ep_meta()["lang"]` vs the annotation, and a replay of the recorded actions through `env.step`, both reordered to
+the env order and through the reader's 15D arm-first encoding + `decode_15d_armfirst_to_env12` (the closed-loop path),
+with eef / gripper drift against the recorded states and `_check_success`. Frames come from
+`extract_demo_frames.py` (cosmos3-pt env, PyAV):
+
+```bash
+python cosmos_framework/simulation/robocasa/extract_demo_frames.py $ROBOCASA_V21_ROOT <out> '{"TurnOnMicrowave": [0, 100]}'
+MUJOCO_GL=osmesa PYOPENGL_PLATFORM=osmesa PYTHONPATH=. $ROBOCASA_PY \
+  cosmos_framework/simulation/robocasa/replay_consistency_check.py $ROBOCASA_V21_ROOT <out> '{"TurnOnMicrowave": [0, 100]}'
+```
+
+2026-11-08, 6 demos of TurnOnMicrowave / PickPlaceCounterToCabinet / CloseBlenderLid: pixel diff 1.6-4.0 / 255 (19 with
+`translucent_robot=True`, i.e. the videos show the opaque robot the eval renders), state-token error 0, prompts
+identical, replay eef drift ~1 mm and gripper 0 with success at the recorded step in 5/6 (CloseBlenderLid ep0 drifts to
+2.5 cm on a knife-edge placement). So rendering, proprioception, language, action semantics, controller and control
+rate agree between training data and the closed loop; the low success rate is the policy. Pitfall when writing such a
+replay: the dataset stores actions base-first `[base4, mode, pos3, rot3, grip]` while `env.step` expects
+`[pos3, rot3, grip, base4, mode]`; feeding the stored order drifts 0.5-1 m.
+
 ## 4. Open-loop accuracy (no simulator; 4 GPUs, ~6 min)
 
 The closed-loop success rate of these recipes is near the floor (baseinit 10 %: 7.6 % mean over 18 tasks x 30 rollouts

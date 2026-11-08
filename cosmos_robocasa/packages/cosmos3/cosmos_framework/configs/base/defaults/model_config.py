@@ -1,0 +1,587 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+from typing import Any, Literal
+
+import attrs
+
+from cosmos_framework.configs.base.defaults.activation_checkpointing import ActivationCheckpointingConfig
+from cosmos_framework.configs.base.defaults.compile import CompileConfig
+from cosmos_framework.configs.base.defaults.ema import EMAConfig
+from cosmos_framework.configs.base.defaults.flex_attention import FlexAttentionConfig
+from cosmos_framework.configs.base.defaults.parallelism import ParallelismConfig
+from cosmos_framework.configs.base.defaults.quantization import QuantizationConfig
+from cosmos_framework.configs.base.defaults.reasoner import VLMConfig
+from cosmos_framework.model.generator.mot.action_io_projector import ACTION_IO_PROJECTOR_TYPES
+from cosmos_framework.model.generator.utils.load_balancing_stats import LBLConfig
+from cosmos_framework.utils.lazy_config import LazyDict
+
+# Mirrors ``cosmos3.common.args.AttentionIOLayout``. Defined locally on purpose: importing
+# the ``cosmos3`` workspace package at module scope makes the whole cosmos3 config tree
+# unimportable in the released imaginaire4 eval images (v11.2.1 and older ship no
+# ``cosmos3``), which breaks the benchmark-request config-check CI job. Keep in sync with
+# ``packages/cosmos3/cosmos3/common/args.py``.
+AttentionIOLayout = Literal["sequence_sharded", "replicated"]
+
+
+@attrs.define(slots=False)
+class DiffusionExpertConfig:
+    # This determines the range of timesteps before the fourier feature embedding is applied.
+    timestep_range: float = 1.0
+    # Whether to load the generation pathway weights from pretrained LLM/VLM weights.
+    load_weights_from_pretrained: bool = True
+    # Whether to add separate learned modality embeddings to image and video generation tokens.
+    # Disabled by default to preserve legacy checkpoints and model behavior.
+    enable_vision_modality_embeddings: bool = False
+    # Whether to add a single shared learned modality embedding to both image and video
+    # generation tokens (``media_modality_embed``). Mutually exclusive with
+    # ``enable_vision_modality_embeddings``. Disabled by default.
+    enable_media_modality_embedding: bool = False
+    # Whether to add a learned modality embedding to action generation tokens.
+    # Enabled by default to preserve legacy checkpoints and model behavior.
+    enable_action_modality_embedding: bool = True
+    # Whether to add a learned modality embedding to sound generation tokens.
+    # Enabled by default
+    enable_sound_modality_embedding: bool = True
+
+    patch_spatial: int = 2
+    max_vae_latent_side_after_patchify: int = (
+        20  # Max dimension (h or w) of the VAE latent after patchification (320/(8*2))
+    )
+    # Vision/action/sound position information is always provided through
+    # Qwen3VL-style 3D mRoPE attention IDs.
+    enable_fps_modulation: bool = False
+    base_fps: int = 24
+    # Base temporal compression factor for SOUND m-RoPE. None = current behavior
+    # (sound advances at base_fps positions/sec). Set to the vision tcf (4) to put
+    # sound on the same latent-frame temporal grid as vision/action.
+    sound_base_temporal_compression_factor: int | None = None
+    # Temporal coordinates used for unified_3d_mrope vision tokens.
+    # - "latent_index": use latent-frame indexes, optionally shared across camera views.
+    # - "uniae_source_right_edge": use UniAE padded-patch right-edge source-frame coordinates.
+    vision_temporal_position_mode: str = "latent_index"
+    # Whether camera-major views reuse the same local temporal mRoPE coordinates.
+    align_temporal_positions_across_views: bool = False
+    # For unified_3d_mrope: whether spatial (H, W) indices reset to 0 for each vision segment
+    unified_3d_mrope_reset_spatial_ids: bool = True
+    # Setting the temporal gap on the boundary of the different modalities, default is 0, using a value greater than 0 will add an additional offset on the accumulated temporal offset.
+    unified_3d_mrope_temporal_modality_margin: int = 0
+
+
+@attrs.define(slots=False)
+class RectifiedFlowTrainingConfig:
+    shift: Any = 5  # Training time shift. If dict, maps resolution (str) to shift value (int)
+    shift_image: Any | None = None  # Image-specific shift; None inherits shift
+    use_dynamic_shift: bool = False  # Whether to use dynamic shifting
+    train_time_image_distribution: str = "logitnormal"  # Training time distribution for images
+    train_time_video_distribution: str = "logitnormal"  # Training time distribution for videos
+    train_time_action_distribution: str = "logitnormal"  # Training time distribution for actions
+    train_time_sound_distribution: str = "logitnormal"  # Training time distribution for sound
+    train_time_weight: str = "uniform"  # Training time weight
+    loss_scale: float = 1.0  # Loss scale
+    image_loss_scale: float | None = None  # If set, overrides loss_scale for images
+    sound_loss_scale: float | None = None  # If set, overrides loss_scale for sound
+    lidar_loss_scale: float | None = None  # If set, overrides loss_scale for lidar
+    use_discrete_rf: bool = False  # Whether to use discrete formulation of rectified flow
+
+    # user: please adjust this value according to loss_scale to balance the action loss with the video loss.
+    # default is 10.0 to align with previous training settings.
+    action_loss_weight: float = 10.0
+
+    # Independent noise schedule for action. When False (default), action shares the sigma
+    # sampled from the vision RF on every step — legacy behavior. When True, action samples
+    # its own sigma from `rectified_flow_action` using `shift_action`. Action always uses a
+    # shared scalar sigma per sample ([B,1]), independent of vision's DF mode.
+    independent_action_schedule: bool = False
+    shift_action: int | None = None  # must be int; None → inherit `shift` (which must also be int)
+
+    # Independent noise schedule for sound. When False (default), sound shares the vision
+    # sigma schedule, reindexed to the dense audio-bearing subset. When True, sound samples
+    # its own scalar sigma per sample ([B,1]) from `rectified_flow_sound` using `shift_sound`.
+    independent_sound_schedule: bool = False
+    shift_sound: int | None = None  # must be int; None → inherit `shift` (which must also be int)
+
+    # When True, per-instance flow-matching loss is normalized by the count of
+    # active (noisy) elements rather than all elements — preserves sum/active_count
+    # semantics so conditioning-heavy samples (e.g. I2V, forward_dynamics, diffusion
+    # forcing, AR rollout teacher-forcing) contribute gradient on par with K=0
+    # samples. With .mean() the gradient of a K-conditioned sample is scaled by
+    # (T-K)/T, which undertrains the attend-to-clean-history dynamics. Kept
+    # False by default to preserve legacy loss magnitudes; enable for AR/DF training.
+    normalize_loss_by_active: bool = False
+
+    # Sample-level (vs rank-level) loss averaging for the vision modality.
+    #
+    # By default the vision loss on each rank is a mean over that rank's samples, and
+    # FSDP/DDP averages gradients across ranks — so every *rank* contributes equally
+    # regardless of how many image/video samples it holds ("rank-level averaging").
+    # When ranks carry different sample counts this over-weights samples on sparse ranks.
+    #
+    # When True, the loss is renormalized so every *sample* contributes equally across
+    # the whole data-parallel group: each iteration all-reduces the total number of image
+    # and video samples over the DP group, and image and video losses are each normalized
+    # by their own global sample count and then summed. This counteracts the framework's
+    # rank-level gradient averaging so the effective objective is a true per-sample mean.
+    # The two independently normalized terms are weighted by the existing `image_loss_scale`
+    # (images; falls back to `loss_scale` when None) and `loss_scale` (videos), so their
+    # balance is tuned with the same knobs as the legacy rank-level path.
+    sample_level_loss_averaging: bool = False
+
+
+@attrs.define(slots=False)
+class LanguageRankingConfig:
+    """Per-sample hinge ranking of action FM errors under correct/incorrect instructions.
+
+    Negative instruction selection (cosmos_hs11 v27): ``negative_sampling="uniform"`` draws one of the other
+    nine LIBERO tasks uniformly (v23). ``"action_similarity"`` draws task ``j`` for a window of task ``i`` with
+    probability ``(1 - hard_negative_fraction) / 9 + hard_negative_fraction * softmax_j(-z[i, j] /
+    hard_negative_temperature)``, where ``z`` is the scale-free RMS distance between the tasks' mean training-action
+    trajectories over the first ``hard_negative_prefix_frames`` frames of the kept demonstrations (tasks whose
+    demonstrations start alike are the ones the few-shot policy confuses). The weights are computed once per
+    dataset at construction (``utils/language_ranking.py``); the loss is unchanged.
+
+    Loss-side knobs (cosmos_hs11 v24 family: object v24-v27, LIBERO-10 v75-v78; ``algorithm/loss/language_ranking.py``),
+    all off by default: ``negative_grad_scale`` scales the gradient through ``E_neg`` (1 = original, 0 = positive-only);
+    ``margin_mode="relative"`` requires ``E_neg >= (1 + margin) * E_pos`` instead of ``E_neg >= E_pos + margin``;
+    ``self_paced_fraction`` (0 = off) applies the hinge only to that fraction of the valid samples with the largest
+    detached ``gap - margin_i`` (the easiest pairs), normalized by ``batch * fraction``.
+    """
+
+    enabled: bool = False
+    loss_weight: float = 1.0
+    margin: float = 0.1
+    negative_sampling: str = "uniform"
+    hard_negative_fraction: float = 0.0
+    hard_negative_temperature: float = 0.5
+    hard_negative_prefix_frames: int = 64
+    negative_grad_scale: float = 1.0
+    margin_mode: str = "absolute"
+    self_paced_fraction: float = 0.0
+
+
+@attrs.define(slots=False)
+class RepaConfig:
+    """V-JEPA 2.1 representation alignment (REPA) on the MoT generation pathway.
+
+    Adds ``loss_weight * (1 - cos(proj(h_k), adapter(vjepa(frames))))`` to the training loss, where ``proj`` is
+    the REPA MLP (``projector_type="mlp"``) or a single linear layer (``"linear"``), ``h_k`` is
+    the hidden state of the (predicted, i.e. noised) video tokens after ``layer_index`` MoT decoder blocks and
+    the target is the frozen V-JEPA 2.1 ``ema_encoder`` run on the raw future frames of every camera view.
+    A second, VideoREPA-style term ``relation_loss_weight * dist(R(proj(h_k)), R(adapter(vjepa(frames))))`` matches
+    the per-sample token-relation maps ``R(x) = normalize(x) normalize(x)^T`` (pairwise cosine similarities among the
+    predicted tokens of one video) instead of the tokens themselves. Both terms are always computed and logged
+    (``repa_loss`` / ``repa_cos_sim`` and ``repa_rel_loss``); their weights decide what is trained.
+    See ``model/generator/repa/`` and ``docs/action_policy_libero_repa_vjepa.md``.
+    """
+
+    enabled: bool = False
+    # Weight of the (unweighted, in [0, 2]) cosine loss ``1 - cos`` in the total loss.
+    loss_weight: float = 0.5
+    # Linear warmup of ``loss_weight`` for the cosine term: the effective weight is ``loss_weight * min(1, iteration / N)``
+    # (0 at iteration 0), so a fresh REPA head does not dominate the first updates of a meta-initialized model
+    # (cosmos_hs11 v3 recipe: 200). 0 = constant weight (default). The relation term is never ramped.
+    loss_weight_warmup_steps: int = 0
+    # Noise-level gate (cosmos_hs11 v6/v7): the distillation terms (cosine + relation) are applied only to the samples
+    # whose vision noise level sigma = timestep / num_train_timesteps lies in [sigma_min, sigma_max] (0 = clean latent,
+    # 1 = pure noise; the whole clip shares one sigma). Low sigma = the late, high-frequency part of the denoising path,
+    # high sigma = the early, low-frequency part. Defaults (0, 1) = every sample, bit-identical to the old behaviour.
+    # The logged repa_cos_sim / repa_cos_sim_centered always cover ALL samples; repa_sigma_frac logs the kept fraction.
+    # NOTE: the training sigma distribution (waver, shift 3 at 256 px) is skewed towards high noise, so sigma_max = 0.5
+    # keeps well under half of the samples per step; check repa_sigma_frac.
+    sigma_min: float = attrs.field(default=0.0, validator=[attrs.validators.ge(0.0), attrs.validators.le(1.0)])
+    sigma_max: float = attrs.field(default=1.0, validator=[attrs.validators.ge(0.0), attrs.validators.le(1.0)])
+    # Which token-level signal is aligned by the cosine term:
+    #   token                -- the original absolute projected feature;
+    #   temporal_difference  -- same-patch P(h[t+1]) - P(h[t]) transitions;
+    #   spatial_normalized   -- per-frame, per-channel normalization over spatial patches before cosine.
+    objective: str = attrs.field(
+        default="token",
+        validator=attrs.validators.in_({"token", "temporal_difference", "spatial_normalized", "masked_prediction"}),
+    )
+    # Auxiliary pixel-masked JEPA branch (objective="masked_prediction", cosmos_hs12): spatial tube masks over the native
+    # RGB clip, re-encoded by the frozen VAE, MoT blocks 1..layer_index, L1 regression onto frozen teacher tokens.
+    masked_ratio_min: float = 0.4
+    masked_ratio_max: float = 0.7
+    masked_visible_weight: float = 0.25
+    masked_max_samples: int = 16
+    masked_warmup_steps: int = 200
+    masked_seed: int = 42
+    # Denominator stabilizer for objective="spatial_normalized" (std over patches + eps).
+    spatial_norm_eps: float = 1.0e-6
+    # Weight of the token-relation distillation loss (v5 recipe: 5.0 with loss_weight 0.0). 0 = monitor only.
+    relation_loss_weight: float = 0.0
+    # Entry-wise distance between the student and teacher relation maps: "l2" (squared) or "l1" (absolute).
+    relation_distance: str = attrs.field(default="l2", validator=attrs.validators.in_({"l2", "l1"}))
+    # VideoREPA TRD margin (hs11 v13-v15): relation-map differences with |R_s - R_t| <= margin are not penalized
+    # (soft constraint; VideoREPA default 0.1). 0 = the plain l1 / l2 relation distance (v5 recipe).
+    relation_margin: float = attrs.field(default=0.0, validator=attrs.validators.ge(0.0))
+    # Center the cosine loss: subtract the (detached) batch-mean teacher target from BOTH the projected student tokens
+    # and the targets before the cosine. V-JEPA 2.1 tokens share a dominant common direction (on LIBERO a constant
+    # prediction already scores raw cos ~0.92), so the raw objective is mostly satisfied by that shortcut; centering
+    # makes only the token-specific part count. ``repa_cos_sim`` stays the raw cosine, ``repa_cos_sim_centered`` the
+    # centered one, whichever is trained.
+    center_targets: bool = False
+    # Number of MoT decoder blocks applied before the aligned hidden state is read (REPA "depth"): 8 = output
+    # of the 8th block (0-based block index 7). Nemotron-2B (Cosmos3-Edge) has 28 blocks.
+    layer_index: int = 8
+    # Teacher backbone: "vjepa2_1_vit_base_384" (ViT-B/16, D=768, default) or "vjepa2_1_vit_large_384" (ViT-L/16, 1024);
+    # or a DINOv2 image encoder "dinov2_vitb14" (D=768; also vits14 / vitl14) applied per frame -- then set
+    # teacher_input_size to a multiple of 14 (224 -> the same 16x16 grid) and teacher_checkpoint_path may name an HF repo/dir.
+    # cosmos_hs11 v115+: INTERNAL teachers (no encoder). "self_init" = the gen-tower residual stream after MoT block
+    # ``teacher_layer_index`` of a FROZEN copy of the network as loaded at start (self-distillation: block layer_index of
+    # the student imitates block teacher_layer_index of its own initial weights); "wan_vae" = the clean Wan VAE latent
+    # patches (vae2llm input, C * p * p per token) of the predicted frames. Targets are built in MoT token order
+    # (RepaTokenTargets), so teacher_input_size / teacher_num_frames / target_adapter / the teacher grid are unused;
+    # projector_type="identity" compares h_k itself (self_init, or any relation-map-only arm).
+    # cosmos_hs11 v130+: "dcp_init" = like "self_init", but the frozen network is LOADED from the DCP checkpoint
+    # ``teacher_checkpoint_path`` (e.g. the mid-trained Cosmos3-Edge) instead of being a copy of the weights as loaded.
+    teacher: str = "vjepa2_1_vit_base_384"
+    # Explicit checkpoint file/dir. None = $COSMOS_STORAGE/checkpoints/vjepa2_1/<release file> (download if absent).
+    # teacher="dcp_init": REQUIRED, the DCP iteration dir holding model/ (or that model/ dir itself) the frozen teacher
+    # network is loaded from; every tensor of the network must exist in it (extra keys such as net_ema.* are ignored).
+    teacher_checkpoint_path: str | None = None
+    # teacher="self_init" / "dcp_init" only: 1-based MoT block whose output the frozen network provides as the target
+    # (e.g. 28 = the last block, 14 = the same depth as layer_index). None for every other teacher.
+    teacher_layer_index: int | None = None
+    # cosmos_hs11 v126+ (frozen-network teachers self_init / dcp_init only): what the teacher sees for the PREDICTED
+    # frames (latent frames 1..4 = raw frames 2..17):
+    #   same          -- the student's packed sequence itself (same noised latents, same t; the v115-v120 behaviour);
+    #   clean_context -- the CLEAN latents packed as conditioning frames (condition_mask 1, no timestep embedding),
+    #                    i.e. the inverse-dynamics view of the clip: the raw frames 2..17 without any noise;
+    #   clean_t0      -- the CLEAN latents kept as generation frames with timestep 0 (the t=0 embedding is added).
+    # Text and action tokens are the student's in every mode (the noised action chunk included), so the teacher input
+    # differs from the student's in the video noise only. Must stay "same" for wan_vae and the external encoders
+    # (DINOv2 / V-JEPA already read the clean raw frames).
+    teacher_input: str = attrs.field(
+        default="same", validator=attrs.validators.in_({"same", "clean_context", "clean_t0"})
+    )
+    # Square input side for the teacher. 256 = the V-JEPA 2.1 pretraining RoPE grid (16x16 patches) and LIBERO's
+    # native camera resolution; other sizes are resized bilinearly and handled by RoPE interpolation.
+    teacher_input_size: int = 256
+    # Raw frames per view fed to the teacher = the predicted frames (chunk_length). Must be even (tubelet 2).
+    teacher_num_frames: int = 16
+    # Clips per teacher forward chunk (memory knob; 2 views x samples per rank are processed in chunks).
+    teacher_batch_size: int = 32
+    # Downsampling of the teacher grid (per view T_t x H_p x W_p, e.g. 8x16x16) onto the MoT token grid of that
+    # view (e.g. 4x5x5): "avgpool" (variant 1), "avgpool_conv" (variant 2), "strided_conv" (variant 3).
+    target_adapter: str = attrs.field(
+        default="avgpool", validator=attrs.validators.in_({"avgpool", "avgpool_conv", "strided_conv"})
+    )
+    # Variant 2: depthwise Conv3d kernel size (odd).
+    target_adapter_kernel_size: int = 3
+    # Variant 3: depthwise (True, ~D*32 + D^2 weights) or full (False, D^2*32) strided conv.
+    target_adapter_depthwise: bool = True
+    # Variant 3 needs the per-view target grid at construction time (checked against the batch at runtime).
+    # LIBERO-10 concat_view: 17 frames -> 5 latent frames (4 predicted); 256x512 -> 192x320 canvas with a 160-px
+    # content height -> 5x10 tokens after the padding crop, i.e. 5x5 per view.
+    target_grid_thw: tuple[int, int, int] = (4, 5, 5)
+    # "Less pooling" (cosmos_hs10 v13/v14, hs11 v5): teacher cells predicted per MoT token along (t, h, w). (1,1,1) = one
+    # pooled teacher cell per token. (1,2,2) adapts each view to 4x10x10 instead of 4x5x5 and every MoT token predicts
+    # its 2x2 spatial sub-cells with one S*D_t-wide projector output (S = 4); rows become [N*S, D_t] for every objective.
+    # Measured on LIBERO-10 val (hs10, 2026-09-29): averaging ~20 teacher tokens into one cell removes most of the
+    # token-specific signal (energy left after per-frame spatial centering, DINOv2-B: 0.61 at 4x5x10 -> 0.68 at 4x10x20;
+    # shared-direction energy 0.30 -> 0.25); temporal refinement adds almost nothing. Not supported with
+    # objective="masked_prediction" (its pixel mask is per MoT token).
+    target_subgrid_thw: tuple[int, int, int] = (1, 1, 1)
+    # cosmos_hs11 v12 ("interpolation + conv upsampler"): "trilinear" keeps the teacher at its FULL grid (no pooling at
+    # all, e.g. DINOv2 @224 = 16 frames x 16 x 16 per view) and upsamples the student's per-view MoT grid (4 x 5 x 5) to
+    # it with trilinear interpolation + an identity-initialized depthwise 3x3x3 conv BEFORE the per-position REPA MLP;
+    # rows = full teacher grid (8192 per window at 224 px), projector output D_t. Handles non-integer ratios (5 -> 16).
+    # Mutually exclusive with target_subgrid_thw != (1,1,1); needs target_adapter="avgpool" and a teacher temporal grid
+    # that is a multiple of the predicted latent frames (16 or 8 frames / 4). "none" = default.
+    student_upsampler: str = attrs.field(default="none", validator=attrs.validators.in_({"none", "trilinear"}))
+    # Student-side projector: "mlp" = REPA's Linear-SiLU-Linear-SiLU-Linear (default), "linear" = one
+    # Linear(hidden_size, D_t) so h_k itself has to become an affine image of the teacher features (v4 recipe).
+    projector_type: str = attrs.field(default="mlp", validator=attrs.validators.in_({"mlp", "linear", "identity"}))
+    # REPA projector: 3-layer SiLU MLP hidden width (ignored for projector_type="linear").
+    projector_hidden_dim: int = 2048
+    # Camera views concatenated along the width of the canvas; each is encoded by the teacher separately.
+    num_views: int = 2
+    # data_batch key holding the un-resized uint8 frames [C,T,H,V*W] (set keep_native_video=True on the dataset).
+    native_video_key: str = "video_native"
+    # cosmos_hs11 v11: per-embodiment camera layout of a COMPOSITE canvas, keyed by the sample's ``dataset_name``
+    # (``model/generator/repa/view_layouts.py``): "canvas" (default, whole canvas = one teacher image) or
+    # "primary_over_two" (compose_multiview: primary view above two half-sized side / wrist views -- MolmoAct2-YAM,
+    # RoboMIND concat_view). A layout encodes every view separately and re-assembles the per-view teacher grids in
+    # the canvas layout before pooling; needs num_views = 1, an avgpool-type adapter and no student upsampler.
+    # Samples whose dataset_name is absent from the dict use the stock num_views width split.
+    view_layouts: dict[str, str] = attrs.field(factory=dict)
+
+
+@attrs.define(slots=False)
+class SigRegConfig:
+    """Sketched Isotropic Gaussian regularization (LeJEPA / LeWorldModel SIGReg) of MoT visual tokens.
+
+    SIGReg projects the selected token vectors onto random unit directions and applies the Epps--Pulley
+    characteristic-function test against N(0, 1); the empirical characteristic function is synchronized over the
+    data-parallel group.
+
+    ``input`` selects the regularized space:
+      * ``"repa_projection"`` (default): the REPA projector output of the predicted (noised) video tokens, i.e. the
+        same ``[N, D_teacher]`` tensor the REPA cosine loss is computed on. This mirrors both papers, where SIGReg
+        acts on the projector output that the prediction loss lives in (LeJEPA: MLP+BN -> 16-128 dims; LeWorldModel:
+        1-layer MLP+BN on the CLS token), and it automatically excludes the clean conditioning frame. Requires
+        ``repa.enabled``; the layer is ``repa.layer_index`` (``sigreg.layer_index`` is ignored).
+      * ``"residual_tokens"``: legacy behaviour -- the raw block-``layer_index`` residual stream (2048-dim) of ALL
+        vision tokens including the clean conditioning frame, no projector or normalization.
+
+    ``normalize_by_count``: the Epps--Pulley statistic is ``N * integral(|ecf - cf|^2 w)``; the ``N`` factor is what
+    makes it O(1) under the null hypothesis, but far from Gaussian it is O(N), and here ``N`` is the number of TOKENS
+    (~5e4 per step) rather than the papers' batch of pooled embeddings (~1e2-1e3). With ``True`` the statistic is the
+    per-token integral instead (bounded, roughly in [0, 1.8], batch-size invariant), so ``loss_weight`` can be read
+    relative to the other per-token-mean losses.
+    """
+
+    enabled: bool = False
+    input: str = attrs.field(
+        default="repa_projection", validator=attrs.validators.in_({"repa_projection", "residual_tokens"})
+    )
+    normalize_by_count: bool = True
+    # With normalize_by_count=True the statistic is O(1); 1.0 keeps it secondary to the REPA term (weight 5) and the
+    # x10-scaled flow-matching terms under clip_norm=1.0. The legacy v9 setting was 0.1 on the un-normalized
+    # statistic (~5e4 at init), which dominated the clipped gradient.
+    loss_weight: float = 1.0
+    # residual_tokens mode only: MoT decoder blocks applied before the regularized hidden states (8 or 28 for Edge).
+    layer_index: int = 8
+    # Random Cramer--Wold directions. 256 is the reference implementation's efficient default; 1024 is the paper
+    # default and can be selected from TOML when the extra compute is acceptable.
+    num_slices: int = 256
+    # Trapezoid quadrature of the Epps--Pulley integral on [-integration_max, integration_max].
+    num_points: int = 17
+    integration_max: float = 5.0
+    # Process random directions in chunks so token-level SIGReg does not materialize [N, num_slices, num_points].
+    slice_batch_size: int = 64
+    # Base seed; the training iteration is added so directions change per step but stay synchronized across ranks.
+    seed: int = 0
+
+
+@attrs.define(slots=False)
+class RectifiedFlowInferenceConfig:
+    scheduler_type: str = "unipc"  # Scheduler type
+    num_train_timesteps: int = 1000
+    shift: int = 1
+    use_dynamic_shifting: bool = False
+
+
+@attrs.define(slots=False)
+class FixedStepSamplerConfig:
+    """Config for the fixed-step sampler used by distilled models.
+
+    Uses a fixed sigma schedule instead of a smooth multi-step solver.
+
+    Mirrors the constructor args of ``FixedStepSampler``.
+    """
+
+    # Discrete noise-level schedule (descending, excluding the final 0.0 step).
+    # Convention: exclude the final 0.0 step — FixedStepSampler appends it automatically.
+    # Values must be descending. Using 0.999 instead of 1.0 avoids numeric edge cases at sigma=1.
+    t_list: list[float] = [0.999, 0.75, 0.5, 0.25]
+    # Distilled fixed-step sampling uses stochastic re-noising at each step.
+    sample_type: str = "sde"
+
+
+# Don't have any defaults and init only in config file.
+@attrs.define(slots=False)
+class OmniMoTModelConfig:
+    """
+    Config for Omni MoT model.
+    """
+
+    tokenizer: LazyDict = None
+    load_vision_tokenizer: bool = True
+    """Instantiate the vision tokenizer.
+
+    Reasoner-only inference disables this to avoid loading the generation VAE.
+    """
+
+    lidar_tokenizer: LazyDict | None = None
+    """VAE for the LiDAR range-view stream, alongside the camera VAE in ``tokenizer``.
+
+    When set, a sample's ``lidar`` items are encoded and decoded by this VAE, which lets
+    one sample carry both camera clips and LiDAR range clips. Its ``latent_ch`` is
+    expected to differ from ``state_ch``; LiDAR keeps its own width through its own
+    projections in the network, so ``lidar_state_ch`` must be set to the same value.
+    """
+
+    lidar_state_ch: int | None = None
+    """LiDAR VAE latent channel count, i.e. the width of the network's LiDAR heads."""
+
+    lidar_fps: float | None = None
+    """Sweep rate in Hz of LiDAR items, the counterpart of the camera's per-sample fps.
+
+    With the LiDAR VAE's temporal compression this converts a LiDAR latent index to
+    seconds, which is what puts the two sensors' latents on one mRoPE time axis.
+    """
+
+    net: LazyDict = None
+    ema: EMAConfig = EMAConfig()
+
+    # Parallelism (CP, CFGP, FSDP, DP) and FSDP reduce-dtype configuration.
+    parallelism: ParallelismConfig = ParallelismConfig()
+
+    # Tensor layout at the attention boundary when context parallelism is enabled.
+    attention_io_layout: AttentionIOLayout = "sequence_sharded"
+
+    # torch.compile knobs (enabled, compiled_region, dynamic, ...).
+    compile: CompileConfig = CompileConfig()
+
+    # Post-training quantization + ModelOpt FP8 checkpoint metadata. Mirrored
+    # from Cosmos3OmniConfig.quantization (see ``inference/model.py``) so
+    # ``build_net`` can read modelopt_fp8_checkpoint_path / target_fqns without
+    # reaching outside the model config schema.
+    quantization: QuantizationConfig = QuantizationConfig()
+
+    # Activation-checkpointing policy (trade-off between memory and speed).
+    activation_checkpointing: ActivationCheckpointingConfig = ActivationCheckpointingConfig()
+
+    # Model parameter / activation dtype (consumed by MixedPrecisionPolicy and
+    # ``model.precision`` for LowPrecisionCallback). One of "bfloat16",
+    # "float16", "float32".
+    precision: str = "bfloat16"
+
+    # LoRA (parameter-efficient fine-tuning). When `lora_enabled=True`,
+    # `OmniMoTModel.build_net` injects custom LoRA adapters BEFORE FSDP wrap on
+    # the meta-device network, then re-initializes lora_A/lora_B after
+    # to_empty + init_weights. Pair with `optimizer.keys_to_select=["lora_"]`
+    # and `checkpoint.keys_to_skip_loading=[..., "lora_"]`.
+    lora_enabled: bool = False
+    lora_rank: int = 16
+    lora_alpha: int = 32
+    lora_target_modules: str = "q_proj_moe_gen,k_proj_moe_gen,v_proj_moe_gen,o_proj_moe_gen"
+    # ``inject_lora_pre_fsdp`` freezes every non-LoRA parameter. Set False to leave the
+    # requires_grad flags untouched so ``optimizer.keys_to_select`` alone decides what trains --
+    # needed when LoRA is combined with other trainable modules (action heads, time_embedder):
+    # ``_build_params_with_metadata`` only considers parameters that already require grad, so a
+    # frozen head listed in keys_to_select would silently drop out of the optimizer.
+    lora_freeze_base: bool = True
+
+    # Rectified flow configs
+    rectified_flow_training_config: RectifiedFlowTrainingConfig = RectifiedFlowTrainingConfig()
+    rectified_flow_inference_config: RectifiedFlowInferenceConfig = RectifiedFlowInferenceConfig()
+
+    # Optional fixed-step sampler for distilled models (None for base models).
+    fixed_step_sampler_config: FixedStepSamplerConfig | None = None
+
+    # V-JEPA 2.1 representation alignment loss (off by default).
+    repa: RepaConfig = RepaConfig()
+    language_ranking: LanguageRankingConfig = LanguageRankingConfig()
+
+    # Optional SIGReg anti-collapse regularizer on MoT visual tokens (off by default).
+    sigreg: SigRegConfig = SigRegConfig()
+
+    # Model configs
+    vlm_config: VLMConfig = VLMConfig()
+    diffusion_expert_config: DiffusionExpertConfig = DiffusionExpertConfig()
+    # Training data keys
+    input_video_key: str = "video"
+    input_image_key: str = "images"  # key to fetch input image from data_batch
+    input_caption_key: str = "ai_caption"  # Key used to fetch input captions
+
+    # State and sequence shapes
+    state_ch: int = 16  # for latent model, ref to the latent channel number
+    state_t: int = 8  # for latent model, ref to the latent number of frames
+    latent_downsample_factor: int = 8
+    resolution: str = "512"
+    max_num_tokens_after_packing: int = 13312  # Final num tokens after sequence packing
+
+    # Attention implementation for joint understanding + generation
+    # Note "two_way" and "three_way" disallow and remove "End-of-Vision" or other text token in the generation tower.
+    # "three_way" must only be used when introducing sparsity
+    joint_attn_implementation: str = "two_way"  # "two_way" or "three_way"
+
+    # Whether the within-sample GEN attention runs as one masked FlexAttention call, and under
+    # what mask and kernels.
+    flex_attention: FlexAttentionConfig = FlexAttentionConfig()
+
+    # Per-layer NATTEN parameters
+    # Must use "three_way" attention if used.
+    # If None, all attention layers remain dense.
+    # If not None, must be a list exactly the size of number of layers, and each layer can be either
+    # None (dense) or a dictionary, with at least 'kernel_size' or 'kernel_size_float' keys
+    # specifying sparsity. NATTEN parameters 'dilation' and 'stride' may also be specified either as
+    # static integers, or as floating point values that will be mapped to their domain during
+    # runtime. Integer parameters should never be mixed with floating point ones.
+    #
+    # Floating point parameters are highly recommended, unless the use case will have a fixed token
+    # layout (input resolution).
+    #
+    # Examples:
+    #   Interleaved sliding window layers, "GPT-OSS"-style, with static window size:
+    #     natten_parameter_list = [None if layer_idx % 2 != 0 else {"kernel_size": (8, 8)}]
+    #   Layers with odd indices ("None"s) will use dense attention, and layers with an even indices
+    #   will use a static sliding window size of 8x8.
+    #
+    #   Interleaved sliding window layers, "GPT-OSS"-style, with input-dependent window size:
+    #     natten_parameter_list = [None if layer_idx % 2 != 0 else {"kernel_size_float": (0.5, 0.5)}]
+    #   Layers with odd indices ("None"s) will use dense attention, and layers with an even indices
+    #   will use a dynamic window size that is 50% of the input along each of the two dimensions.
+    #
+    #   Interleaved sliding window and dilated layers, "DiNAT"-style:
+    #     natten_parameter_list = [
+    #       {
+    #           "kernel_size_float": (0.5, 0.5),
+    #           "dilation_float": (1.0, 1.0),
+    #       } if layer_idx % 2 != 0 else {
+    #           "kernel_size_float": (0.5, 0.5),
+    #       }
+    #     ]
+    #   All layers will use a dynamic window size that is 50% of the input along each of the two
+    #   dimensions. Layers with odd indices will also dilate to the maximum level possible.
+    #
+    natten_parameter_list: list | None = None
+
+    # Temporal causality for training autoregressive video generation models.
+    # When enabled, applies temporal causal attention to generation supertokens.
+    # Each supertoken is num_action_tokens_per_supertoken action tokens followed
+    # by H*W vision tokens; the value is stamped onto the packed sequence by the
+    # temporal-causal packer and read by attention/KV-cache code unchanged.
+    # Only supports image2video modes (with or without actions).
+    # Requires joint_attn_implementation="three_way".
+    video_temporal_causal: bool = False
+
+    # "none":             standard joint denoising (shared σ, no clean context)
+    # "teacher_forcing":  all frames noised with shared σ; clean history via cross-attention
+    # "diffusion_forcing": each latent frame gets independent σ ~ Uniform[0,1]
+    # "teacher_forcing_dcm": replayed teacher-forcing discrete-time consistency distillation
+    causal_training_strategy: str = attrs.field(
+        default="none",
+        validator=attrs.validators.in_({"none", "teacher_forcing", "diffusion_forcing", "teacher_forcing_dcm"}),
+    )
+
+    # Load balancing loss config.
+    lbl: LBLConfig = LBLConfig()
+
+    # vision configs
+    vision_gen: bool = True  # whether to use vision related parameters and condition/generate vision tokens
+
+    # action configs
+    action_gen: bool = False  # whether to use action related parameters and condition/generate action tokens
+    max_action_dim: int = 32  # maximum dimension of the action space, we need to pad the data to this dimension.
+    num_embodiment_domains: int = 32  # number of action domains/types supported by the I/O projectors
+    # Selects both action2llm and llm2action together so experiments cannot accidentally
+    # compare a hybrid encoder/decoder pair. Legacy configs retain domain-aware behavior.
+    action_io_projector_type: str = attrs.field(
+        default="domain_aware",
+        validator=attrs.validators.in_(ACTION_IO_PROJECTOR_TYPES),
+    )
+
+    # sound configs
+    sound_gen: bool = False  # whether to use sound related parameters and condition/generate sound tokens
+    sound_tokenizer: LazyDict | None = None  # Sound tokenizer config (e.g., AVAE)
+    sound_dim: int | None = None  # Sound latent channel size (e.g., 64 for AVAE 48kHz)
+    sound_latent_fps: int = 25  # Sound tokenizer's latent rate (e.g., 48kHz / 1920 hop = 25 Hz)
+
+    # When False, removes bias from vae2llm, sound2llm, and the two Linear layers inside
+    # time_embedder.  These biases seem to inject token-constant DC offsets that dominate
+    # the MoE router input and create prompt invariant routing.  This is observed empirically
+    # in the 30B-A3B checkpoint.
+    enable_input_bias: bool = True
+
+    # When True, ``OmniMoTModel.state_dict`` / ``load_state_dict`` skip the
+    # reasoner (und) pathway weights under ``language_model`` — i.e. every key
+    # WITHOUT a ``_moe_gen`` suffix (including ``visual`` / ``lm_head`` /
+    # ``embed_tokens``).  These are not written to checkpoints and are left
+    # untouched on load (typically already populated from the HF pretrained
+    # backbone).  Generation-pathway (``_moe_gen``) and VFM heads are saved /
+    # loaded as usual.
+    exclude_reasoner_weights_from_checkpoint: bool = False

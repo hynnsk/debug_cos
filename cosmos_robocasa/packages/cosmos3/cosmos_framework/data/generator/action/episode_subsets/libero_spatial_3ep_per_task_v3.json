@@ -1,0 +1,202 @@
+{
+  "description": "v3 of libero_spatial_3ep_per_task_v2.json (itself derived from libero_spatial_3ep_per_task_seed42.json, see 'v2_replacements'): identical except that for task 1 the episode(s) [244] were swapped for [99], drawn with random.Random(seed=42) over the task's episodes sorted by episode_index, excluding the v2 train episodes, the episodes removed in v2 and the 5 val episodes of libero_spatial_val_5ep_per_task_seed42_excl3ep.json; consumed by LIBEROLeRobotDataset(episode_subset_path=...).",
+  "seed": 42,
+  "episodes_per_task": 3,
+  "n_excluded": 0,
+  "n_tasks": 10,
+  "n_episodes_total_in_dataset": 432,
+  "n_episodes": 30,
+  "tasks": {
+    "0": {
+      "task": "pick up the black bowl next to the cookie box and place it on the plate",
+      "n_available": 46,
+      "episodes": [
+        13,
+        48,
+        75
+      ]
+    },
+    "1": {
+      "task": "pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate",
+      "n_available": 42,
+      "episodes": [
+        2,
+        99,
+        133
+      ]
+    },
+    "2": {
+      "task": "pick up the black bowl on the ramekin and place it on the plate",
+      "n_available": 39,
+      "episodes": [
+        127,
+        182,
+        419
+      ]
+    },
+    "3": {
+      "task": "pick up the black bowl on the stove and place it on the plate",
+      "n_available": 35,
+      "episodes": [
+        9,
+        64,
+        373
+      ]
+    },
+    "4": {
+      "task": "pick up the black bowl between the plate and the ramekin and place it on the plate",
+      "n_available": 45,
+      "episodes": [
+        12,
+        66,
+        134
+      ]
+    },
+    "5": {
+      "task": "pick up the black bowl on the cookie box and place it on the plate",
+      "n_available": 43,
+      "episodes": [
+        176,
+        214,
+        339
+      ]
+    },
+    "6": {
+      "task": "pick up the black bowl next to the plate and place it on the plate",
+      "n_available": 47,
+      "episodes": [
+        24,
+        132,
+        304
+      ]
+    },
+    "7": {
+      "task": "pick up the black bowl next to the ramekin and place it on the plate",
+      "n_available": 45,
+      "episodes": [
+        327,
+        403,
+        427
+      ]
+    },
+    "8": {
+      "task": "pick up the black bowl from table center and place it on the plate",
+      "n_available": 46,
+      "episodes": [
+        119,
+        217,
+        222
+      ]
+    },
+    "9": {
+      "task": "pick up the black bowl on the wooden cabinet and place it on the plate",
+      "n_available": 44,
+      "episodes": [
+        29,
+        94,
+        129
+      ]
+    }
+  },
+  "excluded_from": [],
+  "source_root_basename": "libero_spatial",
+  "based_on": "libero_spatial_3ep_per_task_v2.json",
+  "v2_seed": 42,
+  "v2_replacements": {
+    "0": {
+      "task": "pick up the black bowl next to the cookie box and place it on the plate",
+      "removed": [
+        352
+      ],
+      "added": [
+        75
+      ],
+      "kept": [
+        13,
+        48
+      ],
+      "n_candidates": 38,
+      "excluded": "original 3ep train episodes + val 5ep episodes"
+    },
+    "1": {
+      "task": "pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate",
+      "removed": [
+        159,
+        173
+      ],
+      "added": [
+        2,
+        244
+      ],
+      "kept": [
+        133
+      ],
+      "n_candidates": 34,
+      "excluded": "original 3ep train episodes + val 5ep episodes"
+    },
+    "2": {
+      "task": "pick up the black bowl on the ramekin and place it on the plate",
+      "removed": [
+        80
+      ],
+      "added": [
+        182
+      ],
+      "kept": [
+        127,
+        419
+      ],
+      "n_candidates": 31,
+      "excluded": "original 3ep train episodes + val 5ep episodes"
+    },
+    "5": {
+      "task": "pick up the black bowl on the cookie box and place it on the plate",
+      "removed": [
+        389
+      ],
+      "added": [
+        214
+      ],
+      "kept": [
+        176,
+        339
+      ],
+      "n_candidates": 35,
+      "excluded": "original 3ep train episodes + val 5ep episodes"
+    },
+    "9": {
+      "task": "pick up the black bowl on the wooden cabinet and place it on the plate",
+      "removed": [
+        174,
+        372
+      ],
+      "added": [
+        94,
+        129
+      ],
+      "kept": [
+        29
+      ],
+      "n_candidates": 36,
+      "excluded": "original 3ep train episodes + val 5ep episodes"
+    }
+  },
+  "v3_seed": 42,
+  "v3_replacements": {
+    "1": {
+      "task": "pick up the black bowl in the top drawer of the wooden cabinet and place it on the plate",
+      "removed": [
+        244
+      ],
+      "added": [
+        99
+      ],
+      "kept": [
+        2,
+        133
+      ],
+      "n_candidates": 32,
+      "excluded": "v2 train episodes of the task + episodes removed in v2 + val 5ep episodes"
+    }
+  }
+}

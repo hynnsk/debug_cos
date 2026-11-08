@@ -1,0 +1,171 @@
+{
+  "description": "Fixed few-shot LIBERO subset: 10 randomly sampled demonstration episodes per task (random.Random(seed=42), tasks in ascending task_index order, candidates sorted by episode_index). Consumed by LIBEROLeRobotDataset(episode_subset_path=...).",
+  "seed": 42,
+  "episodes_per_task": 10,
+  "n_tasks": 10,
+  "n_episodes_total_in_dataset": 379,
+  "n_episodes": 100,
+  "tasks": {
+    "0": {
+      "task": "turn on the stove and put the moka pot on it",
+      "n_available": 41,
+      "episodes": [
+        38,
+        49,
+        50,
+        66,
+        72,
+        153,
+        162,
+        184,
+        259,
+        361
+      ]
+    },
+    "1": {
+      "task": "put both the alphabet soup and the tomato sauce in the basket",
+      "n_available": 33,
+      "episodes": [
+        8,
+        13,
+        26,
+        77,
+        79,
+        199,
+        200,
+        234,
+        350,
+        363
+      ]
+    },
+    "2": {
+      "task": "put the white mug on the left plate and put the yellow and white mug on the right plate",
+      "n_available": 38,
+      "episodes": [
+        0,
+        121,
+        157,
+        167,
+        207,
+        236,
+        264,
+        295,
+        309,
+        343
+      ]
+    },
+    "3": {
+      "task": "put the black bowl in the bottom drawer of the cabinet and close it",
+      "n_available": 35,
+      "episodes": [
+        16,
+        31,
+        97,
+        120,
+        144,
+        151,
+        189,
+        255,
+        304,
+        338
+      ]
+    },
+    "4": {
+      "task": "pick up the book and place it in the back compartment of the caddy",
+      "n_available": 41,
+      "episodes": [
+        47,
+        64,
+        103,
+        154,
+        159,
+        227,
+        228,
+        290,
+        348,
+        368
+      ]
+    },
+    "5": {
+      "task": "put the yellow and white mug in the microwave and close it",
+      "n_available": 34,
+      "episodes": [
+        34,
+        35,
+        44,
+        84,
+        123,
+        140,
+        226,
+        269,
+        324,
+        342
+      ]
+    },
+    "6": {
+      "task": "put the white mug on the plate and put the chocolate pudding to the right of the plate",
+      "n_available": 36,
+      "episodes": [
+        37,
+        62,
+        108,
+        110,
+        168,
+        210,
+        216,
+        220,
+        271,
+        302
+      ]
+    },
+    "7": {
+      "task": "put both the cream cheese box and the butter in the basket",
+      "n_available": 49,
+      "episodes": [
+        43,
+        78,
+        119,
+        305,
+        328,
+        330,
+        332,
+        333,
+        335,
+        344
+      ]
+    },
+    "8": {
+      "task": "put both moka pots on the stove",
+      "n_available": 29,
+      "episodes": [
+        20,
+        67,
+        70,
+        86,
+        106,
+        143,
+        187,
+        214,
+        270,
+        283
+      ]
+    },
+    "9": {
+      "task": "put both the alphabet soup and the cream cheese box in the basket",
+      "n_available": 43,
+      "episodes": [
+        25,
+        30,
+        135,
+        148,
+        163,
+        188,
+        221,
+        256,
+        286,
+        318
+      ]
+    }
+  },
+  "source_root_basename": "libero_10"
+}

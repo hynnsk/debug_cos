@@ -1,0 +1,906 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+"""Episodic (support / query) sampling over embodiments for few-shot meta-training.
+
+A *meta-episode* is one embodiment plus two disjoint sets of demonstrations::
+
+    embodiment e ~ Uniform({fractal, bridge, robomind_ur, robomind_franka, molmoact2_yam})
+    support demos  S = K episodes of e            (K-shot == K demonstrations, not K windows)
+    query demos    Q = Q episodes of e, S ∩ Q = ∅ (and task(S) ∩ task(Q) = ∅ when e has enough tasks)
+    windows        w windows sampled inside every chosen demonstration
+
+Sampling embodiments uniformly (not proportionally to their size) is deliberate: RT-1 has 87K
+episodes and the YAM subset a few thousand, so a size-proportional mixture would be dominated by
+the Google Robot. Sampling *demonstrations first* is what makes ``K`` a demonstration count -- the
+quantity the downstream LIBERO few-shot protocol is expressed in ("3 demos per task").
+
+:class:`EpisodicEmbodimentSampler` is pure bookkeeping over ``EpisodeTable``s (no I/O, seedable).
+:class:`MetaEpisodeIterableDataset` materializes a meta-episode inside a DataLoader worker: it
+pulls the sampled windows through the per-embodiment ``ActionSFTDataset`` (video decode + the
+``ActionTransformPipeline``) and packs them into the ``PackingDataLoader``-style batches that
+``OmniMoTModel.training_step`` consumes (see :func:`pack_samples_into_batch`).
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import asdict, dataclass, field
+from typing import Any, Iterator, Sequence
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+from torch.utils.data import DataLoader, IterableDataset, get_worker_info
+
+from cosmos_framework.data.generator.action.meta.lazy_rows import EpisodeTable
+from cosmos_framework.utils import log
+
+__all__ = [
+    "EpisodicEmbodimentSampler",
+    "MetaEpisodeIterableDataset",
+    "MetaEpisodeLoader",
+    "MetaEpisodeSpec",
+    "SampledDemo",
+    "build_meta_episode_loader",
+    "pack_samples_into_batch",
+]
+
+
+# --------------------------------------------------------------------------------------------
+# Specs
+# --------------------------------------------------------------------------------------------
+@dataclass(frozen=True)
+class SampledDemo:
+    """One demonstration and the flat dataset indices of the windows drawn from it."""
+
+    episode_index: int
+    task_index: int
+    window_indices: tuple[int, ...]
+
+
+@dataclass
+class MetaEpisodeSpec:
+    """Everything needed to materialize one meta-episode (embodiment + support/query windows)."""
+
+    embodiment: str
+    domain_id: int
+    support: list[SampledDemo]
+    query: list[SampledDemo]
+    disjoint_tasks: bool  # whether support/query task sets were kept disjoint for this episode
+    grouped: bool = False  # cosmos_hs11 v4.1: support = tasks_per_episode tasks x d demos (else the uniform draw)
+
+    @property
+    def support_indices(self) -> list[int]:
+        return [i for d in self.support for i in d.window_indices]
+
+    @property
+    def query_indices(self) -> list[int]:
+        return [i for d in self.query for i in d.window_indices]
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "embodiment": self.embodiment,
+            "domain_id": self.domain_id,
+            "num_support_demos": len(self.support),
+            "num_query_demos": len(self.query),
+            "num_support_windows": len(self.support_indices),
+            "num_query_windows": len(self.query_indices),
+            "support_tasks": sorted({d.task_index for d in self.support}),
+            "query_tasks": sorted({d.task_index for d in self.query}),
+            "disjoint_tasks": self.disjoint_tasks,
+            "grouped": self.grouped,
+            "num_support_tasks": len({d.task_index for d in self.support}),
+        }
+
+
+# --------------------------------------------------------------------------------------------
+# Sampler (pure bookkeeping)
+# --------------------------------------------------------------------------------------------
+class EpisodicEmbodimentSampler:
+    """Embodiment-uniform, demonstration-first support/query sampler.
+
+    Args:
+        episode_tables: ``{embodiment_name: EpisodeTable}``.
+        domain_ids: ``{embodiment_name: domain_id}`` (only carried into the spec).
+        k_shot: Number of support demonstrations.
+        q_query: Number of query demonstrations.
+        windows_per_demo: Windows drawn from each support demonstration.
+        query_windows_per_demo: Windows per query demonstration (defaults to ``windows_per_demo``).
+        disjoint_tasks: ``"auto"`` keeps support and query task sets disjoint whenever the
+            embodiment has at least ``min_tasks_for_disjoint`` tasks (RoboMIND-Franka has 2 tasks and
+            therefore falls back to *episode*-disjoint sampling); ``True``/``False`` force it.
+        min_tasks_for_disjoint: See ``disjoint_tasks``.
+        min_windows_per_demo: Demonstrations with fewer valid windows are never sampled.
+        embodiment_weights: Optional ``{name: weight}``; ``None`` == uniform ``p(e) = 1/E``.
+        tasks_per_episode: cosmos_hs11 v4.1 grouped episodes: the support set of a grouped episode is
+            ``tasks_per_episode`` tasks x ``k_shot // tasks_per_episode`` demonstrations of one embodiment
+            ("one scene family, several instructions, a few demos each" -- the LIBERO few-shot regime) instead
+            of ``k_shot`` demonstrations drawn uniformly over the embodiment. Required (and must divide
+            ``k_shot``) when ``grouped_episode_fraction > 0``.
+        grouped_episode_fraction: Probability that an episode is grouped (0 = never = the original sampler,
+            bit for bit; 1 = always; 0.5 = a 50:50 mix with uniform episodes). Drawn per episode from the
+            episode RNG, so every rank agrees.
+    """
+
+    def __init__(
+        self,
+        episode_tables: dict[str, EpisodeTable],
+        domain_ids: dict[str, int],
+        k_shot: int = 5,
+        q_query: int = 5,
+        windows_per_demo: int = 8,
+        query_windows_per_demo: int | None = None,
+        disjoint_tasks: bool | str = "auto",
+        min_tasks_for_disjoint: int = 4,
+        min_windows_per_demo: int = 1,
+        embodiment_weights: dict[str, float] | None = None,
+        tasks_per_episode: int | None = None,
+        grouped_episode_fraction: float = 0.0,
+    ) -> None:
+        if k_shot < 1 or q_query < 1:
+            raise ValueError(f"k_shot and q_query must be >= 1, got {k_shot}, {q_query}")
+        if windows_per_demo < 1:
+            raise ValueError("windows_per_demo must be >= 1")
+        self.k_shot = int(k_shot)
+        self.q_query = int(q_query)
+        self.windows_per_demo = int(windows_per_demo)
+        self.query_windows_per_demo = int(query_windows_per_demo or windows_per_demo)
+        self.min_windows_per_demo = max(1, int(min_windows_per_demo))
+        self.disjoint_tasks_mode = disjoint_tasks
+        self.min_tasks_for_disjoint = int(min_tasks_for_disjoint)
+        self.domain_ids = dict(domain_ids)
+        # cosmos_hs11 v4.1: grouped ("T tasks x d demos") episodes
+        self.grouped_episode_fraction = float(grouped_episode_fraction)
+        if not 0.0 <= self.grouped_episode_fraction <= 1.0:
+            raise ValueError(f"grouped_episode_fraction must be in [0, 1], got {grouped_episode_fraction}")
+        self.tasks_per_episode = None if tasks_per_episode is None else int(tasks_per_episode)
+        if self.grouped_episode_fraction > 0.0:
+            if self.tasks_per_episode is None or self.tasks_per_episode < 1:
+                raise ValueError("tasks_per_episode must be >= 1 when grouped_episode_fraction > 0")
+            if self.k_shot % self.tasks_per_episode != 0:
+                raise ValueError(
+                    f"k_shot ({self.k_shot}) must be a multiple of tasks_per_episode ({self.tasks_per_episode})"
+                )
+
+        self.names: list[str] = []
+        self.tables: dict[str, EpisodeTable] = {}
+        self._by_task: dict[str, dict[int, list[int]]] = {}
+        for name, table in episode_tables.items():
+            usable = table.usable(self.min_windows_per_demo)
+            if len(usable) < self.k_shot + self.q_query:
+                raise ValueError(
+                    f"Embodiment {name!r} has only {len(usable)} usable demonstrations "
+                    f"(need k_shot + q_query = {self.k_shot + self.q_query})."
+                )
+            self.names.append(name)
+            self.tables[name] = usable
+            self._by_task[name] = usable.by_task()
+        if not self.names:
+            raise ValueError("No embodiments given.")
+
+        weights = np.ones(len(self.names), dtype=np.float64)
+        if embodiment_weights:
+            weights = np.asarray([float(embodiment_weights.get(n, 0.0)) for n in self.names], dtype=np.float64)
+            if weights.sum() <= 0:
+                raise ValueError("embodiment_weights must have a positive total.")
+        self.probs = weights / weights.sum()
+        log.info(
+            "EpisodicEmbodimentSampler: "
+            + ", ".join(
+                f"{n}: {len(self.tables[n])} demos / {len(self._by_task[n])} tasks / p={p:.3f}"
+                for n, p in zip(self.names, self.probs)
+            )
+            + (
+                f" | grouped episodes: fraction={self.grouped_episode_fraction}, "
+                f"{self.tasks_per_episode} tasks x {self.k_shot // self.tasks_per_episode} demos"
+                if self.grouped_episode_fraction > 0.0
+                else ""
+            )
+        )
+
+    # ---- helpers -------------------------------------------------------------
+    def uses_disjoint_tasks(self, name: str) -> bool:
+        if isinstance(self.disjoint_tasks_mode, bool):
+            return self.disjoint_tasks_mode
+        return len(self._by_task[name]) >= self.min_tasks_for_disjoint
+
+    def sample_embodiment(self, rng: np.random.Generator) -> str:
+        return self.names[int(rng.choice(len(self.names), p=self.probs))]
+
+    @staticmethod
+    def _sample_windows(rng: np.random.Generator, first: int, num: int, count: int) -> tuple[int, ...]:
+        if count >= num:
+            # Every window once, in random order, then repeat to reach ``count``.
+            picks = rng.permutation(num)
+            reps = int(math.ceil(count / num))
+            picks = np.concatenate([picks] + [rng.permutation(num) for _ in range(reps - 1)])[:count]
+        else:
+            picks = rng.choice(num, size=count, replace=False)
+        return tuple(int(first + p) for p in picks)
+
+    def _demos(self, rng: np.random.Generator, name: str, positions: Sequence[int], count: int) -> list[SampledDemo]:
+        table = self.tables[name]
+        out = []
+        for pos in positions:
+            e = table[int(pos)]
+            out.append(
+                SampledDemo(
+                    episode_index=e.episode_index,
+                    task_index=e.task_index,
+                    window_indices=self._sample_windows(rng, e.first_flat_index, e.num_windows, count),
+                )
+            )
+        return out
+
+    def _grouped_support(self, rng: np.random.Generator, name: str) -> np.ndarray:
+        """Support positions of a grouped episode: ``tasks_per_episode`` tasks x ``d = k_shot // tasks_per_episode`` demos.
+
+        Tasks are drawn uniformly among those with at least ``d`` usable demonstrations. When fewer than
+        ``tasks_per_episode`` such tasks exist (RoboMIND-Franka has 2 tasks) every eligible task contributes ``d``
+        demos and the remaining ``k_shot - T_eff * d`` slots are filled uniformly from the other demonstrations,
+        so the support set always holds exactly ``k_shot`` distinct demonstrations.
+        """
+        assert self.tasks_per_episode is not None
+        d = self.k_shot // self.tasks_per_episode
+        by_task = self._by_task[name]
+        eligible = sorted(t for t, ps in by_task.items() if len(ps) >= d)
+        t_eff = min(self.tasks_per_episode, len(eligible))
+        picks: list[int] = []
+        if t_eff > 0:
+            for c in rng.choice(len(eligible), size=t_eff, replace=False):
+                positions = np.asarray(by_task[eligible[int(c)]], dtype=np.int64)
+                picks.extend(int(p) for p in rng.choice(positions, size=d, replace=False))
+        remainder = self.k_shot - len(picks)
+        if remainder > 0:
+            taken = set(picks)
+            rest = np.asarray([p for p in range(len(self.tables[name])) if p not in taken], dtype=np.int64)
+            picks.extend(int(p) for p in rng.choice(rest, size=remainder, replace=False))
+        return np.asarray(picks, dtype=np.int64)
+
+    # ---- main entry --------------------------------------------------------------
+    def sample(self, rng: np.random.Generator, embodiment: str | None = None) -> MetaEpisodeSpec:
+        name = embodiment or self.sample_embodiment(rng)
+        table = self.tables[name]
+        n = len(table)
+        # cosmos_hs11 v4.1: the grouped/uniform coin is only tossed when the fraction is positive, so fraction 0
+        # consumes the RNG exactly as before and reproduces the original episode stream bit for bit.
+        grouped = self.grouped_episode_fraction > 0.0 and bool(rng.random() < self.grouped_episode_fraction)
+        if grouped:
+            support_pos = self._grouped_support(rng, name)
+        else:
+            support_pos = rng.choice(n, size=self.k_shot, replace=False)
+        support_tasks = {table[int(p)].task_index for p in support_pos}
+        support_set = set(int(p) for p in support_pos)
+
+        disjoint = self.uses_disjoint_tasks(name)
+        candidates: list[int] = []
+        if disjoint:
+            candidates = [
+                p for t, ps in self._by_task[name].items() if t not in support_tasks for p in ps if p not in support_set
+            ]
+            if len(candidates) < self.q_query:
+                disjoint = False
+        if not disjoint:
+            candidates = [p for p in range(n) if p not in support_set]
+        query_pos = rng.choice(len(candidates), size=self.q_query, replace=False)
+        query_pos = [candidates[int(p)] for p in query_pos]
+
+        return MetaEpisodeSpec(
+            embodiment=name,
+            domain_id=self.domain_ids[name],
+            support=self._demos(rng, name, [int(p) for p in support_pos], self.windows_per_demo),
+            query=self._demos(rng, name, query_pos, self.query_windows_per_demo),
+            disjoint_tasks=disjoint,
+            grouped=grouped,
+        )
+
+
+# --------------------------------------------------------------------------------------------
+# cosmos_hs11 v18: language-ranking negatives inside a meta-episode
+# --------------------------------------------------------------------------------------------
+def _paraphrases(text: str) -> list[str]:
+    parts = [p.strip() for p in str(text).split(" | ") if p.strip()]
+    return parts or [str(text)]
+
+
+def episode_ranking_negatives(
+    spec: MetaEpisodeSpec, task_texts: dict[int, str] | None, rng: np.random.Generator
+) -> dict[int, tuple[str | None, bool]]:
+    """One negative instruction per window of the meta-episode: ``window index -> (instruction, valid)``.
+
+    The negative of a window is a paraphrase of the instruction of ANOTHER task of the same episode's support set
+    (the LIBERO regime: one scene family, several instructions). Support windows draw from the other support tasks;
+    query windows (held-out instructions when the sampler kept the task sets disjoint) draw from the support tasks
+    other than their own. A window with no eligible task gets ``(None, False)``: the loader tokenizes its own
+    instruction as a placeholder and masks it out of the hinge (``ranking_valid=False``) -- a single-task support
+    set (uniform fill of a 2-task embodiment) therefore never ranks a sentence against itself.
+    """
+    texts = task_texts or {}
+    support_tasks = sorted({d.task_index for d in spec.support if d.task_index >= 0 and d.task_index in texts})
+    out: dict[int, tuple[str | None, bool]] = {}
+    for group in (spec.support, spec.query):
+        for d in group:
+            candidates = [t for t in support_tasks if t != d.task_index]
+            for i in d.window_indices:
+                if not candidates:
+                    out[int(i)] = (None, False)
+                    continue
+                t = candidates[int(rng.integers(len(candidates)))]
+                options = _paraphrases(texts[t])
+                out[int(i)] = (options[int(rng.integers(len(options)))], True)
+    return out
+
+
+# --------------------------------------------------------------------------------------------
+# Packing samples into the model's batch format
+# --------------------------------------------------------------------------------------------
+def pack_samples_into_batch(samples: list[dict[str, Any]], dataset_name: str) -> dict[str, Any]:
+    """Pack transformed samples the way ``PackingDataLoader`` does (list-of-per-sample values).
+
+    Reuses ``custom_collate_fn`` and the ``JointDataLoader`` key conventions so the result is
+    byte-for-byte the structure ``OmniMoTModel.training_step`` expects: multi-item keys
+    (``video``/``action``/``text_token_ids``/...) become ``list[list[Tensor]]``, per-sequence metadata
+    (``sequence_plan``/``domain_id``/...) become flat lists, tensor-origin keys ``list[Tensor(1,...)]``.
+    """
+    from cosmos_framework.data.generator.joint_dataloader import (
+        _BATCH_TIMING_KEYS,
+        JointDataLoader,
+        custom_collate_fn,
+    )
+
+    if not samples:
+        raise ValueError("pack_samples_into_batch needs at least one sample")
+    multi_item_keys = JointDataLoader._MULTI_ITEM_KEYS
+    flatten_keys = JointDataLoader._FLATTEN_LIST_KEYS
+    output: dict[str, Any] = {}
+    for sample in samples:
+        collated = custom_collate_fn([sample])
+        split: dict[str, Any] = {}
+        for k, v in collated.items():
+            if k in _BATCH_TIMING_KEYS:
+                split[k] = v
+            elif isinstance(v, list) and k in multi_item_keys:
+                elem = v[0]
+                split[k] = elem if isinstance(elem, list) else v[0:1]
+            elif isinstance(v, list):
+                split[k] = v[0]
+            elif isinstance(v, torch.Tensor):
+                split[k] = v[0:1]
+            else:
+                split[k] = v
+        split["dataset_name"] = dataset_name
+        for k, v in split.items():
+            if k in _BATCH_TIMING_KEYS:
+                output.setdefault(k, v)
+            elif k in flatten_keys and isinstance(v, list):
+                output.setdefault(k, []).extend(v)
+            else:
+                output.setdefault(k, []).append(v)
+    output["_num_samples"] = len(samples)
+    return output
+
+
+def _chunk(indices: list[int], size: int) -> list[list[int]]:
+    size = max(1, int(size))
+    return [indices[i : i + size] for i in range(0, len(indices), size)]
+
+
+# --------------------------------------------------------------------------------------------
+# Iterable dataset + loader
+# --------------------------------------------------------------------------------------------
+def resize_native_video_clip(clip: torch.Tensor, size: int) -> torch.Tensor:
+    """``[C,T,H,W]`` uint8 native frames -> ``[C,T,size,size]`` uint8 (cosmos_hs11 v11).
+
+    The REPA teacher resizes every frame to its square input anyway (``F.interpolate`` bilinear, antialiased), so
+    doing it here, in the loader worker, changes nothing the teacher sees but keeps a 720x1280 RoboMIND clip from
+    travelling through the DataLoader queue and the GPU at 47 MB per window. One frame at a time (bounded memory).
+    """
+    if clip.ndim != 4:
+        raise ValueError(f"expected a [C,T,H,W] native clip, got {tuple(clip.shape)}")
+    size = int(size)
+    if tuple(clip.shape[-2:]) == (size, size):
+        return clip
+    frames = []
+    for t in range(clip.shape[1]):
+        x = clip[:, t].unsqueeze(0).float()  # [1,C,H,W]
+        y = F.interpolate(x, size=(size, size), mode="bilinear", align_corners=False, antialias=True)
+        frames.append(y.round_().clamp_(0, 255).to(torch.uint8)[0])
+    return torch.stack(frames, dim=1).contiguous()  # [C,T,size,size]
+
+
+class MetaEpisodeIterableDataset(IterableDataset):
+    """Infinite stream of materialized meta-episodes (one dict per meta-episode).
+
+    Each yielded item::
+
+        {
+          "embodiment": str, "domain_id": int, "spec": dict (MetaEpisodeSpec.summary()),
+          "support": [packed_batch, ...],   # len == ceil(K * w / max_samples_per_batch)
+          "query":   [packed_batch, ...],
+        }
+
+    ``shard_rank`` / ``shard_world_size`` (set by :class:`MetaEpisodeLoader`) and the DataLoader
+    worker id are folded into the RNG seed so every (rank, worker) draws different episodes; the
+    stream is reproducible for a fixed ``seed``.
+    """
+
+    def __init__(
+        self,
+        datasets: dict[str, Any],
+        sampler: EpisodicEmbodimentSampler,
+        max_samples_per_batch: int = 40,
+        seed: int = 42,
+        embodiment_override: str | None = None,
+        native_video_size: int | None = None,
+        native_video_key: str = "video_native",
+        native_video_full_res: Sequence[str] | None = None,
+        language_ranking: bool = False,
+        task_texts: dict[str, dict[int, str] | None] | None = None,
+    ) -> None:
+        super().__init__()
+        self.datasets = datasets
+        self.sampler = sampler
+        self.max_samples_per_batch = int(max_samples_per_batch)
+        self.seed = int(seed)
+        self.embodiment_override = embodiment_override
+        # cosmos_hs11 v18: attach a language-ranking negative (another support task's instruction) to every window;
+        # ``task_texts[embodiment]`` = task_index -> instruction text (see embodiments.embodiment_task_texts).
+        self.language_ranking = bool(language_ranking)
+        self.task_texts: dict[str, dict[int, str] | None] = dict(task_texts or {})
+        if self.language_ranking:
+            missing = [n for n in datasets if not self.task_texts.get(n)]
+            if missing:
+                raise ValueError(f"language_ranking needs task_texts for every embodiment; missing: {missing}")
+        # cosmos_hs11 v11: shrink the native REPA-teacher frames (shipped by keep_native_video) to this square in the
+        # worker; None = leave them at camera resolution (the only option for multi-view canvases, num_views > 1).
+        # ``native_video_full_res``: embodiments exempt from the shrink -- composite canvases that the teacher crops into
+        # views itself (``repa.view_layouts``), which need the full camera resolution per view.
+        self.native_video_size = int(native_video_size) if native_video_size else None
+        self.native_video_key = str(native_video_key)
+        self.native_video_full_res = frozenset(str(n) for n in (native_video_full_res or ()))
+        self.max_consecutive_failures = 8  # a systematic error (missing stats, bad root) must surface, not spin
+        self.shard_rank = 0
+        self.shard_world_size = 1
+
+    def _load(
+        self,
+        name: str,
+        indices: list[int],
+        extras_by_index: dict[int, tuple[str | None, bool]] | None = None,
+    ) -> list[dict[str, Any]]:
+        dataset = self.datasets[name]
+        if extras_by_index is None:
+            samples = [dataset[int(i)] for i in indices]
+        else:
+            # cosmos_hs11 v18: negative instruction into the raw row (tokenized by the transform like the LIBERO
+            # loader); windows without an eligible negative are masked out of the hinge.
+            samples = []
+            for i in indices:
+                negative, valid = extras_by_index.get(int(i), (None, False))
+                sample = dataset.getitem_with_extras(int(i), {"ranking_negative_instruction": negative})
+                if not valid:
+                    sample["ranking_valid"] = False
+                samples.append(sample)
+        if self.native_video_size is not None and name not in self.native_video_full_res:
+            for sample in samples:
+                native = sample.get(self.native_video_key)
+                if isinstance(native, torch.Tensor):
+                    sample[self.native_video_key] = resize_native_video_clip(native, self.native_video_size)
+        return samples
+
+    def ranking_negatives(self, spec: MetaEpisodeSpec, rng: np.random.Generator | None) -> dict | None:
+        """Per-window negatives of this episode (None when language ranking is off)."""
+        if not self.language_ranking:
+            return None
+        return episode_ranking_negatives(spec, self.task_texts.get(spec.embodiment), rng or np.random.default_rng())
+
+    def materialize(self, spec: MetaEpisodeSpec, rng: np.random.Generator | None = None) -> dict[str, Any]:
+        negatives = self.ranking_negatives(spec, rng)
+        support = [
+            pack_samples_into_batch(self._load(spec.embodiment, chunk, negatives), spec.embodiment)
+            for chunk in _chunk(spec.support_indices, self.max_samples_per_batch)
+        ]
+        query = [
+            pack_samples_into_batch(self._load(spec.embodiment, chunk, negatives), spec.embodiment)
+            for chunk in _chunk(spec.query_indices, self.max_samples_per_batch)
+        ]
+        return {
+            "embodiment": spec.embodiment,
+            "domain_id": spec.domain_id,
+            "spec": spec.summary(),
+            "support": support,
+            "query": query,
+        }
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        from cosmos_framework.data.generator.action.utils.video_decode_env import ensure_video_decoder_libs
+
+        ensure_video_decoder_libs()
+        wi = get_worker_info()
+        worker_id = wi.id if wi is not None else 0
+        num_workers = wi.num_workers if wi is not None else 1
+        global_shard = int(self.shard_rank) * num_workers + worker_id
+        rng = np.random.default_rng([self.seed, int(self.shard_world_size), global_shard])
+        consecutive_failures = 0
+        while True:
+            spec = self.sampler.sample(rng, embodiment=self.embodiment_override)
+            try:
+                item = self.materialize(spec)
+            except Exception as e:  # noqa: BLE001 - one bad episode must not kill the worker
+                consecutive_failures += 1
+                log.warning(
+                    f"meta-episode materialization failed ({spec.embodiment}): {type(e).__name__}: {e}; "
+                    f"resampling ({consecutive_failures}/{self.max_consecutive_failures})"
+                )
+                if consecutive_failures >= self.max_consecutive_failures:
+                    raise RuntimeError(
+                        f"{consecutive_failures} consecutive meta-episode failures; last error: {type(e).__name__}: {e}"
+                    ) from e
+                continue
+            consecutive_failures = 0
+            yield item
+
+
+class MetaEpisodeLoader:
+    """Rank-aware wrapper around ``DataLoader(MetaEpisodeIterableDataset, batch_size=None)``."""
+
+    def __init__(
+        self,
+        dataset: MetaEpisodeIterableDataset,
+        num_workers: int = 4,
+        prefetch_factor: int = 2,
+        pin_memory: bool = False,
+        timeout_s: float = 1800.0,
+    ) -> None:
+        rank, world_size = 0, 1
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            rank, world_size = torch.distributed.get_rank(), torch.distributed.get_world_size()
+        dataset.shard_rank = rank
+        dataset.shard_world_size = world_size
+        self.dataset = dataset
+        kwargs: dict[str, Any] = dict(batch_size=None, num_workers=int(num_workers), pin_memory=pin_memory)
+        if num_workers > 0:
+            # ``timeout`` turns a lost/stalled worker item into a RuntimeError instead of an infinite
+            # wait on next(loader) (which deadlocks the other ranks in all_reduce).
+            kwargs.update(prefetch_factor=int(prefetch_factor), persistent_workers=True, timeout=float(timeout_s))
+        self.dataloader = DataLoader(dataset, **kwargs)
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        return iter(self.dataloader)
+
+
+@dataclass
+class MetaSamplerConfig:
+    """Sampler knobs, kept as a dataclass so ``[custom.meta]`` TOML overrides map 1:1."""
+
+    k_shot: int = 5
+    q_query: int = 5
+    windows_per_demo: int = 8
+    query_windows_per_demo: int | None = None
+    disjoint_tasks: bool | str = "auto"
+    min_tasks_for_disjoint: int = 4
+    min_windows_per_demo: int = 1
+    embodiment_weights: dict[str, float] | None = None
+    tasks_per_episode: int | None = None  # cosmos_hs11 v4.1 grouped episodes (see EpisodicEmbodimentSampler)
+    grouped_episode_fraction: float = 0.0
+    max_samples_per_batch: int = 40
+    num_workers: int = 4
+    prefetch_factor: int = 2
+    loader_timeout_s: float = 1800.0
+    seed: int = 42
+    embodiment_override: str | None = None
+    extra: dict[str, Any] = field(default_factory=dict)
+
+
+def build_meta_episode_loader(
+    *,
+    data_root: str,
+    embodiments: Sequence[str],
+    tokenizer_config: dict | None,
+    max_action_dim: int = 64,
+    chunk_length: int = 16,
+    mode: str = "wam",
+    resolution: str | int | None = "256",
+    cfg_dropout_rate: float = 0.1,
+    format_prompt_as_json: bool = True,
+    append_idle_frames: bool = True,
+    dataset_kwargs: dict[str, dict[str, Any]] | None = None,
+    root_overrides: dict[str, str] | None = None,
+    k_shot: int = 5,
+    q_query: int = 5,
+    windows_per_demo: int = 8,
+    query_windows_per_demo: int | None = None,
+    disjoint_tasks: bool | str = "auto",
+    min_tasks_for_disjoint: int = 4,
+    min_windows_per_demo: int = 1,
+    embodiment_weights: dict[str, float] | None = None,
+    tasks_per_episode: int | None = None,
+    grouped_episode_fraction: float = 0.0,
+    max_samples_per_batch: int = 40,
+    num_workers: int = 4,
+    prefetch_factor: int = 2,
+    loader_timeout_s: float = 1800.0,
+    seed: int = 42,
+    embodiment_override: str | None = None,
+) -> MetaEpisodeLoader:
+    """Build every embodiment dataset, the episodic sampler, and the rank-aware loader.
+
+    This is the ``dataloader_train`` entry point of the ``action_fewshot_meta_edge`` experiment
+    (``LazyCall(build_meta_episode_loader)(...)``); ``[custom.meta]`` TOML keys with the same names
+    override the sampler arguments (see ``scripts/train_action_meta.py``).
+    """
+    from cosmos_framework.data.generator.action.meta.embodiments import (
+        build_embodiment_sft_dataset,
+        build_meta_transform,
+        get_episode_table,
+    )
+
+    transform = build_meta_transform(
+        tokenizer_config=tokenizer_config,
+        max_action_dim=max_action_dim,
+        cfg_dropout_rate=cfg_dropout_rate,
+        append_idle_frames=append_idle_frames,
+        format_prompt_as_json=format_prompt_as_json,
+    )
+    datasets: dict[str, Any] = {}
+    tables: dict[str, EpisodeTable] = {}
+    domain_ids: dict[str, int] = {}
+    for name in embodiments:
+        ds = build_embodiment_sft_dataset(
+            name,
+            data_root,
+            transform,
+            resolution=resolution,
+            chunk_length=chunk_length,
+            mode=mode,
+            root_override=(root_overrides or {}).get(name),
+            dataset_kwargs=(dataset_kwargs or {}).get(name),
+        )
+        datasets[name] = ds
+        tables[name] = get_episode_table(ds)
+        domain_ids[name] = int(ds._dataset.domain_id)
+    sampler = EpisodicEmbodimentSampler(
+        tables,
+        domain_ids,
+        k_shot=k_shot,
+        q_query=q_query,
+        windows_per_demo=windows_per_demo,
+        query_windows_per_demo=query_windows_per_demo,
+        disjoint_tasks=disjoint_tasks,
+        min_tasks_for_disjoint=min_tasks_for_disjoint,
+        min_windows_per_demo=min_windows_per_demo,
+        embodiment_weights=embodiment_weights,
+        tasks_per_episode=tasks_per_episode,
+        grouped_episode_fraction=grouped_episode_fraction,
+    )
+    stream = MetaEpisodeIterableDataset(
+        datasets,
+        sampler,
+        max_samples_per_batch=max_samples_per_batch,
+        seed=seed,
+        embodiment_override=embodiment_override,
+    )
+    return MetaEpisodeLoader(
+        stream, num_workers=num_workers, prefetch_factor=prefetch_factor, timeout_s=loader_timeout_s
+    )
+
+
+# --------------------------------------------------------------------------------------------
+# Reptile (cosmos_hs11): rank-synchronized meta-episodes for an FSDP-sharded inner loop
+# --------------------------------------------------------------------------------------------
+class SynchronizedMetaEpisodeIterableDataset(MetaEpisodeIterableDataset):
+    """Every rank sees the SAME meta-episode (embodiment + demonstrations) and materializes only its
+    shard of the windows.
+
+    :class:`MetaEpisodeIterableDataset` gives each (rank, worker) an independent stream, which is what
+    FOMAML with replicated weights wants (one embodiment per rank, meta-gradients averaged). Reptile's
+    inner loop is ordinary data-parallel training of a *sharded* (FSDP) model, so all ranks must adapt
+    the same weights on the same embodiment while each processes different windows:
+
+    * episode ``j`` is drawn from ``default_rng([seed, spec_offset + j])`` -- identical on every rank and
+      worker. ``DataLoader`` interleaves its workers deterministically (worker ``w`` produces
+      ``j = w, w + nw, w + 2nw, ...``), so the consumption order matches across ranks as long as every rank
+      uses the same ``num_workers``;
+    * rank ``r`` materializes ``support_indices[r::world]`` / ``query_indices[r::world]`` -> disjoint window
+      shards of one shared demonstration set (``k_shot * windows_per_demo`` must be >= ``world``);
+    * every item carries ``spec_id`` so the trainer can assert the ranks are in lock-step, and a failed
+      materialization yields ``{"failed": True, ...}`` for the same ``spec_id`` instead of silently moving
+      on (which would desynchronize the ranks). The trainer skips an episode any rank failed on.
+
+    ``spec_offset`` lets a resumed run continue with new episodes (set it to the resumed iteration).
+    """
+
+    def __init__(self, *args: Any, spec_offset: int = 0, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.spec_offset = int(spec_offset)
+
+    def spec_for(self, j: int) -> MetaEpisodeSpec:
+        rng = np.random.default_rng([int(self.seed), int(self.spec_offset) + int(j)])
+        return self.sampler.sample(rng, embodiment=self.embodiment_override)
+
+    def shard(self, indices: list[int]) -> list[int]:
+        return list(indices[int(self.shard_rank) :: max(1, int(self.shard_world_size))])
+
+    def materialize_shard(self, spec: MetaEpisodeSpec, spec_id: int) -> dict[str, Any]:
+        sup = self.shard(spec.support_indices)
+        qry = self.shard(spec.query_indices)
+        if not sup:
+            raise ValueError(
+                f"rank {self.shard_rank}/{self.shard_world_size} got no support windows: k_shot * windows_per_demo "
+                f"(= {len(spec.support_indices)}) must be >= world size"
+            )
+        # cosmos_hs11 v18: the negatives are drawn from a stream keyed by the episode only, so every rank holds the
+        # same window -> negative map (each rank then materializes its own shard of it).
+        negatives = self.ranking_negatives(
+            spec, np.random.default_rng([int(self.seed), int(self.spec_offset) + int(spec_id), 7919])
+        )
+        support = [
+            pack_samples_into_batch(self._load(spec.embodiment, chunk, negatives), spec.embodiment)
+            for chunk in _chunk(sup, self.max_samples_per_batch)
+        ]
+        query = (
+            [
+                pack_samples_into_batch(self._load(spec.embodiment, chunk, negatives), spec.embodiment)
+                for chunk in _chunk(qry, self.max_samples_per_batch)
+            ]
+            if qry
+            else []
+        )
+        return {
+            "embodiment": spec.embodiment,
+            "domain_id": spec.domain_id,
+            "spec": spec.summary(),
+            "spec_id": int(spec_id),
+            "failed": False,
+            "support": support,
+            "query": query,
+        }
+
+    def __iter__(self) -> Iterator[dict[str, Any]]:
+        from cosmos_framework.data.generator.action.utils.video_decode_env import ensure_video_decoder_libs
+
+        ensure_video_decoder_libs()
+        wi = get_worker_info()
+        worker_id = wi.id if wi is not None else 0
+        num_workers = wi.num_workers if wi is not None else 1
+        j = worker_id
+        while True:
+            spec = self.spec_for(j)
+            try:
+                item = self.materialize_shard(spec, j)
+            except Exception as e:  # noqa: BLE001 - report, never desynchronize
+                log.warning(
+                    f"[sync meta-episode {j}] materialization failed on rank {self.shard_rank} "
+                    f"({spec.embodiment}): {type(e).__name__}: {e}; the trainer will skip this episode"
+                )
+                item = {
+                    "embodiment": spec.embodiment,
+                    "domain_id": spec.domain_id,
+                    "spec": spec.summary(),
+                    "spec_id": int(j),
+                    "failed": True,
+                    "error": f"{type(e).__name__}: {e}",
+                    "support": [],
+                    "query": [],
+                }
+            yield item
+            j += num_workers
+
+
+def build_reptile_episode_loader(
+    *,
+    data_root: str,
+    embodiments: Sequence[str],
+    tokenizer_config: dict | None,
+    max_action_dim: int = 64,
+    chunk_length: int = 16,
+    mode: str = "wam",
+    resolution: str | int | None = "256",
+    cfg_dropout_rate: float = 0.1,
+    format_prompt_as_json: bool = True,
+    append_idle_frames: bool = True,
+    dataset_kwargs: dict[str, dict[str, Any]] | None = None,
+    root_overrides: dict[str, str] | None = None,
+    k_shot: int = 8,
+    q_query: int = 4,
+    windows_per_demo: int = 16,
+    query_windows_per_demo: int | None = None,
+    disjoint_tasks: bool | str = "auto",
+    min_tasks_for_disjoint: int = 4,
+    min_windows_per_demo: int = 1,
+    embodiment_weights: dict[str, float] | None = None,
+    tasks_per_episode: int | None = None,
+    grouped_episode_fraction: float = 0.0,
+    max_samples_per_batch: int = 32,
+    num_workers: int = 4,
+    prefetch_factor: int = 2,
+    loader_timeout_s: float = 1800.0,
+    seed: int = 42,
+    embodiment_override: str | None = None,
+    spec_offset: int = 0,
+    keep_native_video: bool = False,
+    native_video_size: int | None = None,
+    native_video_full_res: Sequence[str] | None = None,
+    language_ranking: bool = False,
+) -> MetaEpisodeLoader:
+    """Same datasets / sampler as :func:`build_meta_episode_loader`, streamed as rank-SYNCHRONIZED episodes
+    (:class:`SynchronizedMetaEpisodeIterableDataset`) for the Reptile trainer
+    (``scripts/train_action_reptile.py``). ``max_samples_per_batch`` is the per-rank windows per inner step.
+
+    ``keep_native_video`` / ``native_video_size`` (cosmos_hs11 v11): ship the native uint8 frames of every window as
+    ``video_native`` for the frozen REPA teacher of the inner loop, optionally shrunk to a square of
+    ``native_video_size`` px in the workers (set automatically by the trainer from ``model.config.repa``);
+    ``native_video_full_res`` names the embodiments kept at camera resolution (composite canvases with a
+    ``repa.view_layouts`` entry, cropped into views by the teacher).
+    ``language_ranking`` (cosmos_hs11 v18): ship a negative instruction (another support task of the same episode)
+    with every window for the action-language ranking hinge inside the inner loop (set automatically by the trainer
+    from ``model.config.language_ranking.enabled``).
+    """
+    from cosmos_framework.data.generator.action.meta.embodiments import (
+        build_embodiment_sft_dataset,
+        build_meta_transform,
+        embodiment_task_texts,
+        get_episode_table,
+    )
+
+    transform = build_meta_transform(
+        tokenizer_config=tokenizer_config,
+        max_action_dim=max_action_dim,
+        cfg_dropout_rate=cfg_dropout_rate,
+        append_idle_frames=append_idle_frames,
+        format_prompt_as_json=format_prompt_as_json,
+        keep_native_video=keep_native_video,
+    )
+    datasets: dict[str, Any] = {}
+    tables: dict[str, EpisodeTable] = {}
+    domain_ids: dict[str, int] = {}
+    for name in embodiments:
+        ds = build_embodiment_sft_dataset(
+            name,
+            data_root,
+            transform,
+            resolution=resolution,
+            chunk_length=chunk_length,
+            mode=mode,
+            root_override=(root_overrides or {}).get(name),
+            dataset_kwargs=(dataset_kwargs or {}).get(name),
+        )
+        datasets[name] = ds
+        tables[name] = get_episode_table(ds)
+        domain_ids[name] = int(ds._dataset.domain_id)
+    task_texts: dict[str, dict[int, str] | None] = {}
+    if language_ranking:
+        task_texts = {name: embodiment_task_texts(ds) for name, ds in datasets.items()}
+        missing = [n for n, t in task_texts.items() if not t]
+        if missing:
+            raise ValueError(f"language_ranking: no task table (reader._tasks) for embodiments {missing}")
+    sampler = EpisodicEmbodimentSampler(
+        tables,
+        domain_ids,
+        k_shot=k_shot,
+        q_query=q_query,
+        windows_per_demo=windows_per_demo,
+        query_windows_per_demo=query_windows_per_demo,
+        disjoint_tasks=disjoint_tasks,
+        min_tasks_for_disjoint=min_tasks_for_disjoint,
+        min_windows_per_demo=min_windows_per_demo,
+        embodiment_weights=embodiment_weights,
+        tasks_per_episode=tasks_per_episode,
+        grouped_episode_fraction=grouped_episode_fraction,
+    )
+    stream = SynchronizedMetaEpisodeIterableDataset(
+        datasets,
+        sampler,
+        max_samples_per_batch=max_samples_per_batch,
+        seed=seed,
+        embodiment_override=embodiment_override,
+        spec_offset=spec_offset,
+        native_video_size=native_video_size,
+        native_video_full_res=native_video_full_res,
+        language_ranking=language_ranking,
+        task_texts=task_texts,
+    )
+    return MetaEpisodeLoader(
+        stream, num_workers=num_workers, prefetch_factor=prefetch_factor, timeout_s=loader_timeout_s
+    )

@@ -1,0 +1,177 @@
+{
+  "description": "1 demonstration per task, drawn with random.Random(seed=42) from the 3 episodes each task has in libero_10_3ep_per_task_seed42.json (tasks in ascending task_index order, candidates sorted by episode_index); NOT sampled from the whole dataset, so this is a strict subset of the parent 3-demo subset. Consumed by LIBEROLeRobotDataset(episode_subset_path=...).",
+  "seed": 42,
+  "episodes_per_task": 1,
+  "n_excluded": 0,
+  "n_tasks": 10,
+  "n_episodes_total_in_dataset": 379,
+  "n_episodes": 10,
+  "tasks": {
+    "0": {
+      "task": "turn on the stove and put the moka pot on it",
+      "n_available": 41,
+      "episodes": [
+        361
+      ]
+    },
+    "1": {
+      "task": "put both the alphabet soup and the tomato sauce in the basket",
+      "n_available": 33,
+      "episodes": [
+        156
+      ]
+    },
+    "2": {
+      "task": "put the white mug on the left plate and put the yellow and white mug on the right plate",
+      "n_available": 38,
+      "episodes": [
+        88
+      ]
+    },
+    "3": {
+      "task": "put the black bowl in the bottom drawer of the cabinet and close it",
+      "n_available": 35,
+      "episodes": [
+        319
+      ]
+    },
+    "4": {
+      "task": "pick up the book and place it in the back compartment of the caddy",
+      "n_available": 41,
+      "episodes": [
+        64
+      ]
+    },
+    "5": {
+      "task": "put the yellow and white mug in the microwave and close it",
+      "n_available": 34,
+      "episodes": [
+        3
+      ]
+    },
+    "6": {
+      "task": "put the white mug on the plate and put the chocolate pudding to the right of the plate",
+      "n_available": 36,
+      "episodes": [
+        113
+      ]
+    },
+    "7": {
+      "task": "put both the cream cheese box and the butter in the basket",
+      "n_available": 49,
+      "episodes": [
+        117
+      ]
+    },
+    "8": {
+      "task": "put both moka pots on the stove",
+      "n_available": 29,
+      "episodes": [
+        314
+      ]
+    },
+    "9": {
+      "task": "put both the alphabet soup and the cream cheese box in the basket",
+      "n_available": 43,
+      "episodes": [
+        7
+      ]
+    }
+  },
+  "excluded_from": [],
+  "source_root_basename": "libero_10",
+  "based_on": "libero_10_3ep_per_task_seed42.json",
+  "v1_seed": 42,
+  "v1_selection": {
+    "0": {
+      "task": "turn on the stove and put the moka pot on it",
+      "candidates": [
+        38,
+        66,
+        361
+      ],
+      "chosen": 361
+    },
+    "1": {
+      "task": "put both the alphabet soup and the tomato sauce in the basket",
+      "candidates": [
+        156,
+        181,
+        200
+      ],
+      "chosen": 156
+    },
+    "2": {
+      "task": "put the white mug on the left plate and put the yellow and white mug on the right plate",
+      "candidates": [
+        88,
+        107,
+        343
+      ],
+      "chosen": 88
+    },
+    "3": {
+      "task": "put the black bowl in the bottom drawer of the cabinet and close it",
+      "candidates": [
+        16,
+        36,
+        319
+      ],
+      "chosen": 319
+    },
+    "4": {
+      "task": "pick up the book and place it in the back compartment of the caddy",
+      "candidates": [
+        28,
+        64,
+        136
+      ],
+      "chosen": 64
+    },
+    "5": {
+      "task": "put the yellow and white mug in the microwave and close it",
+      "candidates": [
+        3,
+        145,
+        357
+      ],
+      "chosen": 3
+    },
+    "6": {
+      "task": "put the white mug on the plate and put the chocolate pudding to the right of the plate",
+      "candidates": [
+        113,
+        356,
+        369
+      ],
+      "chosen": 113
+    },
+    "7": {
+      "task": "put both the cream cheese box and the butter in the basket",
+      "candidates": [
+        117,
+        232,
+        251
+      ],
+      "chosen": 117
+    },
+    "8": {
+      "task": "put both moka pots on the stove",
+      "candidates": [
+        70,
+        194,
+        314
+      ],
+      "chosen": 314
+    },
+    "9": {
+      "task": "put both the alphabet soup and the cream cheese box in the basket",
+      "candidates": [
+        7,
+        96,
+        223
+      ],
+      "chosen": 7
+    }
+  }
+}

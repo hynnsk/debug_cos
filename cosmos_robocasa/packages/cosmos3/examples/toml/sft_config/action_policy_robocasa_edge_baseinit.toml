@@ -1,0 +1,99 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# cosmos_robocasa -- MID-TRAINED Cosmos3-Edge INIT -> FULL fine-tune on the ORIGINAL RoboCasa benchmark (24 atomic tasks x
+# ~50 human demos per task = the RSS 2024 "human-50" setting used by Cosmos Policy, Table 2: 67.1 % with 50 demos/task).
+# Data = nvidia/RoboCasa-Cosmos-Policy success_only (224x224, no-op filtered, success-trimmed) converted to LeRobot v3
+# (examples/setup_robocasa.sh). This is the fresh-init BASELINE of action_policy_robocasa_edge_reptileinit.toml; the two
+# recipes differ ONLY in
+#   * the init: [checkpoint].load_path = the base Cosmos3-Edge DCP, no meta_action_init_*; keys_to_skip_loading stays at the
+#     experiment default, so the RoboCasa action-head row (30) starts fresh;
+#   * the action-head LR multiplier: 5x fresh-head boost (the reptileinit recipe uses 1x, its heads are meta-initialized).
+#
+# Recipe = Cosmos Policy's RoboCasa configuration mapped onto Cosmos3-Edge (experiment action_policy_robocasa_edge, see its
+# docstring for the data contract: 10D [pos, rot6d, gripper] quantile-normalized, min/max-normalized eef state token,
+# agentview_left | wrist canvas, chunk 16, "stronger" augmentation, no prompt dropout, every success demo trained on):
+#   optimizer  AdamW lr 1e-4, betas (0.9, 0.99), eps 1e-8, weight decay 0.1, clip 1.0  (Cosmos Policy / Predict2 defaults)
+#   schedule   Cosmos Policy: warmup 1000, linear decay to 0.3x over 30k of 45k steps, then 0.06x constant ("sharp decay").
+#              Scaled to this budget: warmup 300, decay to 0.3x at iteration 4000 (2/3), then 0.06x until 6000.
+#   batch      Cosmos Policy: global 800 single-timestep samples (chunk 32) for 45k steps on 32 H100 (~120 epochs).
+#              Here: 4 GPUs (shard 4) x 128 windows (17 frames, 16 actions) = global 512 windows/step; 6000 iterations =
+#              3.07 M windows ~ 10 epochs of the ~300 k training windows (the chunk-16 contract keeps the Reptile init
+#              comparable). Expect ~55 s/iter on 4 x A40 (RoboCasa365 measurement at this geometry) -> ~4 days per run;
+#              trainer.max_iter / scheduler.cycle_lengths[0] are the knobs (keep cycle_lengths[0] ~ 2/3 of max_iter).
+#   EMA        Cosmos3 default (power, rate 0.1) kept ON: the Cosmos3 eval servers load the EMA weights. (Cosmos Policy
+#              trains without EMA; set [model.ema].enabled = false to mirror it.)
+#   validation off (in-sample 5 % monitor only; [trainer].run_validation = true to log it every validation_iter).
+# Env: ROBOCASA_ROOT (<...>/robocasa_cosmos_policy_lerobot_v3), BASE_CHECKPOINT_PATH (Cosmos3-Edge DCP dir), WAN_VAE_PATH,
+# IMAGINAIRE_OUTPUT_ROOT. See docs/action_policy_robocasa_posttrain.md.
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_robocasa_edge"
+project      = "cosmos3_action_robocasa"
+group        = "edge_robocasa_h50"
+name         = "edge_robocasa_h50_fullft_baseinit"
+wandb_mode   = "offline"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056   # inert at train time (only the cost model reads it): the loader packs by max_samples_per_batch
+lora_enabled = false                   # full fine-tune, no adapters
+
+[model.ema]
+enabled         = true
+rate            = 0.1
+iteration_shift = 0
+
+[model.parallelism]
+data_parallel_shard_degree     = 4      # 4-GPU run: NPROC_PER_NODE=4 sr 4 48 ... (global batch = 128 windows/rank x 4 ranks = 512)
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr           = 1.0e-04        # Cosmos Policy (Predict2 default); the LIBERO Edge recipe used 5e-5
+betas        = [0.9, 0.99]
+eps          = 1.0e-08
+weight_decay = 0.1
+
+[optimizer.lr_multipliers]
+action2llm            = 5.0   # fresh-head boost (= the experiment default); 1x in the reptileinit recipe
+llm2action            = 5.0
+action_modality_embed = 5.0
+
+[scheduler]
+# Cycle 1: linear warmup (300) then linear decay 1.0 -> 0.3 at iteration 4000; cycle 2: constant 0.06 (lr 6e-6) to the end.
+cycle_lengths = [4000, 1000000000]
+warm_up_steps = [300, 0]
+f_start       = [1.0e-06, 0.06]
+f_max         = [1.0, 0.06]
+f_min         = [0.3, 0.06]
+
+[trainer]
+max_iter        = 6000
+logging_iter    = 20
+grad_accum_iter = 1              # global 512 = 128 windows/rank x 4 ranks
+# in-sample loss monitor (~3 demos/task of the TRAINING set, fixed windows); off by default
+run_validation          = false
+run_validation_on_start = false
+validation_iter         = 1000
+max_val_iter            = 8      # x 16 windows/rank x 4 ranks = 512 windows per pass
+
+[dataloader_train]
+max_samples_per_batch  = 128     # per rank, binding (token packing off): x 4 ranks = 512 windows/step
+use_image_augmentation = true    # Cosmos Policy "stronger" aug: crop 90 % area + rotation 5 deg + ColorJitter 0.3/0.4/0.5/0.05
+
+[dataloader_val]
+max_samples_per_batch = 16
+
+[checkpoint]
+load_path = "${oc.env:BASE_CHECKPOINT_PATH}"   # mid-trained Cosmos3-Edge DCP dir (NOT a Reptile iteration dir)
+save_iter = 2000                                # DCPs at 2000 / 4000 / 6000 (~24 GB each) -> evaluate intermediate budgets too
+# No keys_to_skip_loading / meta_action_init_* here on purpose: the experiment default skips the action heads of the base
+# DCP (fresh RoboCasa row), which is what the 5x head LR multiplier above is for.

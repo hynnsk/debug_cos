@@ -1,0 +1,177 @@
+{
+  "description": "1 demonstration per task, drawn with random.Random(seed=42) from the 3 episodes each task has in libero_goal_3ep_per_task_v2.json (tasks in ascending task_index order, candidates sorted by episode_index); NOT sampled from the whole dataset, so this is a strict subset of the parent 3-demo subset. Consumed by LIBEROLeRobotDataset(episode_subset_path=...).",
+  "seed": 42,
+  "episodes_per_task": 1,
+  "n_excluded": 0,
+  "n_tasks": 10,
+  "n_episodes_total_in_dataset": 428,
+  "n_episodes": 10,
+  "tasks": {
+    "0": {
+      "task": "put the bowl on the plate",
+      "n_available": 49,
+      "episodes": [
+        347
+      ]
+    },
+    "1": {
+      "task": "put the wine bottle on the rack",
+      "n_available": 36,
+      "episodes": [
+        160
+      ]
+    },
+    "2": {
+      "task": "open the top drawer and put the bowl inside",
+      "n_available": 36,
+      "episodes": [
+        70
+      ]
+    },
+    "3": {
+      "task": "put the cream cheese in the bowl",
+      "n_available": 40,
+      "episodes": [
+        398
+      ]
+    },
+    "4": {
+      "task": "put the wine bottle on top of the cabinet",
+      "n_available": 47,
+      "episodes": [
+        17
+      ]
+    },
+    "5": {
+      "task": "push the plate to the front of the stove",
+      "n_available": 33,
+      "episodes": [
+        205
+      ]
+    },
+    "6": {
+      "task": "turn on the stove",
+      "n_available": 50,
+      "episodes": [
+        11
+      ]
+    },
+    "7": {
+      "task": "put the bowl on the stove",
+      "n_available": 48,
+      "episodes": [
+        165
+      ]
+    },
+    "8": {
+      "task": "put the bowl on top of the cabinet",
+      "n_available": 46,
+      "episodes": [
+        414
+      ]
+    },
+    "9": {
+      "task": "open the middle drawer of the cabinet",
+      "n_available": 43,
+      "episodes": [
+        26
+      ]
+    }
+  },
+  "excluded_from": [],
+  "source_root_basename": "libero_goal",
+  "based_on": "libero_goal_3ep_per_task_v2.json",
+  "v1_seed": 42,
+  "v1_selection": {
+    "0": {
+      "task": "put the bowl on the plate",
+      "candidates": [
+        43,
+        72,
+        347
+      ],
+      "chosen": 347
+    },
+    "1": {
+      "task": "put the wine bottle on the rack",
+      "candidates": [
+        160,
+        163,
+        200
+      ],
+      "chosen": 160
+    },
+    "2": {
+      "task": "open the top drawer and put the bowl inside",
+      "candidates": [
+        70,
+        86,
+        405
+      ],
+      "chosen": 70
+    },
+    "3": {
+      "task": "put the cream cheese in the bowl",
+      "candidates": [
+        60,
+        319,
+        398
+      ],
+      "chosen": 398
+    },
+    "4": {
+      "task": "put the wine bottle on top of the cabinet",
+      "candidates": [
+        10,
+        17,
+        38
+      ],
+      "chosen": 17
+    },
+    "5": {
+      "task": "push the plate to the front of the stove",
+      "candidates": [
+        205,
+        210,
+        402
+      ],
+      "chosen": 205
+    },
+    "6": {
+      "task": "turn on the stove",
+      "candidates": [
+        11,
+        321,
+        344
+      ],
+      "chosen": 11
+    },
+    "7": {
+      "task": "put the bowl on the stove",
+      "candidates": [
+        165,
+        384,
+        417
+      ],
+      "chosen": 165
+    },
+    "8": {
+      "task": "put the bowl on top of the cabinet",
+      "candidates": [
+        286,
+        327,
+        414
+      ],
+      "chosen": 414
+    },
+    "9": {
+      "task": "open the middle drawer of the cabinet",
+      "candidates": [
+        26,
+        111,
+        146
+      ],
+      "chosen": 26
+    }
+  }
+}
