@@ -1,0 +1,66 @@
+# openpi_hs11 -- LIBERO post-training: libero_10, 3 demos/task (the final cosmos_hs11 subset), Reptile init.
+# Base recipe [job].config fixes the model (pi05, 10-step chunks, state not fed to pi05 = openpi's pi05_libero) and the
+# LIBERO_LeRobot_v3 pipeline; everything below re-states the run settings and can be overridden on the CLI
+# (scripts/train_toml.py --toml <this file> train.num_train_steps=20 wandb.enabled=false ...).
+# Launch: sr 4 48 scripts/hs11/launch_libero10_3ep_reptile_v1.sh    Checkpoints: checkpoints/pi05_libero_v3_libero_10_3ep_reptile/libero10_3ep_reptile_v1/<step>/
+
+[job]
+config       = "pi05_libero_v3_libero_10_3ep_reptile"
+exp_name     = "libero10_3ep_reptile_v8.8"
+project_name = "openpi_hs11"
+
+[wandb]
+enabled = true
+mode    = "offline"        # offline | online | disabled (WANDB_MODE); enabled=false disables logging entirely
+
+[data]
+suite          = "libero_10"
+episode_subset = "libero_10_3ep_per_task_seed42.json"
+
+[checkpoint]
+init        = "reptile"        # warm start from a Reptile theta
+init_params = "checkpoints/pi05_reptile/reptile_v8/1000/params"   # <reptile ckpt>/<meta-iter>/params; REPTILE_PARAMS env or checkpoint.init_params=... overrides
+base_dir    = "./checkpoints"
+
+[train]
+batch_size      = 64
+num_train_steps = 5000
+fsdp_devices    = 0            # 0 = shard over every GPU of the allocation
+num_workers     = 8
+save_interval   = 5000
+keep_period     = 1000
+log_interval    = 50
+seed            = 42
+ema_enabled     = true
+ema_decay       = 0.999
+overwrite       = false
+resume          = true            # an existing checkpoint dir continues from its latest step + wandb run id
+[optimizer]
+peak_lr            = 5e-5
+warmup_steps       = 200
+decay_steps        = 5000         # cosine to decay_lr at the last step
+decay_lr           = 5e-6
+weight_decay       = 1e-10
+clip_gradient_norm = 1.0
+
+[model]
+action_horizon = 10
+
+
+# cosmos_hs11 language ranking (v23/v41 recipe, pi0_config.LanguageRankingConfig): every sample is predicted a second
+# time from the same noised chunk under a uniformly drawn wrong-task instruction; loss += loss_weight * mean_batch(
+# relu(margin + E_pos - E_neg)), E = fp32 MSE over the 7 real action dims. Cosmos uses loss_weight 1.0 next to its 10x
+# action term (1:10 per real element); openpi's action loss has weight 1 but averages over all 32 padded slots, so the
+# equivalent weight is 0.1 * 7/32 = 0.022 (0.1 here would make the hinge 0.46x the action gradient per element).
+# v2.4 = v2.3 with the RELATIVE hinge of cosmos_hs11 (action_policy_libero_spatial_edge_reptileinit_v97.toml): the required
+# gap is margin * stop_gradient(E_pos) per sample, i.e. E_neg >= (1 + margin) * E_pos, so pairs whose own error is already
+# small are not asked for an impossible absolute gap. A relative margin is unit-free and transfers from Cosmos as-is (0.2);
+# only loss_weight carries the 7/32 padding factor (Cosmos 1.0 next to its 10x action term ~ 0.022 here; v2.3 uses 0.02).
+[model.language_ranking]
+enabled             = true
+loss_weight         = 0.005
+margin              = 0.3        # absolute: E_neg >= E_pos + margin | relative: E_neg >= (1 + margin) * E_pos
+raw_action_dim      = 7
+negative_grad_scale = 1.0        # gradient scale through E_neg: 1.0 = original, 0.0 = positive-only, 0.2 = asymmetric
+margin_mode         = "relative" # "absolute" | "relative" (margin x sg(E_pos) per sample)
+self_paced_fraction = 0.0        # 0.0 = off; else only this fraction of valid samples (largest detached gap - margin_i) is ranked
