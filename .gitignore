@@ -9,6 +9,11 @@
 cosmos_storage/
 # Ad-hoc smoke-test scripts and their SLURM .out/.log files
 _scratch/
+# Separate project (AIGI detector), never tracked here; its training runs write wandb/output_dir logs inside it.
+/Few-Shot-AIGI-Detector/
+# Local figure / visualisation scratch (root utils/ only; NOT cosmos*/.../utils source dirs).
+# Files committed before 2026-11-09 stay tracked until `git rm -r --cached utils/`.
+/utils/
 # Third-party clone (has its own .git; install from upstream instead)
 LIBERO/
 # RoboCasa365 simulator clones for cosmos_hs11 (own .git each; robocasa/ also holds ~23 GB of kitchen assets).
