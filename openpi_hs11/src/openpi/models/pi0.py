@@ -7,6 +7,7 @@ import jax
 import jax.numpy as jnp
 from typing_extensions import override
 
+from openpi.hs11 import repa as _repa
 from openpi.models import model as _model
 from openpi.models import pi0_config
 import openpi.models.gemma as _gemma
@@ -68,8 +69,24 @@ class Pi0(_model.BaseModel):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
         self.pi05 = config.pi05
         self.language_ranking = config.language_ranking
+        self.repa = config.repa
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
+        if config.repa.enabled:
+            # cosmos_hs11 REPA: trainable projector from the PaliGemma residual stream (image tokens after
+            # repa.layer_index blocks) to the DINOv2 feature width. The frozen teacher itself is NOT a model member
+            # (scripts/train.py passes it into compute_loss_and_metrics), so checkpoints only grow by this head.
+            if not 1 <= config.repa.layer_index <= paligemma_config.depth:
+                raise ValueError(
+                    f"repa.layer_index must be in [1, {paligemma_config.depth}] for {config.paligemma_variant}, got {config.repa.layer_index}"
+                )
+            self.repa_proj = _repa.RepaProjector(
+                paligemma_config.width,
+                config.repa.projector_hidden_dim,
+                _repa.teacher_spec(config.repa).embed_dim,
+                config.repa.projector_type,
+                rngs=rngs,
+            )
         # TODO: rewrite gemma in NNX. For now, use bridge.
         llm = nnx_bridge.ToNNX(
             _gemma.Module(
@@ -194,22 +211,78 @@ class Pi0(_model.BaseModel):
         return chunked_loss
 
     def _predict_velocity(
-        self, observation: _model.Observation, x_t: _model.Actions, time: at.Float[at.Array, "*b"]
-    ) -> _model.Actions:
-        """One prefix + suffix pass: the velocity field v_t predicted for the (already preprocessed) observation."""
+        self,
+        observation: _model.Observation,
+        x_t: _model.Actions,
+        time: at.Float[at.Array, "*b"],
+        *,
+        capture_layer: int | None = None,
+    ) -> tuple[_model.Actions, at.Float[at.Array, "b s emb"] | None]:
+        """One prefix + suffix pass: the velocity field v_t predicted for the (already preprocessed) observation, plus the
+        PaliGemma residual stream of the prefix after ``capture_layer`` blocks (cosmos_hs11 REPA student; None if not
+        requested)."""
         prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
         input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
         ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
         attn_mask = make_attn_mask(input_mask, ar_mask)
         positions = jnp.cumsum(input_mask, axis=1) - 1
-        (prefix_out, suffix_out), _ = self.PaliGemma.llm(
-            [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
+        if capture_layer is None:
+            (prefix_out, suffix_out), _ = self.PaliGemma.llm(
+                [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
+            )
+            captured = None
+        else:
+            (prefix_out, suffix_out), _, captured = self.PaliGemma.llm(
+                [prefix_tokens, suffix_tokens],
+                mask=attn_mask,
+                positions=positions,
+                adarms_cond=[None, adarms_cond],
+                capture_layer=capture_layer,
+                method="forward_capture",
+            )
+        return self.action_out_proj(suffix_out[:, -self.action_horizon :]), captured
+
+    def _repa_terms(
+        self, observation: _model.Observation, prefix_hidden: at.Float[at.Array, "b s emb"], repa_teacher
+    ) -> tuple[at.Float[at.Array, " b"], dict[str, at.Array]]:
+        """cosmos_hs11 REPA: per-sample ``loss_weight * (1 - cos) + relation_loss_weight * rel`` (see
+        ``pi0_config.RepaConfig`` / ``hs11.repa.repa_losses``) over the image tokens of every valid camera view."""
+        cfg = self.repa
+        names = list(observation.images)
+        grid = _repa.student_grid()
+        n_tok, n_img = grid[0] * grid[1], len(names)
+        if prefix_hidden.shape[1] < n_img * n_tok:
+            raise ValueError(f"prefix has {prefix_hidden.shape[1]} tokens, fewer than {n_img} views x {n_tok} image tokens")
+        # embed_prefix puts the image tokens first, view by view in observation.images order, then the prompt tokens.
+        student = prefix_hidden[:, : n_img * n_tok]
+        pred = self.repa_proj(student)  # [b, n_img * n_tok, D_teacher] float32
+        target = jnp.concatenate([repa_teacher(observation.images[name]) for name in names], axis=1)
+        if target.shape != pred.shape:
+            raise ValueError(f"teacher tokens {target.shape} do not match the projected student tokens {pred.shape}")
+        view_mask = jnp.stack([observation.image_masks[name] for name in names], axis=1).astype(jnp.float32)  # [b, n_img]
+        token_mask = jnp.repeat(view_mask, n_tok, axis=1)  # [b, n_img * n_tok], view-major like the tokens
+        cos_loss, cos_mean, rel_loss = _repa.repa_losses(
+            pred, target, token_mask, relation_distance=cfg.relation_distance, eps=cfg.eps
         )
-        return self.action_out_proj(suffix_out[:, -self.action_horizon :])
+        term = cfg.loss_weight * cos_loss + cfg.relation_loss_weight * rel_loss
+        stop = jax.lax.stop_gradient
+        metrics = {
+            "repa_loss": stop(jnp.mean(cos_loss)),  # 1 - cos, unweighted (Cosmos name)
+            "repa_cos_sim": stop(jnp.mean(cos_mean)),
+            "repa_rel_loss": stop(jnp.mean(rel_loss)),  # similarity-map distance, unweighted
+            "repa_weighted_loss": stop(jnp.mean(term)),
+        }
+        return term, metrics
 
     def compute_loss_and_metrics(
-        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        actions: _model.Actions,
+        *,
+        train: bool = False,
+        repa_teacher=None,
     ) -> tuple[at.Float[at.Array, "*b ah"], dict[str, at.Array]]:
         """``compute_loss`` plus logging metrics.
 
@@ -219,6 +292,9 @@ class Pi0(_model.BaseModel):
         per-sample hinge ``relu(margin + E_pos - E_neg)`` (E = fp32 MSE over the chunk and the real action dims) is added
         as ``loss_weight * hinge`` to every chunk step of that sample, so ``mean(chunked_loss)`` equals
         ``mean_fm + loss_weight * mean_batch(hinge)`` exactly like Cosmos' ``total_loss += loss_weight * ranking_loss``.
+
+        cosmos_hs11 REPA: when ``config.repa.enabled``, ``repa_teacher`` (``hs11.repa.make_teacher_fn``) must be given;
+        the DINOv2 distillation terms of ``_repa_terms`` are added per sample in the same way (``repa_*`` metrics).
         """
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
@@ -230,13 +306,28 @@ class Pi0(_model.BaseModel):
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
-        # one big forward pass of prefix + suffix at once
-        v_t = self._predict_velocity(observation, x_t, time)
+        # one big forward pass of prefix + suffix at once (+ the REPA student hidden state when enabled)
+        repa = self.repa
+        v_t, prefix_hidden = self._predict_velocity(
+            observation, x_t, time, capture_layer=repa.layer_index if repa.enabled else None
+        )
         chunked_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        metrics: dict[str, at.Array] = {}
+
+        if repa.enabled:
+            if repa_teacher is None:
+                raise ValueError(
+                    "repa is enabled but no repa_teacher was given: scripts/train.py loads the DINOv2 teacher "
+                    "(hs11.repa.load_teacher_for_training) and passes hs11.repa.make_teacher_fn(...); the Reptile "
+                    "trainer does not support [model.repa]."
+                )
+            repa_term, repa_metrics = self._repa_terms(observation, prefix_hidden, repa_teacher)
+            chunked_loss = chunked_loss + repa_term[..., None]
+            metrics.update(repa_metrics)
 
         ranking = self.language_ranking
         if not ranking.enabled:
-            return chunked_loss, {}
+            return chunked_loss, metrics
         if observation.tokenized_negative_prompt is None or observation.tokenized_negative_prompt_mask is None:
             raise ValueError(
                 "language_ranking is enabled but the batch has no tokenized_negative_prompt(_mask); the data config must "
@@ -247,7 +338,7 @@ class Pi0(_model.BaseModel):
             tokenized_prompt=observation.tokenized_negative_prompt,
             tokenized_prompt_mask=observation.tokenized_negative_prompt_mask,
         )
-        v_neg = self._predict_velocity(negative, x_t, time)
+        v_neg, _ = self._predict_velocity(negative, x_t, time)
 
         # Real (non-padded) action slots: explicit width, or inferred from the batch (padding is exactly zero everywhere).
         if ranking.raw_action_dim is not None:
@@ -285,7 +376,7 @@ class Pi0(_model.BaseModel):
         chunked_loss = chunked_loss + ranking.loss_weight * sample_term[..., None]
 
         n_valid = jnp.maximum(jnp.sum(keep), 1.0)
-        metrics = {
+        metrics |= {
             "language_ranking_loss": stop(jnp.mean(sample_term)),
             "language_ranking_weighted_loss": stop(ranking.loss_weight * jnp.mean(sample_term)),
             "language_ranking_positive_error": stop(jnp.sum(e_pos * keep) / n_valid),

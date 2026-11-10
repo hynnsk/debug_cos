@@ -16,6 +16,7 @@ import optax
 import tqdm_loggable.auto as tqdm
 import wandb
 
+from openpi.hs11 import repa as _repa
 import openpi.models.model as _model
 import openpi.shared.array_typing as at
 import openpi.shared.nnx_utils as nnx_utils
@@ -146,6 +147,7 @@ def train_step(
     rng: at.KeyArrayLike,
     state: training_utils.TrainState,
     batch: tuple[_model.Observation, _model.Actions],
+    teacher_params: at.Params | None = None,
 ) -> tuple[training_utils.TrainState, dict[str, at.Array]]:
     model = nnx.merge(state.model_def, state.params)
     model.train()
@@ -154,9 +156,13 @@ def train_step(
     def loss_fn(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
-        # Models with auxiliary metrics (pi0: cosmos_hs11 language ranking) report them next to the loss.
+        # Models with auxiliary metrics (pi0: cosmos_hs11 language ranking / DINOv2 REPA) report them next to the loss.
         if hasattr(model, "compute_loss_and_metrics"):
-            chunked_loss, metrics = model.compute_loss_and_metrics(rng, observation, actions, train=True)
+            extra = {}
+            if teacher_params is not None:
+                # cosmos_hs11 REPA: the frozen DINOv2 teacher is a plain (replicated) pytree argument of the train step.
+                extra["repa_teacher"] = _repa.make_teacher_fn(config.model.repa, teacher_params)
+            chunked_loss, metrics = model.compute_loss_and_metrics(rng, observation, actions, train=True, **extra)
         else:
             chunked_loss, metrics = model.compute_loss(rng, observation, actions, train=True), {}
         return jnp.mean(chunked_loss), metrics
@@ -254,9 +260,18 @@ def main(config: _config.TrainConfig):
     if resuming:
         train_state = _checkpoints.restore_state(checkpoint_manager, train_state, data_loader)
 
+    # cosmos_hs11 REPA ([model.repa]): the frozen DINOv2 teacher rides along as an extra replicated train-step argument
+    # (never trained, never checkpointed). None keeps the stock train step.
+    teacher_params = _repa.load_teacher_for_training(config, replicated_sharding)
+    step_args: tuple = ()
+    in_shardings: tuple = (replicated_sharding, train_state_sharding, data_sharding)
+    if teacher_params is not None:
+        step_args = (teacher_params,)
+        in_shardings = (*in_shardings, replicated_sharding)
+
     ptrain_step = jax.jit(
         functools.partial(train_step, config),
-        in_shardings=(replicated_sharding, train_state_sharding, data_sharding),
+        in_shardings=in_shardings,
         out_shardings=(train_state_sharding, replicated_sharding),
         donate_argnums=(1,),
     )
@@ -272,7 +287,7 @@ def main(config: _config.TrainConfig):
     infos = []
     for step in pbar:
         with sharding.set_mesh(mesh):
-            train_state, info = ptrain_step(train_rng, train_state, batch)
+            train_state, info = ptrain_step(train_rng, train_state, batch, *step_args)
         infos.append(info)
         if step % config.log_interval == 0:
             stacked_infos = common_utils.stack_forest(infos)

@@ -269,6 +269,54 @@ Tests: `src/openpi/hs11/language_ranking_test.py` (closed-form hinge on the dumm
 CPU smoke: `scripts/hs11/smoke_train_cpu.py --language-ranking` (the dummy model's adaLN-zero init ignores the prompt, so
 its gap is exactly 0 there; with `pi05_base` it is not).
 
+## 5d. DINOv2 REPA distillation (`[model.repa]`, cosmos_hs10 REPA port)
+
+Representation alignment (Yu et al. 2024, "Representation Alignment for Generation") on the PaliGemma image tokens. Student:
+the residual stream of the image tokens after `layer_index` PaliGemma blocks of the SAME forward pass that predicts the
+actions (openpi feeds clean images and noises only the actions, so the frames the student sees ARE the model input); it is
+captured by `gemma.Module.forward_capture`, which carries one `(xs, captured)` buffer through the block scan instead of
+stacking all hidden states. Teacher: the frozen DINOv2 ViT-B/14 (`src/openpi/hs11/dinov2_flax.py`, a functional JAX port
+of `transformers.Dinov2Model` checked to 1e-3 at 224 and 112 px; weights from the HF cache snapshot of
+`facebook/dinov2-base`) run on the same augmented 224x224 frames: post-LN patch tokens, CLS dropped, 16x16 = the SigLIP grid
+(another `teacher_input_size` is resized onto it). `Pi0.repa_proj` (REPA's 3-layer SiLU MLP, 2048 -> 768) maps the student
+tokens and two per-sample terms are added to the flow-matching loss over the valid views' tokens (masked slots such as
+LIBERO's empty right wrist are excluded):
+
+* `loss_weight * (1 - cos(proj(h), dino))` -- token-wise cosine alignment (REPA);
+* `relation_loss_weight * mean |R(proj(h)) - R(dino)|` with `R(x) = normalize(x) normalize(x)^T` over ALL image tokens of
+  the sample (2 views x 256, within- and cross-view pairs), i.e. the (N*T)x(N*T) cosine-similarity maps;
+  `relation_distance = "l2"` squares the difference instead.
+
+`mean(chunked_loss) = mean_fm + loss_weight * mean_b(1 - cos) + relation_loss_weight * mean_b(rel)`; logged as `repa_loss`
+(1 - cos), `repa_cos_sim`, `repa_rel_loss`, `repa_weighted_loss`. The teacher is never trained or checkpointed:
+`scripts/train.py` loads it once (`hs11.repa.load_teacher_for_training`, replicated, bf16 by default) and passes it as an
+extra argument of the jitted train step. The projector IS trained / EMA'd / checkpointed; checkpoints without it (pi05_base,
+Reptile thetas) load with a fresh projector (`weight_loaders.MISSING_FROM_CHECKPOINT_REGEX`), and a REPA checkpoint serves
+both through its TOML (`serve_policy_toml.py`: projector loaded, unused by `sample_actions`) and through a plain config
+(`BaseModelConfig.load` drops the extra params). The Reptile trainer rejects `[model.repa]`.
+
+```toml
+[model.repa]
+enabled              = true
+loss_weight          = 0.02   # openpi's action loss averages over 32 padded slots -> 0.02 ~ Cosmos' 1.0 next to its 10x action loss
+relation_loss_weight = 0.02   # similarity-map L1 term
+relation_distance    = "l1"   # | "l2"
+layer_index          = 6      # 1..18 PaliGemma blocks (Cosmos used 8 of 28); 18 = the stream before the final norm
+teacher              = "dinov2_vitb14"   # | dinov2_vits14 | dinov2_vitl14; teacher_checkpoint_path "" = HF cache, then download
+teacher_input_size   = 224    # multiple of 14
+teacher_dtype        = "bfloat16"
+projector_type       = "mlp"  # | "linear"
+projector_hidden_dim = 2048
+```
+
+Recipes: `libero10_3ep_reptile_v8.16`, `goal_3ep_reptile_v8.9`, `object_3ep_reptile_v8.12`, `spatial_3ep_reptile_v8.12`
+(each = its predecessor's ranking recipe + this block, launchers `launch_<name>.sh`). Cost: one DINOv2-B forward on
+3 views x batch per step (~1 % of the policy FLOPs) and one `[b, prefix, 2048]` scan carry; the 768x768 relation maps are
+negligible. Tests: `src/openpi/hs11/repa_test.py` (gemma capture vs truncated block stacks, DINOv2 vs transformers, loss
+math vs numpy incl. masking and rotation invariance, pi0 wiring + gradients, checkpoint merge, TOML knob); CPU smoke:
+`scripts/hs11/smoke_train_cpu.py --repa` (real teacher weights, jitted train step with the extra argument, checkpoint with
+`repa_proj`, reload with and without `[model.repa]`).
+
 ## 6. Tests and CPU smokes
 
 ```bash

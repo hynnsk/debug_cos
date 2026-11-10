@@ -152,3 +152,5 @@ core.[0-9]*
 
 # ---- Paper draft (CVPR LaTeX project), kept local only -------------
 Paper/
+# Cosmos Policy fork of robocasa v0.2 (own .git + ~5 GB kitchen assets), set up by cosmos_robocasa/packages/cosmos3/examples/setup_robocasa_v02_eval.sh
+/robocasa_cosmos_policy/

@@ -64,6 +64,71 @@ class LanguageRankingConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class RepaConfig:
+    """DINOv2 representation alignment (REPA, Yu et al. 2024 "Representation Alignment for Generation") on the PaliGemma
+    image tokens, ported from the cosmos_hs10 ``[model.repa]`` module (``src/openpi/hs11/repa.py``).
+
+    Student: the residual stream of the image tokens after ``layer_index`` PaliGemma blocks of the SAME forward pass that
+    predicts the actions (openpi feeds clean images, so the frames the student sees are the model input, not noised
+    frames as in the Cosmos video model). Teacher: frozen DINOv2 patch tokens (post-LN, CLS dropped) of the same
+    augmented frames, resized onto the SigLIP token grid (16x16 at 224 px). A projector maps the student tokens to the
+    teacher width and two per-sample terms are added to the flow-matching loss, averaged over the valid views' tokens
+    (masked image slots such as LIBERO's empty right wrist are excluded):
+
+      ``loss_weight          * (1 - cos(proj(h), dino))``                    token-wise cosine alignment (REPA)
+      ``relation_loss_weight * dist(R(proj(h)), R(dino))``                   R(x) = normalize(x) normalize(x)^T over ALL
+                                                                             image tokens of the sample (all views), i.e.
+                                                                             the (N*T)x(N*T) cosine-similarity maps
+
+    ``mean(chunked_loss) == mean_fm + loss_weight * mean_batch(1 - cos) + relation_loss_weight * mean_batch(rel)``.
+    Scale note: openpi's action loss averages over all 32 padded slots (~7/32 of a real-dim mean), so a weight of 0.02
+    here corresponds to Cosmos' 1.0 next to its 10x action loss (same bookkeeping as LanguageRankingConfig).
+    """
+
+    enabled: bool = False
+    # Weight of the (unweighted, in [0, 2]) token cosine loss ``1 - cos``.
+    loss_weight: float = 0.0
+    # Weight of the relation (similarity-map) loss; "l1" = mean absolute, "l2" = mean squared entry-wise difference.
+    relation_loss_weight: float = 0.0
+    relation_distance: str = "l1"
+    # Number of PaliGemma blocks applied before the aligned hidden state is read (REPA "depth", 1-based; gemma_2b has 18,
+    # so 6 ~ REPA's 8 of 28). ``layer_index == depth`` is the residual stream before the final norm.
+    layer_index: int = 6
+    # Teacher: "dinov2_vitb14" (facebook/dinov2-base, D=768), "dinov2_vits14" (384) or "dinov2_vitl14" (1024).
+    teacher: str = "dinov2_vitb14"
+    # Explicit ``model.safetensors`` (HF layout) or HF snapshot dir; None = HF cache lookup, then snapshot_download.
+    teacher_checkpoint_path: str | None = None
+    # Square teacher input (multiple of 14). 224 -> 16x16 patches = the SigLIP grid; other sizes are resized onto it.
+    teacher_input_size: int = 224
+    # Compute dtype of the frozen teacher ("bfloat16" | "float32"); the loss is always computed in float32.
+    teacher_dtype: str = "bfloat16"
+    # "mlp" = REPA's Linear-SiLU-Linear-SiLU-Linear projector, "linear" = a single Linear.
+    projector_type: str = "mlp"
+    projector_hidden_dim: int = 2048
+    eps: float = 1e-6
+
+    def __post_init__(self):
+        for name in ("loss_weight", "relation_loss_weight", "eps"):
+            v = getattr(self, name)
+            if not math.isfinite(v) or v < 0:
+                raise ValueError(f"repa.{name} must be finite and >= 0, got {v}")
+        if self.relation_distance not in ("l1", "l2"):
+            raise ValueError(f"repa.relation_distance must be 'l1' or 'l2', got {self.relation_distance!r}")
+        if self.layer_index < 1:
+            raise ValueError(f"repa.layer_index is 1-based (blocks applied before the capture), got {self.layer_index}")
+        if self.teacher_input_size <= 0 or self.teacher_input_size % 14 != 0:
+            raise ValueError(f"repa.teacher_input_size must be a positive multiple of 14, got {self.teacher_input_size}")
+        if self.teacher_dtype not in ("bfloat16", "float32"):
+            raise ValueError(f"repa.teacher_dtype must be 'bfloat16' or 'float32', got {self.teacher_dtype!r}")
+        if self.projector_type not in ("mlp", "linear"):
+            raise ValueError(f"repa.projector_type must be 'mlp' or 'linear', got {self.projector_type!r}")
+        if self.projector_hidden_dim <= 0:
+            raise ValueError(f"repa.projector_hidden_dim must be positive, got {self.projector_hidden_dim}")
+        if self.enabled and self.loss_weight == 0.0 and self.relation_loss_weight == 0.0:
+            raise ValueError("repa is enabled but both loss_weight and relation_loss_weight are 0")
+
+
+@dataclasses.dataclass(frozen=True)
 class Pi0Config(_model.BaseModelConfig):
     dtype: str = "bfloat16"
     paligemma_variant: _gemma.Variant = "gemma_2b"
@@ -84,6 +149,8 @@ class Pi0Config(_model.BaseModelConfig):
 
     # cosmos_hs11 language ranking (off by default; LIBERO post-training TOMLs enable it via [model.language_ranking]).
     language_ranking: LanguageRankingConfig = dataclasses.field(default_factory=LanguageRankingConfig)
+    # cosmos_hs11 DINOv2 REPA distillation (off by default; LIBERO post-training TOMLs enable it via [model.repa]).
+    repa: RepaConfig = dataclasses.field(default_factory=RepaConfig)
 
     def __post_init__(self):
         if self.max_token_len is None:

@@ -1,0 +1,88 @@
+# openpi_hs11 -- LIBERO post-training: libero_object, 3 demos/task (the final cosmos_hs11 subset), Reptile init.
+# Base recipe [job].config fixes the model (pi05, 10-step chunks, state not fed to pi05 = openpi's pi05_libero) and the
+# LIBERO_LeRobot_v3 pipeline; everything below re-states the run settings and can be overridden on the CLI
+# (scripts/train_toml.py --toml <this file> train.num_train_steps=20 wandb.enabled=false ...).
+# Launch: sr 4 48 scripts/hs11/launch_object_3ep_reptile_v1.sh    Checkpoints: checkpoints/pi05_libero_v3_libero_object_3ep_reptile/object_3ep_reptile_v1/<step>/
+
+[job]
+config       = "pi05_libero_v3_libero_object_3ep_reptile"
+exp_name     = "object_3ep_reptile_v8.13"
+project_name = "openpi_hs11"
+
+[wandb]
+enabled = true
+mode    = "offline"        # offline | online | disabled (WANDB_MODE); enabled=false disables logging entirely
+
+[data]
+suite          = "libero_object"
+episode_subset = "libero_object_3ep_per_task_seed42.json"
+
+[checkpoint]
+init        = "reptile"        # warm start from a Reptile theta
+init_params = "checkpoints/pi05_reptile/reptile_v8/1000/params"   # <reptile ckpt>/<meta-iter>/params; REPTILE_PARAMS env or checkpoint.init_params=... overrides
+base_dir    = "./checkpoints"
+
+[train]
+batch_size      = 64
+num_train_steps = 5000
+fsdp_devices    = 0            # 0 = shard over every GPU of the allocation
+num_workers     = 8
+save_interval   = 5000
+keep_period     = 1000
+log_interval    = 50
+seed            = 42
+ema_enabled     = true
+ema_decay       = 0.999
+overwrite       = false
+resume          = true            # an existing checkpoint dir continues from its latest step + wandb run id
+[optimizer]
+peak_lr            = 5e-5
+warmup_steps       = 200
+decay_steps        = 5000         # cosine to decay_lr at the last step
+decay_lr           = 5e-6
+weight_decay       = 1e-10
+clip_gradient_norm = 1.0
+
+[model]
+action_horizon = 10
+
+# cosmos_hs11 language ranking (v23/v41 recipe, pi0_config.LanguageRankingConfig): every sample is predicted a second
+# time from the same noised chunk under a uniformly drawn wrong-task instruction; loss += loss_weight * mean_batch(
+# relu(margin + E_pos - E_neg)), E = fp32 MSE over the 7 real action dims. Cosmos uses loss_weight 1.0 next to its 10x
+# action term (1:10 per real element); openpi's action loss has weight 1 but averages over all 32 padded slots, so the
+# equivalent weight is 0.1 * 7/32 = 0.022 (0.1 here would make the hinge 0.46x the action gradient per element).
+[model.language_ranking]
+enabled             = true
+loss_weight         = 0.01
+margin              = 0.2        # absolute: E_neg >= E_pos + margin | relative: E_neg >= (1 + margin) * E_pos
+raw_action_dim      = 7
+negative_grad_scale = 1.0        # gradient scale through E_neg: 1.0 = original, 0.0 = positive-only, 0.2 = asymmetric
+margin_mode         = "relative" # "absolute" | "relative" (margin x sg(E_pos) per sample)
+self_paced_fraction = 0.0        # 0.0 = off; else only this fraction of valid samples (largest detached gap - margin_i) is ranked
+
+# cosmos_hs11 DINOv2 REPA distillation (pi0_config.RepaConfig, src/openpi/hs11/repa.py; recipe of cosmos_hs10 [model.repa],
+# idea of "Representation Alignment for Generation", Yu et al. 2024). Student = the PaliGemma residual stream of the image
+# tokens (base + wrist view, 16x16 tokens each) after layer_index blocks of the SAME forward pass that predicts the actions;
+# openpi feeds clean images (only the actions are noised), so the frames the student sees ARE the model input. Teacher =
+# frozen DINOv2 ViT-B/14 patch tokens (post-LN, CLS dropped) of the SAME augmented 224x224 frames, i.e. exactly what SigLIP
+# sees. A 3-layer SiLU MLP maps 2048 -> 768 and two per-sample terms are added to the flow-matching loss (mean over the
+# valid views' tokens; LIBERO's empty right-wrist slot is masked out):
+#   loss_weight          * (1 - cos(MLP(h), dino))          token-wise cosine alignment (REPA)
+#   relation_loss_weight * mean |R(MLP(h)) - R(dino)|       R(x) = normalize(x) normalize(x)^T over ALL 2x256 tokens of the
+#                                                           sample (within- and cross-view pairs): the similarity-map L1 term
+# Scale: openpi's action loss averages over 32 padded slots (~7/32 of a real-dim mean), so 0.02 here ~ Cosmos' 1.0 next to its
+# 10x action loss (REPA's lambda 0.5 ~ 0.01-0.05 here). Logged: repa_loss (1 - cos), repa_cos_sim, repa_rel_loss,
+# repa_weighted_loss. The teacher is never trained / checkpointed; the projector (repa_proj) is, and checkpoints without it
+# (the Reptile theta) load with a fresh projector.
+[model.repa]
+enabled                 = true
+loss_weight             = 0.02         # token cosine term
+relation_loss_weight    = 0.02         # similarity-map term
+relation_distance       = "l1"         # "l1" (absolute) | "l2" (squared)
+layer_index             = 16            # PaliGemma blocks applied before the student feature is read (1..18; Cosmos used 8 of 28)
+teacher                 = "dinov2_vitb14"   # facebook/dinov2-base (D=768); also dinov2_vits14 (384) / dinov2_vitl14 (1024)
+teacher_checkpoint_path = ""           # "" = HF cache ($HF_HOME/hub, $COSMOS_STORAGE/hf_cache/hub) then snapshot_download; or a model.safetensors / snapshot dir
+teacher_input_size      = 224          # multiple of 14; 224 -> the same 16x16 grid as SigLIP (other sizes are resized onto it)
+teacher_dtype           = "bfloat16"   # compute dtype of the frozen teacher (the loss is float32)
+projector_type          = "mlp"        # "mlp" (Linear-SiLU-Linear-SiLU-Linear, REPA) | "linear"
+projector_hidden_dim    = 2048

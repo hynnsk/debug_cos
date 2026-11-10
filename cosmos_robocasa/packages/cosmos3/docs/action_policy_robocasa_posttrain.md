@@ -38,6 +38,9 @@ every Reptile meta-training embodiment and of LIBERO, so the meta heads keep the
 | stats | `cosmos_framework/data/generator/action/normalizer_stats/robocasa_cosmos_policy_frame_wise_relative_rot6d.json` (blocks `global` / `global_raw` / `state`) |
 | tests | `cosmos_framework/configs/toml_config/robocasa_toml_test.py`, `.../datasets/robocasa_lerobot_dataset_augment_test.py` |
 
+Setting this up on another machine: `docs/collaborator_setup.md` lists every external piece (checkpoints, data, envs, assets)
+and where it comes from.
+
 ## 1. One-time data setup (login node, internet; CPU only)
 
 ```bash
@@ -96,21 +99,47 @@ EXTRA_TAIL_OVERRIDES="dataloader_train.dataloader.datasets.robocasa.dataset.cfg_
 Budget: `trainer.max_iter` and `scheduler.cycle_lengths[0]` (keep it at ~2/3 of `max_iter`) scale the run; the 2000-step
 DCPs give the 2000 / 4000-iteration points of the same schedule for free only up to 4000 (the 0.06x tail starts there).
 
-## 3. What is NOT here yet: closed-loop evaluation
+## 3. Closed-loop evaluation (ORIGINAL RoboCasa, v0.2 simulator, Cosmos Policy protocol)
 
-The RoboCasa365 eval of cosmos_hs11 (`cosmos_framework/scripts/action_policy_server_robocasa.py`,
-`cosmos_framework/simulation/robocasa/closed_loop_eval.py`) targets the RoboCasa365 1.0 API, its task names and the 15D
-`raw_armfirst` contract. The original benchmark needs:
+One-time simulator setup (login node; pip installs code from an external repo, so run it yourself):
 
-* the simulator at **RoboCasa v0.2** (robosuite 1.5 backend) -- Cosmos Policy uses its fork
-  `github.com/moojink/robocasa-cosmos-policy` (`download_kitchen_assets.py`, `setup_macros.py`; python 3.10, numba/numpy pins) in
-  a separate conda env, like `robocasa-eval` for RoboCasa365;
-* a client that builds the 24 v0.2 envs (`PnPCounterToCab`, ... ; 224x224 renders of `robot0_agentview_left/right` + `robot0_eye_in_hand`,
-  vertically flipped as in the regeneration script), sends `agentview_left | wrist` + the **min/max-normalized** state token and
-  receives 16 **quantile_rot-normalized** actions per query (the server must denormalize with the same stats JSON, as the
-  LIBERO server does), executes `[eef_pos(3), eef_rot(3), gripper(1)] + base zeros + mode -1` as the 12D env action;
-* the protocol: 50 trials/task (Cosmos Policy: seeds 195/196/197, `--deterministic True`, 5 denoising steps), success-rate
-  averaged over the 24 tasks.
+```bash
+bash examples/setup_robocasa_v02_eval.sh      # STEPS="env assets": conda env robocasa-v02-eval + ~/project/robocasa_cosmos_policy + 5 GB assets
+```
 
-The original 128x128 human datasets (`robocasa v0.2`, `--ds_types human_im`, utexas Box links) are not needed: Cosmos Policy's
-re-rendered 224x224 export is what every number in its Table 2 was trained on.
+`env` = python 3.10 + robosuite 1.5.1 + mujoco 3.2.6 (Cosmos Policy's pins) + the Cosmos Policy fork of robocasa v0.2
+(`moojink/robocasa-cosmos-policy` = v0.2 with its numpy assert removed; numpy 1.23.3 / numba 0.56.4 from its setup.py)
++ requests / imageio-ffmpeg / scipy; `assets` = the v0.2 kitchen assets from the utexas Box links + `macros_private.py`.
+The RoboCasa365 env (`robocasa-eval`) cannot be reused: different package, different assets.
+
+Evaluation (1 GPU; ~24 tasks x 50 rollouts):
+
+```bash
+cd ~/project/cosmos_robocasa/packages/cosmos3
+RUN=edge_robocasa_h50_fullft_baseinit            # or edge_robocasa_h50_fullft_reptileinit
+RUN_ROOT=$COSMOS_STORAGE/outputs/cosmos3_action_robocasa/edge_robocasa_h50/$RUN ITER=6000 \
+OUT_DIR=$COSMOS_STORAGE/outputs/eval_robocasa/${RUN}_iter6000_seed195 \
+    sr 1 48 --exclude haring examples/eval_robocasa_closed_loop.sh
+```
+
+The script starts `action_policy_server_robocasa` (cosmos3-pt env, EMA weights, chunk 16 from the run's config.yaml,
+`--action-stats-path` = the bundled stats + `--action-normalization quantile_rot`, so the 10D actions come back
+denormalized; the JSON prompt now carries the training-time view sentence of `camera_set`), waits for `/info`, then runs
+`cosmos_framework/simulation/robocasa_v02/closed_loop_eval.py` per task in the simulator env. Protocol = Cosmos Policy's
+`run_robocasa_eval.py` (`protocol.py` holds the pure-python pieces): PandaMobile + the OSC_POSE controller the demos used
+(`osc_pose_controller_config.json`), object split "B", the 5 official test scenes `((1,1),(2,2),(4,4),(6,9),(7,10))` with
+episodes 0-9 / 10-19 / ... per scene, one fresh env per episode seeded `SEED * episode * 256` (`DETERMINISTIC=1`), 10
+zero-action settling steps, the registry horizon per task (300-1000), first `_check_success()` ends the episode; images =
+the 224x224 cameras flipped upright -> `[agentview_left | eye_in_hand]` 224x448; state token = `[eef_pos, rot6d(eef_quat),
+qpos0 - qpos1]` min/max-normalized with the stats JSON's `state` block (the client normalizes, the server prepends it
+raw); 16 actions executed per query (Cosmos Policy predicts 32 / executes 16), decoded to the 12D env action
+`[pos, rotvec, gripper, 0, 0, 0, 0, -1]`. Per task: `<OUT_DIR>/<task>/results.json` (progressive), `rolloutNN.mp4`,
+`rolloutNN_init.png`, `eval.log`; overall `<OUT_DIR>/summary.json` (`mean_task_success_rate` = the paper's metric).
+Tasks with a complete results.json are skipped (resume). Cosmos Policy reports the mean over `SEED=195 196 197`;
+`NUM_TRIALS=10 TASKS="OpenDrawer CloseDrawer"` is the quick first pass, `NO_VIDEO=1` skips the mp4s.
+
+Noise floor: 50 rollouts/task -> per-task SE ~0.07, 24-task mean SE ~0.015 per seed.
+
+Not exercised on a GPU yet: the server/client pair was validated statically (16 tests: rot6d / state-token / decode round
+trips against the training reader and converter, Cosmos Policy schedule, script wiring); the first real run should start
+with one task and 2-3 rollouts (`NUM_TRIALS=3 TASKS=OpenDrawer`) and a look at `server.log` + `rollout00_init.png`.

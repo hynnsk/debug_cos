@@ -290,7 +290,11 @@ class Block(nn.Module):
     dropout_bdims: tuple[int, ...] = ()
 
     @nn.compact
-    def __call__(self, xs, kv_cache, positions, attn_mask, adarms_cond, deterministic=True):  # noqa: FBT002
+    def __call__(self, carry, kv_cache, positions, attn_mask, adarms_cond, deterministic=True, layer_index=None, capture_layer=None):  # noqa: FBT002
+        # cosmos_hs11 REPA: the scan carry is ``(xs, captured)``. ``captured`` is None (no capture) or a buffer of the first
+        # expert's residual stream that is overwritten exactly once, after the block with 0-based ``layer_index ==
+        # capture_layer`` (one ``[b, t, d]`` carry instead of stacking all ``depth`` hidden states as scan outputs).
+        xs, captured = carry
         xs = sharding.activation_sharding_constraint(xs)
         drop = nn.Dropout(self.dropout, self.dropout_bdims) if self.dropout else lambda x, _: x
 
@@ -330,7 +334,9 @@ class Block(nn.Module):
         xs = [_gated_residual(x, y, gate) for x, y, gate in zip(xs, out, gates, strict=True)]
         xs = sharding.activation_sharding_constraint(xs)
 
-        return xs, kv_cache
+        if captured is not None:
+            captured = jnp.where(layer_index == capture_layer, xs[0], captured)
+        return (xs, captured), kv_cache
 
 
 KVCache: TypeAlias = tuple[at.Float[at.Array, "l b _t _k _h"], at.Float[at.Array, "l b _t _v _h"]]
@@ -372,7 +378,9 @@ class Module(nn.Module):
                 nn.broadcast,
                 nn.broadcast,
                 nn.broadcast,
-            ),  # 0=kv_cache, 1=positions, 2=mask, 3=adarms_cond, 4=deterministic
+                0,
+                nn.broadcast,
+            ),  # 0=kv_cache, 1=positions, 2=mask, 3=adarms_cond, 4=deterministic, 5=layer_index, 6=capture_layer
             length=self.configs[0].depth,
         )(
             configs=self.configs,
@@ -397,18 +405,55 @@ class Module(nn.Module):
         kv_cache: KVCache | None = None,
         deterministic: bool = True,
     ) -> tuple[Sequence[at.Float[at.Array, "b _t _d"] | None], KVCache]:
+        outs, kv_cache, _ = self._run(embedded, positions, mask, adarms_cond, kv_cache=kv_cache, deterministic=deterministic)
+        return outs, kv_cache
+
+    @at.typecheck
+    def forward_capture(
+        self,
+        embedded: Sequence[at.Float[at.Array, "b _t _d"] | None],
+        positions: at.Int[at.Array, "b t"],
+        mask: at.Bool[at.Array, "b t s"],
+        adarms_cond: Sequence[at.Float[at.Array, "b _d"] | None] | None = None,
+        *,
+        capture_layer: int,
+        kv_cache: KVCache | None = None,
+        deterministic: bool = True,
+    ) -> tuple[Sequence[at.Float[at.Array, "b _t _d"] | None], KVCache, at.Float[at.Array, "b _t _d"]]:
+        """``__call__`` that also returns the FIRST expert's residual stream after ``capture_layer`` blocks (1-based, so
+        ``capture_layer == depth`` is the stream before ``final_norm``). cosmos_hs11 REPA: the student feature of the
+        DINOv2 distillation is this hidden state of the image tokens (``Pi0._predict_velocity``)."""
+        outs, kv_cache, captured = self._run(
+            embedded, positions, mask, adarms_cond, kv_cache=kv_cache, deterministic=deterministic, capture_layer=capture_layer
+        )
+        return outs, kv_cache, captured
+
+    def _run(self, embedded, positions, mask, adarms_cond, *, kv_cache, deterministic, capture_layer=None):
         embedded = jax.tree.map(lambda e: e.astype(self.embed_dtype), embedded)
         mask = jnp.asarray(mask)[:, None, :, :]
         if adarms_cond is None:
             adarms_cond = [None] * len(self.configs)
+        depth = self.configs[0].depth
 
-        embedded, kv_cache = self.layers(embedded, kv_cache, positions, mask, adarms_cond, deterministic)
+        captured = None
+        if capture_layer is not None:
+            if embedded[0] is None:
+                raise ValueError("capture_layer needs the first expert's tokens (the prefix) in this forward pass")
+            if not 1 <= capture_layer <= depth:
+                raise ValueError(f"capture_layer must be in [1, {depth}] (blocks applied before the capture), got {capture_layer}")
+            captured = jnp.zeros_like(embedded[0])
+            capture_layer = capture_layer - 1  # 0-based scan index of the block whose output is kept
+        layer_index = jnp.arange(depth, dtype=jnp.int32)
+
+        (embedded, captured), kv_cache = self.layers(
+            (embedded, captured), kv_cache, positions, mask, adarms_cond, deterministic, layer_index, capture_layer
+        )
 
         assert all(e.dtype == jnp.dtype(self.embed_dtype) for e in embedded if e is not None)
 
         return [
             f(e, a)[0] if e is not None else e for f, e, a in zip(self.final_norms, embedded, adarms_cond, strict=True)
-        ], kv_cache
+        ], kv_cache, captured
 
     def init(self, use_adarms: Sequence[bool]):
         """Convenience method for initializing all parameters, necessary due to the quirks of linen."""

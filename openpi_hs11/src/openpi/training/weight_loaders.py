@@ -34,6 +34,11 @@ class NoOpWeightLoader(WeightLoader):
         return params
 
 
+# Parameters a checkpoint may legitimately lack: LoRA adapters and the cosmos_hs11 REPA projector (``Pi0.repa_proj``,
+# only present when [model.repa] is enabled); they keep their fresh initialization.
+MISSING_FROM_CHECKPOINT_REGEX = r".*lora.*|.*repa_proj.*"
+
+
 @dataclasses.dataclass(frozen=True)
 class CheckpointWeightLoader(WeightLoader):
     """Loads an entire set of weights from a checkpoint.
@@ -50,8 +55,8 @@ class CheckpointWeightLoader(WeightLoader):
     def load(self, params: at.Params) -> at.Params:
         # We are loading np.ndarray and relying on the training code to properly convert and shard the params.
         loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
-        # Add all missing LoRA weights.
-        return _merge_params(loaded_params, params, missing_regex=".*lora.*")
+        # Add all missing LoRA / REPA-projector weights.
+        return _merge_params(loaded_params, params, missing_regex=MISSING_FROM_CHECKPOINT_REGEX)
 
 
 @dataclasses.dataclass(frozen=True)

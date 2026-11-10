@@ -107,6 +107,24 @@ _RESOLUTION_TEMPLATE = "This video is of {height}x{width} resolution."
 # trains with JSON-structured prompts (format_prompt_as_json=True).
 _JSON_VIEWPOINT = "concat_view"
 
+# cosmos_robocasa: the training samples carry an ``additional_view_description`` that the JSON prompt formatter appends
+# to the viewpoint sentence (RoboCasaLeRobotDataset.__getitem__). The server must send the same sentence, or the
+# prompt differs from training ("concatenated views" only). Keyed by the reader's ``camera_set``.
+_VIEW_DESCRIPTION_BY_CAMERA_SET: dict[str, str] = {
+    "left_wrist": "The left half is a third-person view of the scene. The right half is from the wrist-mounted camera.",
+    "wrist_lr": (
+        "The top row is from the wrist-mounted camera. "
+        "The bottom row contains two horizontally concatenated third-person views of the scene."
+    ),
+}
+
+
+def view_description_for_camera_set(camera_set: str | None) -> str | None:
+    """The ``additional_view_description`` the reader attaches for ``camera_set`` (None = no extra sentence)."""
+    if camera_set is None:
+        return None
+    return _VIEW_DESCRIPTION_BY_CAMERA_SET.get(str(camera_set))
+
 
 # ---------------------------------------------------------------------------
 # Pre/post processing helpers (copied verbatim from the previous server, with
@@ -513,6 +531,10 @@ class ActionServerArgs(pydantic.BaseModel):
     from the experiment config (default ``minmax`` if unspecified)."""
 
     # ----- prompt format ------------------------------------------------------
+    view_description: str | None = None
+    """cosmos_robocasa: the ``additional_view_description`` sentence appended to the JSON prompt's viewpoint caption,
+    exactly as the training reader does for its ``camera_set`` (left_wrist / wrist_lr). ``None`` derives it from the
+    experiment config's ``camera_set``; pass ``""`` to send none (the pre-fix behaviour)."""
     format_prompt_as_json: bool | None = None
     """Serve prompts as structured JSON (matching training ``format_prompt_as_json``).
     ``None`` reads the flag from the experiment config; set explicitly to override when
@@ -716,6 +738,14 @@ class ActionModelService:
         self._prompt_json_formatter = (
             ActionPromptJsonFormatter(caption_key="ai_caption") if self.format_prompt_as_json else None
         )
+        # cosmos_robocasa: training prompts carry the camera-layout sentence of the reader's camera_set.
+        if args.view_description is None:
+            self.view_description = view_description_for_camera_set(
+                _extract_str_from_config(self.experiment_config, "camera_set")
+            )
+        else:
+            self.view_description = args.view_description or None
+        log.info(f"[action-server] additional_view_description={self.view_description!r}")
         log.info(
             f"[action-server] prompt augmentation: "
             f"append_duration_fps={self.append_duration_fps}, append_resolution_info={self.append_resolution_info}, "
@@ -895,6 +925,8 @@ class ActionModelService:
             "raw_action_dim_source": self.raw_action_dim_source,
             "requires_state": self.requires_state,
             "action_stats_path": str(self.cfg.action_stats_path) if self.cfg.action_stats_path else None,
+            "action_normalization": self.action_normalization,
+            "view_description": self.view_description,
         }
 
     # ------------------------------------------------------------------
@@ -926,6 +958,8 @@ class ActionModelService:
             "action": torch.zeros((self.cfg.action_chunk_size, self.cfg.max_action_dim), dtype=torch.float32),
             "idle_frames": torch.tensor(0, dtype=torch.long),
         }
+        if self.view_description:
+            data_dict["additional_view_description"] = self.view_description  # as RoboCasaLeRobotDataset.__getitem__
         formatted = self._prompt_json_formatter(data_dict)["ai_caption"]
         return json.dumps(formatted) if isinstance(formatted, dict) else str(formatted)
 

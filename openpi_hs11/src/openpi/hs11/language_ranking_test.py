@@ -91,8 +91,8 @@ def _closed_form(model, obs, actions, rng, cfg: pi0_config.LanguageRankingConfig
     time = jax.random.beta(time_rng, 1.5, 1, actions.shape[:-2]) * 0.999 + 0.001
     x_t = time[..., None, None] * noise + (1 - time[..., None, None]) * actions
     u_t = noise - actions
-    v_pos = model._predict_velocity(observation, x_t, time)  # noqa: SLF001
-    v_neg = model._predict_velocity(  # noqa: SLF001
+    v_pos, _ = model._predict_velocity(observation, x_t, time)  # noqa: SLF001
+    v_neg, _ = model._predict_velocity(  # noqa: SLF001
         observation.replace(tokenized_prompt=obs.tokenized_negative_prompt, tokenized_prompt_mask=obs.tokenized_negative_prompt_mask),
         x_t,
         time,
