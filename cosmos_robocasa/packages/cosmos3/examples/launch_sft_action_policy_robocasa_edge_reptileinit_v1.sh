@@ -20,7 +20,7 @@
 
 : "${COSMOS_STORAGE:=$HOME/project/cosmos_storage}"
 export COSMOS_STORAGE
-TOML_FILE="${TOML_FILE:-examples/toml/sft_config/action_policy_robocasa_edge_reptileinit.toml}"
+TOML_FILE="${TOML_FILE:-examples/toml/sft_config/action_policy_robocasa_edge_reptileinit_v1.toml}"
 export ROBOCASA_ROOT="${ROBOCASA_ROOT:-$COSMOS_STORAGE/data/robocasa_cosmos_policy_lerobot_v3}"
 export REPTILE_CKPT_PATH="${REPTILE_CKPT_PATH:-}"
 export META_ACTION_INIT_PATH="${META_ACTION_INIT_PATH:-}"

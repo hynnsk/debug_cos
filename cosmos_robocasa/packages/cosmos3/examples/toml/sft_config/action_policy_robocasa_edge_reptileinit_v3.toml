@@ -22,7 +22,7 @@ task         = "vfm"
 experiment   = "action_policy_robocasa_edge"
 project      = "cosmos3_action_robocasa"
 group        = "edge_robocasa_h50"
-name         = "edge_robocasa_h50_fullft_reptileinit"
+name         = "edge_robocasa_h50_fullft_reptileinit_v3"
 wandb_mode   = "offline"
 
 [model]
@@ -53,9 +53,9 @@ eps          = 1.0e-08
 weight_decay = 0.1
 
 [optimizer.lr_multipliers]
-action2llm            = 1.0   # 5x in the fresh-head baseline; heads are meta-initialized here -> 1x
-llm2action            = 1.0
-action_modality_embed = 1.0
+action2llm            = 5.0   # 5x in the fresh-head baseline; heads are meta-initialized here -> 1x
+llm2action            = 5.0
+action_modality_embed = 5.0
 
 [scheduler]
 # Cycle 1: linear warmup (300) then linear decay 1.0 -> 0.3 at iteration 4000; cycle 2: constant 0.06 (lr 6e-6) to the end.

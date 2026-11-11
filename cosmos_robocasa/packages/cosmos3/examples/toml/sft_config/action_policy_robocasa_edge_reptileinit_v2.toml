@@ -1,0 +1,89 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: OpenMDW-1.1
+
+# cosmos_robocasa -- REPTILE INIT -> FULL fine-tune on the ORIGINAL RoboCasa benchmark (24 atomic tasks x ~50 human demos
+# per task, the Cosmos Policy "human-50" setting), warm-started from a full-mode Reptile checkpoint instead of the
+# mid-trained Cosmos3-Edge:
+#   [checkpoint].load_path             = REPTILE_CKPT_PATH  (<reptile job>/checkpoints/iter_XXXXXXXXX -- the dir holding model/)
+#                                        -> moe_gen, time_embedder, vae2llm, llm2vae, k_norm_und_for_gen come from theta
+#   [checkpoint].meta_action_init_path = META_ACTION_INIT_PATH (<reptile job>/meta_action_init_iter_XXXXXX.pt)
+#                                        -> the meta action heads are copied into the RoboCasa domain row (30); the 10D
+#                                           [pos, rot6d, gripper] contract keeps their column semantics
+# Same recipe as action_policy_robocasa_edge_baseinit.toml (Cosmos Policy's RoboCasa configuration on Cosmos3-Edge: see that
+# file's header and the experiment docstring); the ONLY differences are the init and the action-head LR multiplier
+# (5x fresh-head boost -> 1x, the heads are meta-initialized).
+# Meta-training: examples/launch_reptile_meta_edge_v4.sh (action_reptile_meta_edge_v4.toml) -- the existing edge_reptile_v4
+# checkpoint (iter 1000) is reusable as is, meta-training never sees RoboCasa.
+# Env: ROBOCASA_ROOT (<...>/robocasa_cosmos_policy_lerobot_v3), REPTILE_CKPT_PATH, META_ACTION_INIT_PATH, WAN_VAE_PATH,
+# IMAGINAIRE_OUTPUT_ROOT. See docs/action_policy_robocasa_posttrain.md.
+
+[job]
+task         = "vfm"
+experiment   = "action_policy_robocasa_edge"
+project      = "cosmos3_action_robocasa"
+group        = "edge_robocasa_h50"
+name         = "edge_robocasa_h50_fullft_reptileinit_v2"
+wandb_mode   = "offline"
+
+[model]
+precision = "bfloat16"
+max_num_tokens_after_packing = 45056   # inert at train time (only the cost model reads it): the loader packs by max_samples_per_batch
+lora_enabled = false                   # full mode: theta lives in the DCP weights themselves, no adapters
+
+[model.ema]
+enabled         = true
+rate            = 0.1
+iteration_shift = 0
+
+[model.parallelism]
+data_parallel_shard_degree     = 4      # 4-GPU run: NPROC_PER_NODE=4 sr 4 48 ... (global batch = 128 windows/rank x 4 ranks = 512)
+data_parallel_replicate_degree = 1
+
+[model.activation_checkpointing]
+mode           = "full"
+save_ops_regex = ["fmha"]
+
+[model.tokenizer]
+vae_path = "${oc.env:WAN_VAE_PATH}"
+
+[optimizer]
+lr           = 1.0e-04        # Cosmos Policy (Predict2 default); the LIBERO Edge recipe used 5e-5
+betas        = [0.9, 0.99]
+eps          = 1.0e-08
+weight_decay = 0.1
+
+[optimizer.lr_multipliers]
+action2llm            = 5.0   # 5x in the fresh-head baseline; heads are meta-initialized here -> 1x
+llm2action            = 5.0
+action_modality_embed = 5.0
+
+[scheduler]
+# Cycle 1: linear warmup (300) then linear decay 1.0 -> 0.3 at iteration 4000; cycle 2: constant 0.06 (lr 6e-6) to the end.
+cycle_lengths = [4000, 1000000000]
+warm_up_steps = [300, 0]
+f_start       = [1.0e-06, 0.06]
+f_max         = [1.0, 0.06]
+f_min         = [0.3, 0.06]
+
+[trainer]
+max_iter        = 6000
+logging_iter    = 20
+grad_accum_iter = 1              # global 512 = 128 windows/rank x 4 ranks
+# in-sample loss monitor (~3 demos/task of the TRAINING set, fixed windows); off by default
+run_validation          = false
+run_validation_on_start = false
+validation_iter         = 1000
+max_val_iter            = 8      # x 16 windows/rank x 4 ranks = 512 windows per pass
+
+[dataloader_train]
+max_samples_per_batch  = 128     # per rank, binding (token packing off): x 4 ranks = 512 windows/step
+use_image_augmentation = true    # Cosmos Policy "stronger" aug: crop 90 % area + rotation 5 deg + ColorJitter 0.3/0.4/0.5/0.05
+
+[dataloader_val]
+max_samples_per_batch = 16
+
+[checkpoint]
+load_path = "${oc.env:REPTILE_CKPT_PATH}"   # <reptile job>/checkpoints/iter_XXXXXXXXX (NOT the base Cosmos3-Edge dir)
+save_iter = 2000                             # DCPs at 2000 / 4000 / 6000 (~24 GB each) -> evaluate intermediate budgets too
+# The Reptile DCP has no EMA; the action heads are skipped (fresh) and then overwritten by the meta heads below.
+keys_to_skip_loading = ["net_ema.", "action2llm", "llm2action", "action_modality_embed"]
